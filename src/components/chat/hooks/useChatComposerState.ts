@@ -291,16 +291,123 @@ export function useChatComposerState({
     // older server returns it.
     const commandContent = result.injectAsPrompt ?? result.content ?? '';
 
-    setInput(commandContent);
-    inputValueRef.current = commandContent;
+    if (!commandContent || !selectedProject) {
+      return;
+    }
 
-    // Defer submit to next tick so the command text is reflected in UI before dispatching.
-    setTimeout(() => {
-      if (handleSubmitRef.current) {
-        handleSubmitRef.current(createFakeSubmitEvent());
+    // The slash form (`/cmd args`) must NOT round-trip through `handleSubmit`:
+    // `handleSubmit` intercepts any input starting with `/` and re-routes it
+    // through `executeCommand`, which would loop forever calling the server
+    // instead of dispatching. Send the chat.send envelope directly, mirroring
+    // the normal submit path (including the session allocation step that
+    // `handleSubmit` performs before its WebSocket send).
+    if (commandContent.startsWith('/')) {
+      const resolvedProjectPath = selectedProject.fullPath || selectedProject.path || '';
+      let targetSessionId = selectedSession?.id || currentSessionId || null;
+      if (!targetSessionId) {
+        try {
+          const response = await authenticatedFetch('/api/providers/sessions', {
+            method: 'POST',
+            body: JSON.stringify({
+              provider,
+              projectPath: resolvedProjectPath,
+            }),
+          });
+          if (!response.ok) {
+            throw new Error(`Failed to create session (${response.status})`);
+          }
+          const body = await response.json();
+          targetSessionId = body?.data?.sessionId || null;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          console.error('Session creation failed:', error);
+          addMessage({
+            type: 'error',
+            content: `Failed to start a new session: ${message}`,
+            timestamp: Date.now(),
+          });
+          return;
+        }
+
+        if (!targetSessionId) {
+          addMessage({
+            type: 'error',
+            content: 'Failed to start a new session: no session id returned.',
+            timestamp: Date.now(),
+          });
+          return;
+        }
+
+        onSessionEstablished?.(targetSessionId, {
+          provider,
+          project: selectedProject,
+          summary: null,
+        });
       }
-    }, 0);
-  }, []);
+
+      sendMessage({
+        type: 'chat.send',
+        sessionId: targetSessionId,
+        content: commandContent,
+        options: {
+          model: provider === 'cursor'
+            ? cursorModel
+            : provider === 'codex'
+              ? codexModel
+              : provider === 'gemini'
+                ? geminiModel
+                : provider === 'opencode'
+                  ? opencodeModel
+                  : claudeModel,
+          permissionMode,
+          toolsSettings: { allowedTools: [], disallowedTools: [], skipPermissions: false },
+          skipPermissions: false,
+          sessionSummary: null,
+          images: [],
+        },
+      });
+    } else {
+      // Legacy body path: feed it through the composer and submit normally.
+      setInput(commandContent);
+      inputValueRef.current = commandContent;
+      setTimeout(() => {
+        if (handleSubmitRef.current) {
+          handleSubmitRef.current(createFakeSubmitEvent());
+        }
+      }, 0);
+    }
+
+    // Always clear the composer + transient state after dispatch, mirroring
+    // what `handleSubmit` does for a normal send. `resetCommandMenuState` is
+    // omitted intentionally: it is destructured from useSlashCommands further
+    // down the file (after this hook's definition), and referencing it here
+    // would hit a temporal dead zone at render time. The command menu closes
+    // naturally once the input is empty.
+    setInput('');
+    inputValueRef.current = '';
+    setAttachedImages([]);
+    setUploadingImages(new Map());
+    setImageErrors(new Map());
+    setIsTextareaExpanded(false);
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+    }
+    safeLocalStorage.removeItem(`draft_input_${selectedProject.projectId}`);
+  }, [
+    addMessage,
+    claudeModel,
+    codexModel,
+    currentSessionId,
+    cursorModel,
+    geminiModel,
+    onSessionEstablished,
+    opencodeModel,
+    permissionMode,
+    provider,
+    selectedProject,
+    selectedSession,
+    sendMessage,
+  ]);
 
   const executeCommand = useCallback(
     async (command: SlashCommand, rawInput?: string, options?: { preserveInput?: boolean }) => {
