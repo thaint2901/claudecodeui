@@ -345,6 +345,41 @@ export function useChatComposerState({
         });
       }
 
+      // Read the per-provider tools settings so slash commands honor the
+      // user's allow/deny lists and the skip-permissions toggle — same
+      // logic as the normal handleSubmit path. The key shape mirrors
+      // getToolsSettings() defined inside handleSubmit below.
+      const settingsKey =
+        provider === 'cursor'
+          ? 'cursor-tools-settings'
+          : provider === 'codex'
+            ? 'codex-settings'
+            : provider === 'gemini'
+              ? 'gemini-settings'
+              : provider === 'opencode'
+                ? 'opencode-settings'
+                : 'claude-settings';
+      let toolsSettings: { allowedTools: unknown[]; disallowedTools: unknown[]; skipPermissions: boolean } = {
+        allowedTools: [],
+        disallowedTools: [],
+        skipPermissions: false,
+      };
+      try {
+        const saved = safeLocalStorage.getItem(settingsKey);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed && typeof parsed === 'object') {
+            toolsSettings = {
+              allowedTools: Array.isArray(parsed.allowedTools) ? parsed.allowedTools : [],
+              disallowedTools: Array.isArray(parsed.disallowedTools) ? parsed.disallowedTools : [],
+              skipPermissions: Boolean(parsed.skipPermissions),
+            };
+          }
+        }
+      } catch (error) {
+        console.error('Error loading tools settings for command dispatch:', error);
+      }
+
       sendMessage({
         type: 'chat.send',
         sessionId: targetSessionId,
@@ -360,8 +395,8 @@ export function useChatComposerState({
                   ? opencodeModel
                   : claudeModel,
           permissionMode,
-          toolsSettings: { allowedTools: [], disallowedTools: [], skipPermissions: false },
-          skipPermissions: false,
+          toolsSettings,
+          skipPermissions: toolsSettings.skipPermissions,
           sessionSummary: null,
           images: [],
         },
