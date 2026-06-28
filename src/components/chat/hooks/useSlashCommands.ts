@@ -186,6 +186,9 @@ export function useSlashCommands({
           },
           body: JSON.stringify({
             projectPath: workspacePath || selectedProject.path,
+            // Surface only the commands the active runtime can dispatch:
+            // Claude reads .claude/commands/, OpenCode reads .opencode/commands/.
+            provider,
           }),
         });
 

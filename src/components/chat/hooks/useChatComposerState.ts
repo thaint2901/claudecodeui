@@ -71,7 +71,12 @@ interface CommandExecutionResult {
   type: 'builtin' | 'custom';
   action?: string;
   data?: any;
+  // Legacy field: the expanded command body. Kept for back-compat with any
+  // older server that still parses the .md file. New servers return
+  // `injectAsPrompt` (the slash form) instead, and the active session's
+  // runtime dispatcher reads the file itself.
   content?: string;
+  injectAsPrompt?: string;
   hasBashCommands?: boolean;
   hasFileIncludes?: boolean;
 }
@@ -279,23 +284,13 @@ export function useChatComposerState({
   }, []);
 
   const handleCustomCommand = useCallback(async (result: CommandExecutionResult) => {
-    const { content, hasBashCommands } = result;
+    // New servers return `injectAsPrompt` (the slash form `/cmd args`) and let
+    // the active session's runtime dispatcher read the .md file itself — so
+    // cloudcli never parses the body and never strips frontmatter like
+    // `allowed-tools`/`model`. Fall back to the legacy `content` body only if an
+    // older server returns it.
+    const commandContent = result.injectAsPrompt ?? result.content ?? '';
 
-    if (hasBashCommands) {
-      const confirmed = window.confirm(
-        'This command contains bash commands that will be executed. Do you want to proceed?',
-      );
-      if (!confirmed) {
-        addMessage({
-          type: 'assistant',
-          content: 'Command execution cancelled',
-          timestamp: Date.now(),
-        });
-        return;
-      }
-    }
-
-    const commandContent = content || '';
     setInput(commandContent);
     inputValueRef.current = commandContent;
 
@@ -305,7 +300,7 @@ export function useChatComposerState({
         handleSubmitRef.current(createFakeSubmitEvent());
       }
     }, 0);
-  }, [addMessage]);
+  }, []);
 
   const executeCommand = useCallback(
     async (command: SlashCommand, rawInput?: string, options?: { preserveInput?: boolean }) => {

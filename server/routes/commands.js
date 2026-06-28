@@ -1,11 +1,14 @@
 import { promises as fs } from "fs";
-import os from "os";
 import path from "path";
 
 import express from "express";
 
 import { providerModelsService } from "../modules/providers/services/provider-models.service.js";
 import { parseFrontMatter } from "../shared/frontmatter.js";
+import {
+  providerCommandDirs,
+  stripFrontMatter,
+} from "../utils/command-paths.js";
 import { findAppRoot, getModuleDir } from "../utils/runtime-paths.js";
 
 const __dirname = getModuleDir(import.meta.url);
@@ -114,36 +117,53 @@ async function scanCommandsDirectory(dir, baseDir, namespace) {
         );
         commands.push(...subCommands);
       } else if (entry.isFile() && entry.name.endsWith(".md")) {
-        // Parse markdown file for metadata
+        // Parse markdown file for metadata. Frontmatter parsing is best-effort:
+        // a malformed YAML block (e.g. `argument-hint: [x] (y)`) must never drop
+        // the command — it falls back to a heading-derived description and empty
+        // metadata so the runtime's own dispatcher can still read the file.
+        let frontmatter = {};
+        let commandContent = "";
         try {
           const content = await fs.readFile(fullPath, "utf8");
-          const { data: frontmatter, content: commandContent } =
-            parseFrontMatter(content);
-
-          // Calculate relative path from baseDir for command name
-          const relativePath = path.relative(baseDir, fullPath);
-          // Remove .md extension and convert to command name
-          const commandName =
-            "/" + relativePath.replace(/\.md$/, "").replace(/\\/g, "/");
-
-          // Extract description from frontmatter or first line of content
-          let description = frontmatter.description || "";
-          if (!description) {
-            const firstLine = commandContent.trim().split("\n")[0];
-            description = firstLine.replace(/^#+\s*/, "").trim();
-          }
-
-          commands.push({
-            name: commandName,
-            path: fullPath,
-            relativePath,
-            description,
-            namespace,
-            metadata: frontmatter,
-          });
+          const parsed = parseFrontMatter(content);
+          frontmatter = parsed.data || {};
+          commandContent = parsed.content || "";
         } catch (err) {
-          console.error(`Error parsing command file ${fullPath}:`, err.message);
+          console.warn(
+            `Command file ${fullPath} has malformed frontmatter (${err.message}); ` +
+              `listing with fallback description. The runtime parser handles the body.`,
+          );
+          commandContent = stripFrontMatter(
+            await fs.readFile(fullPath, "utf8"),
+          );
         }
+
+        // Calculate relative path from baseDir for command name
+        const relativePath = path.relative(baseDir, fullPath);
+        // Remove .md extension and convert to command name
+        const commandName =
+          "/" + relativePath.replace(/\.md$/, "").replace(/\\/g, "/");
+
+        // Extract description from frontmatter or first heading line of content
+        let description = frontmatter.description || "";
+        if (!description) {
+          const firstHeading = commandContent
+            .trim()
+            .split("\n")
+            .find((line) => line.trim().startsWith("#"));
+          description = firstHeading
+            ? firstHeading.replace(/^#+\s*/, "").trim()
+            : "";
+        }
+
+        commands.push({
+          name: commandName,
+          path: fullPath,
+          relativePath,
+          description,
+          namespace,
+          metadata: frontmatter,
+        });
       }
     }
   } catch (err) {
@@ -439,26 +459,26 @@ Custom commands can be created in:
  */
 router.post("/list", async (req, res) => {
   try {
-    const { projectPath } = req.body;
+    const { projectPath, provider: providerInput } = req.body;
+    const provider = readModelProvider(providerInput);
     const allCommands = [...builtInCommands];
 
-    // Scan project-level commands (.claude/commands/)
-    if (projectPath) {
-      const projectCommandsDir = path.join(projectPath, ".claude", "commands");
+    const { userDir, projectDir } = providerCommandDirs(provider, projectPath);
+
+    // Scan project-level commands for the active provider's runtime.
+    if (projectDir) {
       const projectCommands = await scanCommandsDirectory(
-        projectCommandsDir,
-        projectCommandsDir,
+        projectDir,
+        projectDir,
         "project",
       );
       allCommands.push(...projectCommands);
     }
 
-    // Scan user-level commands (~/.claude/commands/)
-    const homeDir = os.homedir();
-    const userCommandsDir = path.join(homeDir, ".claude", "commands");
+    // Scan user-level commands for the active provider's runtime.
     const userCommands = await scanCommandsDirectory(
-      userCommandsDir,
-      userCommandsDir,
+      userDir,
+      userDir,
       "user",
     );
     allCommands.push(...userCommands);
@@ -493,7 +513,12 @@ router.post("/list", async (req, res) => {
  */
 router.post("/execute", async (req, res) => {
   try {
-    const { commandName, commandPath, args = [], context = {} } = req.body;
+    const {
+      commandName,
+      commandPath,
+      args = [],
+      context = {},
+    } = req.body;
 
     if (!commandName) {
       return res.status(400).json({
@@ -523,23 +548,31 @@ router.post("/execute", async (req, res) => {
       }
     }
 
-    // Handle custom commands
+    // Handle custom commands.
+    //
+    // cloudcli no longer reads or parses the .md file here. Instead it forwards
+    // the slash form `/command-name args` to the active session's runtime, which
+    // runs its own command dispatcher (the Claude Agent SDK reads
+    // `.claude/commands/`; `opencode run` reads `.opencode/commands/`). The
+    // dispatcher performs `$ARGUMENTS`/`$1..$9` substitution and applies
+    // frontmatter like `allowed-tools` and `model` — cloudcli would otherwise
+    // silently drop that by stripping the body.
     if (!commandPath) {
       return res.status(400).json({
         error: "Command path is required for custom commands",
       });
     }
 
-    // Load command content
-    // Security: validate commandPath is within allowed directories
+    // Security: validate commandPath is within the provider's native command dirs.
+    const provider = readModelProvider(context?.provider);
+    const { userDir, projectDir } = providerCommandDirs(
+      provider,
+      context?.projectPath,
+    );
     {
       const resolvedPath = path.resolve(commandPath);
-      const userBase = path.resolve(
-        path.join(os.homedir(), ".claude", "commands"),
-      );
-      const projectBase = context?.projectPath
-        ? path.resolve(path.join(context.projectPath, ".claude", "commands"))
-        : null;
+      const userBase = path.resolve(userDir);
+      const projectBase = projectDir ? path.resolve(projectDir) : null;
       const isUnder = (base) => {
         const rel = path.relative(base, resolvedPath);
         return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
@@ -547,36 +580,20 @@ router.post("/execute", async (req, res) => {
       if (!(isUnder(userBase) || (projectBase && isUnder(projectBase)))) {
         return res.status(403).json({
           error: "Access denied",
-          message: "Command must be in .claude/commands directory",
+          message: `Command must be in a ${provider} commands directory`,
         });
       }
     }
-    const content = await fs.readFile(commandPath, "utf8");
-    const { data: metadata, content: commandContent } =
-      parseFrontMatter(content);
-    // Basic argument replacement (will be enhanced in command parser utility)
-    let processedContent = commandContent;
 
-    // Replace $ARGUMENTS with all arguments joined
-    const argsString = args.join(" ");
-    processedContent = processedContent.replace(/\$ARGUMENTS/g, argsString);
-
-    // Replace $1, $2, etc. with positional arguments
-    args.forEach((arg, index) => {
-      const placeholder = `$${index + 1}`;
-      processedContent = processedContent.replace(
-        new RegExp(`\\${placeholder}\\b`, "g"),
-        arg,
-      );
-    });
+    const argsString = (Array.isArray(args) ? args : []).join(" ").trim();
+    const injectAsPrompt = argsString
+      ? `${commandName} ${argsString}`
+      : commandName;
 
     res.json({
       type: "custom",
       command: commandName,
-      content: processedContent,
-      metadata,
-      hasFileIncludes: processedContent.includes("@"),
-      hasBashCommands: processedContent.includes("!"),
+      injectAsPrompt,
     });
   } catch (error) {
     if (error.code === "ENOENT") {
@@ -594,4 +611,5 @@ router.post("/execute", async (req, res) => {
   }
 });
 
+export { stripFrontMatter, providerCommandDirs } from "../utils/command-paths.js";
 export default router;
