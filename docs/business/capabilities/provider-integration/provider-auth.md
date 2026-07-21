@@ -2,7 +2,7 @@
 
 ## Description
 
-Manages per-provider authentication status and login flows. Each provider has its own auth method: Claude uses the SDK's login, Cursor uses `cursor-agent login`, Codex uses the SDK, Gemini uses env vars or `~/.gemini/.env`, OpenCode uses its own flow. The UI surfaces the auth status and walks the user through the login if needed.
+Manages per-provider authentication status and login flows. Each provider has its own auth method: Claude uses the SDK's login, Cursor uses `cursor-agent login`, Codex uses the SDK, OpenCode uses its own flow. The UI surfaces the auth status and walks the user through the login if needed.
 
 ## Actors
 

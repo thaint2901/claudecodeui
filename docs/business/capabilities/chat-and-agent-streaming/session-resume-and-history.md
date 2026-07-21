@@ -2,7 +2,7 @@
 
 ## Description
 
-Lets the user reopen any past session and continue from where they left off. The history is loaded from the provider transcript (jsonl for Claude/Codex/Gemini/Cursor; sqlite for OpenCode), normalized into the UI's message format, and the session is resumed on the provider side (e.g. `sdkOptions.resume` for Claude, `--resume` for Cursor).
+Lets the user reopen any past session and continue from where they left off. The history is loaded from the provider transcript (jsonl for Claude/Codex/Cursor; sqlite for OpenCode), normalized into the UI's message format, and the session is resumed on the provider side (e.g. `sdkOptions.resume` for Claude, `--resume` for Cursor).
 
 ## Actors
 
@@ -39,7 +39,6 @@ Lets the user reopen any past session and continue from where they left off. The
 - **Provider resume:**
   - Claude: `sdkOptions.resume` in `server/claude-sdk.js`
   - Cursor: `--resume` in `server/cursor-cli.js`
-  - Gemini: `--resume` with `cliSessionId` in `server/gemini-cli.js`
   - OpenCode: `--session <id>` in `server/opencode-cli.js`
   - Codex: SDK thread resume in `server/openai-codex.js`
 - **Synchronizer:** `server/modules/providers/services/session-synchronizer.service.ts`

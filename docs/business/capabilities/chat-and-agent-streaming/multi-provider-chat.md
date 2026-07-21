@@ -2,7 +2,7 @@
 
 ## Description
 
-Lets a user converse with any of the five supported AI coding CLIs (Claude, Cursor, Codex, Gemini, OpenCode) from a single chat composer. The user picks a provider, picks a model, picks a permission mode, and sends a message — the rest is provider-neutral from the UI's perspective.
+Lets a user converse with any of the four supported AI coding CLIs (Claude, Cursor, Codex, OpenCode) from a single chat composer. The user picks a provider, picks a model, picks a permission mode, and sends a message — the rest is provider-neutral from the UI's perspective.
 
 ## Actors
 
@@ -32,13 +32,14 @@ Lets a user converse with any of the five supported AI coding CLIs (Claude, Curs
 - Streamed events rendered in the chat pane.
 - A terminal `complete` (or `error`) event.
 - An optional web-push notification on completion.
+- A queued-message card (`QueuedMessageCard`) appears if the user types while the assistant is responding, allowing the user to edit/delete the draft and send it after the current response completes.
 
 ## Technical Mapping
 
 - **Frontend entry:** `src/components/chat/view/ChatInterface.tsx`, `subcomponents/ChatComposer.tsx`, `subcomponents/ChatMessagesPane.tsx`
 - **Frontend context:** `src/contexts/WebSocketContext.tsx`
 - **Backend dispatch:** `server/modules/websocket/services/chat-websocket.service.ts`
-- **Provider runtimes:** `server/claude-sdk.js`, `server/cursor-cli.js`, `server/openai-codex.js`, `server/gemini-cli.js`, `server/opencode-cli.js`
+- **Provider runtimes:** `server/claude-sdk.js`, `server/cursor-cli.js`, `server/openai-codex.js`, `server/opencode-cli.js`
 - **Provider selection UI:** `src/components/llm-logo-provider/SessionProviderLogo.tsx`
 
 ## Dependencies

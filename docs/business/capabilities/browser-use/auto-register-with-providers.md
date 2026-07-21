@@ -2,7 +2,7 @@
 
 ## Description
 
-When the user toggles **Browser agent tools** on, the `cloudcli-browser` stdio MCP server is registered across all providers (Claude, Cursor, Codex, Gemini, OpenCode). When the user toggles it off, the server is removed. Legacy names (`cloudcli-browser-use`) are scrubbed on unregister.
+When the user toggles **Browser agent tools** on, the `cloudcli-browser` stdio MCP server is registered across all providers (Claude, Cursor, Codex, OpenCode). When the user toggles it off, the server is removed. Legacy names (`cloudcli-browser-use`) are scrubbed on unregister.
 
 ## Actors
 

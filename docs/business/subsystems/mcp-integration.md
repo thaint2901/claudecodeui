@@ -13,7 +13,6 @@ It also powers the **Browser-Use** subsystem: when the user toggles browser agen
 | Claude | `~/.claude.json` (global + per-project) |
 | Codex | `~/.codex/config.toml` |
 | Cursor | `~/.cursor/mcp.json` |
-| Gemini | `~/.gemini.json` |
 | OpenCode | `opencode.json` |
 
 ## Key Capabilities
@@ -61,9 +60,10 @@ It also powers the **Browser-Use** subsystem: when the user toggles browser agen
 - **Base class:** `server/modules/providers/shared/mcp/mcp.provider.ts`
 - **Per-provider adapters:** `server/modules/providers/list/<provider>/<provider>-mcp.provider.ts`
 - **REST surface:** exposed via `server/modules/providers/provider.routes.ts`
-- **Frontend view:** `src/components/mcp/view/McpServers.tsx`
+- **Frontend view:** `src/components/mcp/view/McpServers.tsx` (uses `ActionMenu` for server action controls with keyboard focus management)
 - **Frontend form:** `src/components/mcp/view/modals/McpServerFormModal.tsx`
 - **Frontend hooks:** `src/components/mcp/hooks/useMcpServers.ts`, `useMcpServerForm.ts`
+- **Action menu component:** `src/shared/view/ui/ActionMenu.tsx` (reusable dropdown with first-item focus on open, Escape/selection focus restoration)
 - **Auto-registration:** `server/modules/browser-use/browser-use.service.ts`
 
 ## Capability Documents

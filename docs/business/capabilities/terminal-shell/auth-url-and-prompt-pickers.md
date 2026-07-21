@@ -2,7 +2,7 @@
 
 ## Description
 
-Detects `http(s)://` URLs and interactive CLI prompts (Claude login, Gemini, etc.) in the terminal buffer and surfaces one-click affordances: **Open in browser**, **Copy URL**, and **Pick option**. Eliminates the need to manually copy URLs or type answers into a CLI prompt the agent is waiting on.
+Detects `http(s)://` URLs and interactive CLI prompts (Claude login, etc.) in the terminal buffer and surfaces one-click affordances: **Open in browser**, **Copy URL**, and **Pick option**. Eliminates the need to manually copy URLs or type answers into a CLI prompt the agent is waiting on.
 
 ## Actors
 

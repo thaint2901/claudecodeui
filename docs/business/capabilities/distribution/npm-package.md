@@ -2,7 +2,7 @@
 
 ## Description
 
-Primary distribution channel. CloudCLI UI is published to npm as `@cloudcli-ai/cloudcli` (v1.34.0). The package installs the full Express+React app, runs `prepublishOnly` to build, and ships a `cloudcli` binary that runs the server from `dist-server/`.
+Primary distribution channel. CloudCLI UI is published to npm as `@cloudcli-ai/cloudcli` (v1.36.3). The package installs the full Express+React app, runs `prepublishOnly` to build, and ships a `cloudcli` binary that runs the server from `dist-server/`.
 
 ## Actors
 

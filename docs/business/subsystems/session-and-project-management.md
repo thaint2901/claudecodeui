@@ -4,7 +4,7 @@
 
 The **Session & Project Management** subsystem owns the lifecycle of the two primary user-facing entities: **projects** (the local directories the user has registered) and **sessions** (the chat conversations within a project, across all providers). It auto-discovers existing provider transcripts, persists them, and serves the sidebar payload that drives navigation.
 
-Every chat the user has ever had — across Claude, Cursor, Codex, Gemini, and OpenCode — flows through this subsystem.
+Every chat the user has ever had — across Claude, Cursor, Codex, and OpenCode — flows through this subsystem.
 
 ## Key Capabilities
 
@@ -34,7 +34,7 @@ The `sessions` table stores two ids:
 - `session_id` — the stable app-facing id used by the frontend (assigned by the app on first chat)
 - `provider_session_id` — the native id used by the CLI/SDK transcript (filled in once the provider announces it)
 
-The `chat-session-writer.service.ts` remaps the provider-native id to the stable app id so the UI never sees two different ids for the same session. The synchronizer reads the provider's on-disk artifact (jsonl for Claude/Codex/Gemini/Cursor, sqlite for OpenCode) and populates `provider_session_id`.
+The `chat-session-writer.service.ts` remaps the provider-native id to the stable app id so the UI never sees two different ids for the same session. The synchronizer reads the provider's on-disk artifact (jsonl for Claude/Cursor/Codex, sqlite for OpenCode) and populates `provider_session_id`.
 
 ## Stakeholders
 

@@ -17,7 +17,7 @@ The current state is a **migration-in-progress**: the new `server/modules/databa
 | **Per-table repositories** | One module per table: users, projects, sessions, api-keys, credentials, github-tokens, notification-preferences, push-subscriptions, vapid-keys, app-config, scan-state |
 | **Path resolution** | `~/.cloudcli/auth.db` default; `--database-path` CLI flag and `DATABASE_PATH` env override; one-time migration from legacy `server/database/auth.db` |
 | **Shared utils** | `AppError` class, `asyncHandler`, `createApiSuccessResponse`, `validateWorkspacePath`, `normalizeProjectPath` |
-| **Legacy compatibility** | `sessionManager.js` (Gemini in-memory + JSON) and `runtime-paths.js` are whitelisted during the migration window |
+| **Legacy compatibility** | Deprecated; legacy provider-specific files removed |
 
 ## Tables
 

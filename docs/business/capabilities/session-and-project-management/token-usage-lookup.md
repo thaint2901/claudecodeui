@@ -2,7 +2,7 @@
 
 ## Description
 
-Parses the provider transcript (jsonl for Claude/Codex/Gemini/Cursor; sqlite for OpenCode) to extract per-session token usage. Backfills the live usage meter when the user opens a past session.
+Parses the provider transcript (jsonl for Claude/Cursor/Codex; sqlite for OpenCode) to extract per-session token usage. Backfills the live usage meter when the user opens a past session.
 
 ## Actors
 
@@ -32,7 +32,7 @@ Parses the provider transcript (jsonl for Claude/Codex/Gemini/Cursor; sqlite for
 
 - **Backend endpoint:** `server/index.js` (`/api/sessions/:id/token-usage`)
 - **Backend providers:**
-  - Claude/Codex/Gemini/Cursor: jsonl parser
+  - Claude/Cursor/Codex: jsonl parser
   - OpenCode: sqlite reader (`getOpenCodeDatabasePath`)
 
 ## Dependencies

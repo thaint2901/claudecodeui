@@ -15,9 +15,9 @@ The same Vite + Express + ws bundle powers all four targets. Distribution is the
 
 | Channel | Package | Audience | Status |
 |---------|---------|----------|--------|
-| **npm** | `@cloudcli-ai/cloudcli` (v1.34.0) | Self-hosting developers | Primary |
-| **Docker** | `docker.io/cloudcliai/sandbox:claude-code\|codex\|gemini` | Sandbox / microVM users | Published |
-| **Electron** | `ai.cloudcli.desktop` (`cloudcli://` URL scheme) | macOS desktop users | Wired (source not in fork) |
+| **npm** | `@cloudcli-ai/cloudcli` (v1.36.3) | Self-hosting developers | Primary |
+| **Docker** | `docker.io/cloudcliai/sandbox:claude-code\|codex` | Sandbox / microVM users | Published |
+| **Electron** | `ai.cloudcli.desktop` (`cloudcli://` URL scheme) | macOS/Windows desktop users | Native (dmg/zip/NSIS) |
 | **PWA** | `public/manifest.json` + `public/sw.js` | Mobile / installable web users | Active |
 | **Cloud** | `https://cloudcli.ai` | No-setup users | External (code not in repo) |
 | **Legacy redirect** | `@siteboon/claude-code-ui` | Old package name | Thin shim |
@@ -26,7 +26,7 @@ The same Vite + Express + ws bundle powers all four targets. Distribution is the
 
 | Capability | Description |
 |------------|-------------|
-| **Primary package** | `@cloudcli-ai/cloudcli` (v1.34.0) — installs the full Express+React app |
+| **Primary package** | `@cloudcli-ai/cloudcli` (v1.36.3) — installs the full Express+React app |
 | **`cloudcli` binary** | Runs the server from `dist-server/` |
 | **prepublishOnly** | Runs the build (`build:client` + `build:server`) before publish |
 | **Legacy redirect** | `@siteboon/claude-code-ui` re-exports the new package for old users |
@@ -37,7 +37,7 @@ The same Vite + Express + ws bundle powers all four targets. Distribution is the
 
 | Capability | Description |
 |------------|-------------|
-| **Sandbox templates** | `docker/claude-code/Dockerfile`, `docker/codex/Dockerfile`, `docker/gemini/Dockerfile` |
+| **Sandbox templates** | `docker/claude-code/Dockerfile`, `docker/codex/Dockerfile` |
 | **Shared scripts** | `docker/shared/install-cloudcli.sh` (npm install -g), `start-cloudcli.sh` (autostart on shell open) |
 | **Base image** | `FROM docker/sandbox-templates:<agent>` (official Docker Sandbox base) |
 | **Auto-start** | `.bashrc` sources `/home/agent/.cloudcli-start.sh` so the server comes up on shell open |
@@ -51,9 +51,9 @@ The same Vite + Express + ws bundle powers all four targets. Distribution is the
 | **App ID** | `ai.cloudcli.desktop` |
 | **Product name** | CloudCLI |
 | **URL scheme** | `cloudcli://` |
-| **macOS targets** | dmg + zip via `electron-builder` |
-| **npm scripts** | `desktop`, `desktop:dev`, `desktop:pack`, `desktop:dist:mac` |
-| **Status** | Source directory not in this fork; kept for the published distribution |
+| **Platforms** | macOS (dmg + zip) and Windows (NSIS installer) via `electron-builder` |
+| **npm scripts** | `desktop`, `desktop:dev`, `desktop:stage`, `desktop:pack`, `desktop:dist:mac`, `desktop:dist:win`, `desktop:icon:mac` |
+| **Status** | Fully implemented with embedded local server and cloud auth |
 
 ## Key Capabilities (PWA)
 

@@ -1,6 +1,6 @@
 # CloudCLI UI — Business Documentation
 
-This directory contains the business-level documentation for CloudCLI UI (published as `@cloudcli-ai/cloudcli`), a web/desktop UI for **Claude Code**, **Cursor CLI**, **Codex**, **Gemini CLI**, and **OpenCode**. It complements the technical documentation in `docs/` and the developer guidance in `CLAUDE.md`.
+This directory contains the business-level documentation for CloudCLI UI (published as `@cloudcli-ai/cloudcli`), a web/desktop UI for **Claude Code**, **Cursor CLI**, **Codex**, and **OpenCode**. It complements the technical documentation in `docs/` and the developer guidance in `CLAUDE.md`.
 
 ## What This Documentation Is
 
@@ -31,7 +31,7 @@ This directory contains the business-level documentation for CloudCLI UI (publis
 |---|-----------|---------|-----|
 | 1 | Chat & Agent Streaming | Real-time chat UI + CLI provider streaming | [subsystems/chat-and-agent-streaming.md](subsystems/chat-and-agent-streaming.md) |
 | 2 | Terminal/Shell | PTY-based terminal emulation | [subsystems/terminal-shell.md](subsystems/terminal-shell.md) |
-| 3 | Provider Integration | Five CLI providers (Claude, Cursor, Codex, Gemini, OpenCode) | [subsystems/provider-integration.md](subsystems/provider-integration.md) |
+| 3 | Provider Integration | Four CLI providers (Claude, Cursor, Codex, OpenCode) | [subsystems/provider-integration.md](subsystems/provider-integration.md) |
 | 4 | Plugin System | Third-party extensions with frontend tabs + optional backend | [subsystems/plugin-system.md](subsystems/plugin-system.md) |
 | 5 | MCP Integration | Model Context Protocol tool access | [subsystems/mcp-integration.md](subsystems/mcp-integration.md) |
 | 6 | Browser-Use | Automated browser control via MCP | [subsystems/browser-use.md](subsystems/browser-use.md) |

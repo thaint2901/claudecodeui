@@ -2,7 +2,7 @@
 
 ## Description
 
-Watches each provider's on-disk artifact root (jsonl files for Claude/Codex/Gemini/Cursor; sqlite for OpenCode) and auto-inserts / updates the corresponding `sessions` rows. The watcher uses chokidar with a debounced `session_upserted` broadcast. A `scan_state` watermark tracks the last scan time to skip work.
+Watches each provider's on-disk artifact root (jsonl files for Claude/Cursor/Codex; sqlite for OpenCode) and auto-inserts / updates the corresponding `sessions` rows. The watcher uses chokidar with a debounced `session_upserted` broadcast. A `scan_state` watermark tracks the last scan time to skip work.
 
 ## Actors
 

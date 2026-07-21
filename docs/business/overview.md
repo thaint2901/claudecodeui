@@ -2,13 +2,12 @@
 
 ## What It Is
 
-CloudCLI UI is a **single web/desktop application** that gives developers a unified, streaming, session-based interface for five different AI coding CLIs:
+CloudCLI UI is a **single web/desktop application** that gives developers a unified, streaming, session-based interface for four different AI coding CLIs:
 
 1. **Claude Code** (Anthropic) — via the official `@anthropic-ai/claude-agent-sdk`
 2. **Cursor CLI** (`cursor-agent`) — via PTY
 3. **Codex** (OpenAI) — via the `@openai/codex-sdk`
-4. **Gemini CLI** (Google) — via PTY
-5. **OpenCode** (`opencode`) — via PTY
+4. **OpenCode** (`opencode`) — via PTY
 
 It is an open-source fork of [`siteboon/claudecodeui`](https://github.com/siteboon/claudecodeui), published to npm as `@cloudcli-ai/cloudcli` and also available as Docker sandbox images and an Electron desktop app.
 
@@ -42,9 +41,9 @@ The app wraps each CLI in a consistent, opinionated UI that adds what the raw CL
 
 CloudCLI UI is an **open-source project** distributed free under the project license. The product surface is:
 
-- **Self-hosted npm package** — `npm install -g @cloudcli-ai/cloudcli` (v1.34.0)
+- **Self-hosted npm package** — `npm install -g @cloudcli-ai/cloudcli` (v1.36.3)
 - **Managed cloud** — `https://cloudcli.ai` (no setup required, the only non-self-hosted route)
-- **Docker Sandbox images** — `docker.io/cloudcliai/sandbox:claude-code`, `codex`, `gemini`
+- **Docker Sandbox images** — `docker.io/cloudcliai/sandbox:claude-code`, `codex`
 - **Plugin marketplace** — official plugins (project-stats, web-terminal) and community plugins
 
 There is no per-seat license fee for the self-hosted distribution. The commercial surface is the hosted cloud offering, Docker sandbox convenience packaging, and the plugin ecosystem.
@@ -55,7 +54,7 @@ There is no per-seat license fee for the self-hosted distribution. The commercia
 |---|-----------|------------------|
 | 1 | **Chat & Agent Streaming** | Real-time chat UI + CLI provider streaming via a single WebSocket hub |
 | 2 | **Terminal/Shell** | PTY-backed terminal per project, streamed over WebSocket |
-| 3 | **Provider Integration** | Unified registry and runtime for all five CLI providers |
+| 3 | **Provider Integration** | Unified registry and runtime for all four CLI providers |
 | 4 | **Plugin System** | Discover, install, enable, and lifecycle-manage third-party extensions |
 | 5 | **MCP Integration** | Configure Model Context Protocol servers per provider and scope |
 | 6 | **Browser-Use** | Playwright-driven browser control exposed to the agent via MCP |
@@ -70,7 +69,7 @@ There is no per-seat license fee for the self-hosted distribution. The commercia
 
 1. The user types a message in `ChatInterface` (`src/components/chat/view/`).
 2. The frontend sends it over a shared WebSocket to `/ws` (`server/modules/websocket/`).
-3. The WebSocket hub dispatches to the matching provider's spawn function (e.g. `queryClaudeSDK`, `spawnCursor`, `queryCodex`, `spawnGemini`, `spawnOpenCode`).
+3. The WebSocket hub dispatches to the matching provider's spawn function (e.g. `queryClaudeSDK`, `spawnCursor`, `queryCodex`, `spawnOpenCode`).
 4. The provider streams structured events back: assistant text, tool calls, permission requests, token usage, session id.
 5. The hub assigns sequence numbers, remaps the provider-native session id to a stable app id, and broadcasts to all connected clients for that session.
 6. The frontend renders messages, tool output, diffs, and permission prompts.
@@ -101,8 +100,8 @@ There is no per-seat license fee for the self-hosted distribution. The commercia
 
 | Channel | Status | Notes |
 |---------|--------|-------|
-| **npm** (`@cloudcli-ai/cloudcli`) | Primary | v1.34.0; `cloudcli` bin runs the server from `dist-server/` |
-| **Docker Sandbox** | Published | `docker.io/cloudcliai/sandbox:claude-code\|codex\|gemini` |
+| **npm** (`@cloudcli-ai/cloudcli`) | Primary | v1.36.3; `cloudcli` bin runs the server from `dist-server/` |
+| **Docker Sandbox** | Published | `docker.io/cloudcliai/sandbox:claude-code\|codex` |
 | **Electron desktop** | Wired | `appId: ai.cloudcli.desktop`; source not in this fork |
 | **PWA** | Active | Installable; service worker + manifest + web-push |
 | **Cloud (cloudcli.ai)** | External | Managed offering; code not in this repo |

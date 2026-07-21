@@ -36,7 +36,7 @@ Central entry point for every notification event. The chat run lifecycle calls `
 
 - **Backend service:** `server/services/notification-orchestrator.js`
 - **Backend repo:** `server/modules/database/repositories/notification-preferences.ts`
-- **Callers:** Provider runtimes (Claude, Cursor, Codex, Gemini, OpenCode) and `/api/agent`.
+- **Callers:** Provider runtimes (Claude, Cursor, Codex, OpenCode) and `/api/agent`.
 
 ## Dependencies
 

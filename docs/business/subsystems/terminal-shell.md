@@ -14,7 +14,7 @@ It also provides a **standalone shell page** that can be opened outside the norm
 | **ANSI streaming** | Stream the terminal's raw output (including ANSI escape codes) over WebSocket. |
 | **Connect / disconnect** | Open and close the PTY connection on demand; restart on demand. |
 | **Auth URL detection** | Detect `http(s)://` URLs in the buffer and surface a one-click "open in browser" affordance. |
-| **CLI prompt pickers** | Detect interactive prompt options (Claude login, Gemini, etc.) and let the user click to choose. |
+| **CLI prompt pickers** | Detect interactive prompt options (Claude login, Cursor auth, etc.) and let the user click to choose. |
 | **Terminal keyboard shortcuts** | Display a help panel for the most useful xterm.js keybindings. |
 | **Resume support** | Reconnect to an existing PTY session on page refresh. |
 | **Standalone shell** | A dedicated, full-window shell view decoupled from the project sidebar. |
@@ -25,7 +25,7 @@ It also provides a **standalone shell page** that can be opened outside the norm
 | Stakeholder | What They Get |
 |-------------|---------------|
 | **End-user developers** | A real terminal in the browser for the same project the agent is working in. |
-| **Provider login flows** | A way to complete the Claude / Cursor / Gemini / OpenCode login without leaving the app. |
+| **Provider login flows** | A way to complete the Claude / Cursor / Codex / OpenCode login without leaving the app. |
 | **Power users** | A full-screen standalone shell for demos and embedded use. |
 | **Agent processes** | The user can watch long-running agent processes and interact with prompts. |
 

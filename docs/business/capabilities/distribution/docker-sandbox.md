@@ -2,7 +2,7 @@
 
 ## Description
 
-Prebuilt Docker images that bundle CloudCLI UI on top of Claude Code, Codex, and Gemini CLI inside a microVM. Each image installs the npm package globally and auto-starts the web UI on shell open via `.bashrc`. Published to `docker.io/cloudcliai/sandbox:*`.
+Prebuilt Docker images that bundle CloudCLI UI on top of Claude Code and Codex CLI inside a microVM. Each image installs the npm package globally and auto-starts the web UI on shell open via `.bashrc`. Published to `docker.io/cloudcliai/sandbox:*`.
 
 ## Actors
 
@@ -30,7 +30,7 @@ Prebuilt Docker images that bundle CloudCLI UI on top of Claude Code, Codex, and
 
 ## Technical Mapping
 
-- **Templates:** `docker/claude-code/Dockerfile`, `docker/codex/Dockerfile`, `docker/gemini/Dockerfile`
+- **Templates:** `docker/claude-code/Dockerfile`, `docker/codex/Dockerfile`
 - **Shared scripts:** `docker/shared/install-cloudcli.sh`, `docker/shared/start-cloudcli.sh`
 - **README:** `docker/README.md`
 

@@ -28,7 +28,7 @@ Tracks per-session token spend and context-window utilization across all provide
 1. The user opens a past session.
 2. The frontend calls `GET /api/sessions/:id/token-usage`.
 3. The endpoint parses the provider transcript:
-   - Claude/Codex/Gemini/Cursor: jsonl
+   - Claude/Codex/Cursor: jsonl
    - OpenCode: `~/.local/share/opencode/opencode.db`
 4. The latest usage is returned and rendered.
 

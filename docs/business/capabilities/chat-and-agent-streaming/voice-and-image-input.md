@@ -46,7 +46,7 @@ Lets the user compose messages with their voice (speech-to-text) and attach imag
 - **Backend voice:** `server/voice-proxy.js`
 - **Backend image handling:**
   - Claude: base64 to temp file in `cwd/.tmp/images` in `server/claude-sdk.js`
-  - Gemini: saves base64 to `cwd/.tmp/images`, appends path to prompt in `server/gemini-cli.js`
+  - Cursor/Codex/OpenCode: provider-specific handling
 
 ## Dependencies
 

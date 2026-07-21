@@ -41,7 +41,7 @@ Each provider's command set is surfaced independently: a Claude session shows co
 |---|---|---|
 | Claude | `~/.claude/commands/` | `<project>/.claude/commands/` |
 | OpenCode | `~/.config/opencode/commands/` | `<project>/.opencode/commands/` |
-| Others (Cursor, Codex, Gemini) | Fall back to Claude's layout | Fall back to Claude's layout |
+| Others (Cursor, Codex) | Fall back to Claude's layout | Fall back to Claude's layout |
 
 These match what each runtime actually reads. OpenCode's compatibility layer inherits `CLAUDE.md` and `~/.claude/skills/` from Claude Code but **not** `.claude/commands/`, so the palette is scoped to the directory each runtime will dispatch from.
 

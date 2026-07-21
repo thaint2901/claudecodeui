@@ -13,7 +13,6 @@ Adding a new provider means implementing one abstract base class and registering
 | **Claude** (`claude`) | SDK | `@anthropic-ai/claude-agent-sdk` (no PTY) | `server/claude-sdk.js` |
 | **Cursor** (`cursor`) | PTY | `cursor-agent` CLI | `server/cursor-cli.js` |
 | **Codex** (`codex`) | SDK | `@openai/codex-sdk` | `server/openai-codex.js` |
-| **Gemini** (`gemini`) | PTY | `gemini` CLI | `server/gemini-cli.js` |
 | **OpenCode** (`opencode`) | PTY | `opencode run` CLI | `server/opencode-cli.js` |
 
 ## Key Capabilities
@@ -22,7 +21,7 @@ Adding a new provider means implementing one abstract base class and registering
 |------------|-------------|
 | **Provider registry** | `listProviders()` / `resolveProvider()` — single source of truth. Unsupported providers return 400. |
 | **Abstract provider** | `AbstractProvider` base class implementing `IProvider` (auth, mcp, models, skills, sessions, sessionSynchronizer). |
-| **Provider runtimes** | Top-level spawn functions wired into the WS hub: `queryClaudeSDK`, `spawnCursor`, `queryCodex`, `spawnGemini`, `spawnOpenCode` (and matching abort functions). |
+| **Provider runtimes** | Top-level spawn functions wired into the WS hub: `queryClaudeSDK`, `spawnCursor`, `queryCodex`, `spawnOpenCode` (and matching abort functions). |
 | **MCP per provider** | `McpProvider` base handles per-scope config file read/write for stdio / http / sse MCP servers. |
 | **Skills per provider** | `SkillsProvider` base handles `SKILL.md` discovery and per-scope configuration. |
 | **Capability matrix** | Exposes permission modes, image support, abort support, and token-usage support to the frontend. |
@@ -69,18 +68,6 @@ Adding a new provider means implementing one abstract base class and registering
 - Cross-writer WebSocket send (SSEStreamWriter / WebSocketWriter / raw ws).
 - Reaper for stale completed sessions (30 min TTL).
 
-### Gemini
-
-- Spawns `gemini` via `sh -c exec` on POSIX (cross-spawn on Windows).
-- Stream-JSON output parsed by `GeminiResponseHandler` with NDJSON buffering.
-- Image attachments (saves base64 to `cwd/.tmp/images`, appends path note to prompt).
-- Loads auth env (`GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`) from `~/.gemini/.env` when process env is missing.
-- MCP config auto-loaded from `~/.gemini.json` when present (`--mcp-config`).
-- Flags: `--skip-trust`, `--yolo` / `--approval-mode` (auto_edit/plan), `--allowed-tools`.
-- Session init event captures `cliSessionId` for `--resume` on later turns.
-- Exit-code mapping (41=auth, 42=invalid input, 44=sandbox, 52=config, 53=turn limit, 127=missing CLI).
-- Idle timeout (120s) with re-arm on stdout activity; SIGTERM then SIGKILL escalation on abort.
-
 ### OpenCode
 
 - Spawns `opencode run --format json --dir <cwd> [--session <id>] [--model <id>] <prompt>`.
@@ -117,7 +104,6 @@ Adding a new provider means implementing one abstract base class and registering
 - **Claude:** `server/modules/providers/list/claude/` + `server/claude-sdk.js`
 - **Cursor:** `server/modules/providers/list/cursor/` + `server/cursor-cli.js`
 - **Codex:** `server/modules/providers/list/codex/` + `server/openai-codex.js`
-- **Gemini:** `server/modules/providers/list/gemini/` + `server/gemini-cli.js`
 - **OpenCode:** `server/modules/providers/list/opencode/` + `server/opencode-cli.js`
 - **Application services:** `server/modules/providers/services/` (sessions, models, mcp, skills, auth, capabilities, synchronizer, watcher, search)
 - **REST:** `server/modules/providers/provider.routes.ts`
@@ -129,7 +115,6 @@ Adding a new provider means implementing one abstract base class and registering
 - [capabilities/provider-integration/claude-runtime.md](capabilities/provider-integration/claude-runtime.md)
 - [capabilities/provider-integration/cursor-runtime.md](capabilities/provider-integration/cursor-runtime.md)
 - [capabilities/provider-integration/codex-runtime.md](capabilities/provider-integration/codex-runtime.md)
-- [capabilities/provider-integration/gemini-runtime.md](capabilities/provider-integration/gemini-runtime.md)
 - [capabilities/provider-integration/opencode-runtime.md](capabilities/provider-integration/opencode-runtime.md)
 - [capabilities/provider-integration/model-catalog.md](capabilities/provider-integration/model-catalog.md)
 - [capabilities/provider-integration/capability-matrix.md](capabilities/provider-integration/capability-matrix.md)
