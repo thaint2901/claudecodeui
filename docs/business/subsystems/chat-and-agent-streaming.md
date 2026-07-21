@@ -24,6 +24,7 @@ It is the single feature that every other subsystem exists to support: providers
 | **Token-usage tracking** | See per-session token spend and context-window utilization. |
 | **Abort & control** | Abort a running session, auto-scroll, expand tools, raw parameters, Ctrl+Enter send. |
 | **Message actions** | Copy any message, text-to-speech any message. |
+| **Session lock (background agent)** | Detect and disable the composer when a session is held by a Claude Code background/daemon worker; Stop & Resume to reclaim it. |
 
 ## Stakeholders
 
@@ -76,3 +77,4 @@ It is the single feature that every other subsystem exists to support: providers
 - [capabilities/chat-and-agent-streaming/voice-and-image-input.md](capabilities/chat-and-agent-streaming/voice-and-image-input.md)
 - [capabilities/chat-and-agent-streaming/slash-commands.md](capabilities/chat-and-agent-streaming/slash-commands.md)
 - [capabilities/chat-and-agent-streaming/token-usage-and-context-window.md](capabilities/chat-and-agent-streaming/token-usage-and-context-window.md)
+- [capabilities/chat-and-agent-streaming/session-lock.md](capabilities/chat-and-agent-streaming/session-lock.md)
