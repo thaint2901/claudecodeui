@@ -110,6 +110,15 @@ temp/
 CLAUDE.md
 .mcp.json
 .gemini/
+.agents/
+.playwright-mcp/
+skills-lock.json
+
+# Ad hoc scratch files left at repo root by past sessions
+/tmp.md
+/initial-state.png
+/main-page.png
+/verify-login.png
 
 # Database files
 *.db
