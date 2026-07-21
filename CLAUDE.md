@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project: CloudCLI UI
 
-A web/desktop UI for **Claude Code**, **Cursor CLI**, **Codex**, **Gemini CLI**, and **OpenCode**. Single Vite + React frontend served by an Express backend that spawns CLI agents in PTYs and streams them over WebSocket. The same codebase also targets an Electron desktop build (scripted in `package.json` as `npm run desktop*` — note the `electron/` directory is not present in this repo) and a Docker Sandbox template (`docker/`) — pick the npm route for local dev, the sandbox for hypervisor-level isolation.
+A web/desktop UI for **Claude Code**, **Cursor CLI**, **Codex**, and **OpenCode**. Single Vite + React frontend served by an Express backend that spawns CLI agents in PTYs and streams them over WebSocket. The same codebase also targets an Electron desktop build (`electron/` — main.js, localServer.js, desktopWindow.js, tabs.js, viewHost.js, desktopNotifications.js, serverInstaller.js; scripted in `package.json` as `npm run desktop*`, ships macOS dmg/zip + Windows NSIS) and a Docker Sandbox template (`docker/`) — pick the npm route for local dev, the sandbox for hypervisor-level isolation.
 
 Distribution package: `@cloudcli-ai/cloudcli` (published to npm). Repo `name`/`productName` is "CloudCLI" but the GitHub repo and CLI command were historically `claudecodeui` — many file names, README translations, and the `cloudcli` bin all coexist.
 
@@ -33,7 +33,7 @@ npm run release
 
 There is **no test runner wired into the project** (no `npm test`). Existing `.test.js` / `.test.ts` files (e.g. `server/opencode-cli.test.js`, `server/modules/**/tests/`, `server/routes/tests/`) are Vitest-style — run them with `npx vitest run <path>` if needed. Do not assume `npm test` exists; pick the runner that matches the file you're touching.
 
-**Docker sandbox templates** live in `docker/{claude-code,codex,gemini}/Dockerfile` and are published as `docker.io/cloudcliai/sandbox:*`. See `docker/README.md` for the `sbx` workflow.
+**Docker sandbox templates** live in `docker/{claude-code,codex}/Dockerfile` and are published as `docker.io/cloudcliai/sandbox:*`. See `docker/README.md` for the `sbx` workflow.
 
 ## Architecture Overview
 
@@ -54,19 +54,17 @@ server/                # Express + ws backend (mostly ESM JS, migrating to TS)
   claude-sdk.js         # @anthropic-ai/claude-agent-sdk query wrapper (queryClaudeSDK, abort, approvals)
   cursor-cli.js         # Cursor CLI spawn/abort
   openai-codex.js       # Codex SDK query wrapper
-  gemini-cli.js         # Gemini CLI spawn/abort
   opencode-cli.js       # OpenCode spawn/abort
-  sessionManager.js     # session persistence (legacy runtime)
   voice-proxy.js        # TTS proxy routes
   browser-use-mcp.ts    # Browser-use MCP integration
-  routes/               # auth, agent, commands, cursor, gemini, git, mcp-utils,
+  routes/               # auth, agent, commands, cursor, git, mcp-utils,
                         # plugins, settings, taskmaster, user
   middleware/auth.js    # JWT, API key, WebSocket auth (validateApiKey/authenticateToken/authenticateWebSocket)
   modules/              # NEW module-per-feature layout (replacing top-level routes):
     browser-use/          # service + REST + MCP routes
     database/             # better-sqlite3 connection, init-db, migrations, schema, repositories
     projects/             # project CRUD REST routes
-    providers/            # CLI provider registry (claude/cursor/codex/gemini/opencode) — see provider.registry.ts
+    providers/            # CLI provider registry (claude/cursor/codex/opencode) — see provider.registry.ts
     websocket/            # central ws hub: chat, shell, plugin proxy, session broadcasts
   services/             # notification-orchestrator, vapid-keys
   utils/                # url-detection, commandParser, gitConfig, plugin-loader,
@@ -80,7 +78,7 @@ shared/                # TRUE cross-tier shared code (networkHosts.js — host/p
 plugins/starter/       # example plugin repo layout
 
 public/                # static assets, sw.js, PWA manifest, screenshots
-docker/                # sandbox Dockerfiles (claude-code, codex, gemini) + shared scripts
+docker/                # sandbox Dockerfiles (claude-code, codex) + shared scripts
 scripts/fix-node-pty.js # postinstall: chmod node-pty spawn-helper on macOS
 ```
 
@@ -88,7 +86,7 @@ scripts/fix-node-pty.js # postinstall: chmod node-pty spawn-helper on macOS
 
 1. React `ChatView` (in `src/components/chat/view/`) sends a message through `WebSocketContext`.
 2. The frontend opens a WS to one of the paths proxied in `vite.config.js`: `/ws` (chat), `/shell` (terminal), `/plugin-ws` (plugin RPC). All three resolve to the same server-side `WebSocket` instance created by `server/modules/websocket/index.ts`.
-3. The websocket hub dispatches chat messages to the matching provider spawn function — `queryClaudeSDK` (Claude Agent SDK), `spawnCursor`, `queryCodex`, `spawnGemini`, or `spawnOpenCode`. Each streams structured events back to the client.
+3. The websocket hub dispatches chat messages to the matching provider spawn function — `queryClaudeSDK` (Claude Agent SDK), `spawnCursor`, `queryCodex`, or `spawnOpenCode`. Each streams structured events back to the client.
 4. Claude tool approvals are coordinated via `getPendingApprovalsForSession` / `resolveToolApproval` (see `server/claude-sdk.js`) and a permissions UI driven by `src/contexts/PermissionContext.tsx`.
 
 ### CLI provider model
@@ -97,7 +95,7 @@ scripts/fix-node-pty.js # postinstall: chmod node-pty spawn-helper on macOS
 1. Add a spawn/abort pair in `server/<your-cli>.js`.
 2. Register it in `server/modules/providers/provider.registry.ts` and in the `spawnFns` map inside the WS hub config (`server/index.js`).
 3. Surface it in the UI under `src/components/llm-logo-provider/`.
-4. The `GET /api/providers/:provider/models` endpoint reports the runtime model list (Claude, GPT, Gemini families per `README.md`).
+4. The `GET /api/providers/:provider/models` endpoint reports the runtime model list (Claude, GPT families per `README.md`).
 
 ### Plugin system
 
@@ -106,7 +104,7 @@ Plugins can ship a frontend (tabs) and an optional Node.js backend. Discovery + 
 ### Auth & security model
 
 - `server/middleware/auth.js` exports `validateApiKey`, `authenticateToken`, `authenticateWebSocket` — used by REST routes and the WS hub.
-- SQLite (`better-sqlite3`) holds users, API keys, sessions, settings. The DB layer is being migrated to `server/modules/database/` (repositories + migrations); the only top-level legacy runtime file still in use is `server/sessionManager.js` (whitelisted by ESLint during the migration window).
+- SQLite (`better-sqlite3`) holds users, API keys, sessions, settings. The DB layer has finished migrating to `server/modules/database/` (repositories + migrations) — `server/sessionManager.js` was removed upstream (v1.36.x); session discovery/watching now lives in `server/modules/providers/services/sessions-watcher.service.ts`.
 - Claude Code tools are **disabled by default** in the UI — the user must opt in via the gear-icon Tools Settings modal. Do not change that default without coordinating.
 - The Vite dev server proxies `/api`, `/ws`, `/shell`, `/plugin-ws` to the backend; `vite.config.js` derives the host from `HOST` and port from `SERVER_PORT`/`PORT` (the `PORT` legacy alias is slated for removal — new code should use `SERVER_PORT` only).
 
@@ -118,14 +116,14 @@ Plugins can ship a frontend (tabs) and an optional Node.js backend. Discovery + 
 
 ### Desktop & Docker
 
-- Electron: `npm run desktop`/`desktop:dev`/`desktop:dist:mac` are wired in `package.json` (and the `build` block registers `appId: ai.cloudcli.desktop` + the `cloudcli://` URL scheme), but the `electron/` source directory is not checked into this repo — these targets are kept for the published npm distribution and will fail locally until the Electron source is added.
+- Electron: `npm run desktop`/`desktop:dev`/`desktop:dist:mac`/`desktop:dist:win` are wired in `package.json` (`build` block registers `appId: ai.cloudcli.desktop` + the `cloudcli://` URL scheme). The `electron/` source is present as of the v1.36.3 merge — targets should actually run locally now (previously they'd fail with a missing-directory error).
 - Docker: each `docker/<agent>/Dockerfile` copies `dist-server`, `dist`, `public`, `shared` into the image and runs `start-cloudcli.sh`.
 
 ## Key Conventions
 
 - **ESM everywhere.** Backend source is `.js` ESM. Frontend source is a `.ts/.tsx` + `.js/.jsx` mix (allowed via `allowJs: true`).
 - **Two `@/` aliases, one per tier.** Frontend `@/*` → `src/*` (set in `tsconfig.json` and `vite.config.js`); backend `@/*` → `server/*` (set in `server/tsconfig.json`). Don't try to share a single alias config.
-- **Backend module boundaries are enforced by ESLint.** `eslint.config.js` uses `eslint-plugin-boundaries` to treat each `server/modules/*` folder as one element. Cross-module imports must go through that module's barrel (`index.ts`/`index.js`) — direct deep imports fail lint. Backend modules may only `import type` from `server/shared/types.ts` or `server/shared/interfaces.ts`; runtime imports of shared utils must come from `server/shared/utils.ts`, `frontmatter.ts`, or `claude-cli-path.ts`. Legacy runtime files still permitted during the migration window: `server/sessionManager.js`, `server/utils/runtime-paths.js`.
+- **Backend module boundaries are enforced by ESLint.** `eslint.config.js` uses `eslint-plugin-boundaries` to treat each `server/modules/*` folder as one element. Cross-module imports must go through that module's barrel (`index.ts`/`index.js`) — direct deep imports fail lint. Backend modules may only `import type` from `server/shared/types.ts` or `server/shared/interfaces.ts`; runtime imports of shared utils must come from `server/shared/utils.ts`, `frontmatter.ts`, or `claude-cli-path.ts`. Legacy runtime files still permitted during the migration window: `server/utils/runtime-paths.js`.
 - **Frontend folder pattern:** `src/components/<feature>/` typically contains `view/`, `hooks/`, `utils/`, `types/`, `constants/`, plus the entry file (e.g. `mcp/index.ts`, `auth/index.ts`).
 - **Manual chunking** is configured in `vite.config.js` for `vendor-react`, `vendor-codemirror`, and `vendor-xterm`. Add new heavy deps there.
 - **TypeScript strict mode** is on in both tsconfigs. `tsc-alias` rewrites `@/` aliases after `tsc -p server/tsconfig.json` so the compiled output keeps the alias working.
@@ -158,6 +156,10 @@ Plugins can ship a frontend (tabs) and an optional Node.js backend. Discovery + 
 - **Mint a local JWT for curl/Playwright testing** without a password: read `jwt_secret` from the `app_config` table in `~/.cloudcli/auth.db` (the actual runtime DB — NOT the repo's `./database/auth.db`, which is an unrelated/empty dev artifact) and sign `{userId, username}` with `jsonwebtoken`, matching `generateToken` in `server/middleware/auth.js`.
 - **Every new WebSocket `kind` needs an explicit `case` in `useChatRealtimeHandlers.ts`'s switch.** Unhandled kinds fall through to `default`, which force-casts the raw event into `NormalizedMessage` and calls `sessionStore.appendRealtime()` — a non-chat event with no `.id` field corrupts that session's message store and crashes every later merge (`.id.startsWith` on `undefined`).
 - **Files replaced via atomic rename (e.g. `~/.claude/daemon/roster.json`) break a direct `chokidar.watch(filePath)`** — the watch silently stops firing after the first rename. Watch the containing directory and filter by filename instead.
+- **Commitlint rejects `merge:` as a type.** This repo's conventional-commits config only allows `build, chore, ci, docs, feat, fix, perf, refactor, revert, style, test` — a merge/integration commit needs `chore:` (or another allowed type), not `merge:`.
+- **Legacy `git merge-tree <base> <ours> <theirs>` (3 positional args) does not reliably surface real conflicts** — it can report zero `<<<<<<<` markers even when two branches touch overlapping code. Use `git merge-tree --write-tree --messages <base> <ours> <theirs>` (git ≥2.38) instead; it prints explicit `Auto-merging <file>` / `CONFLICT (content): Merge conflict in <file>` lines you can trust before actually merging.
+- **Upstream (`siteboon/claudecodeui`) can remove entire features inside an innocuously-named PR.** Gemini CLI support was dropped in commit `4cee5e7` ("Fix/resolve different bugs (#964)") with no mention in the commit title — always diff the actual file list (`git diff --stat <merge-base>..upstream/main`) when pulling upstream changes, don't trust commit subjects alone.
+- **`docs/business/**` is hand-authored, not generated.** The project-level `update-docs` skill's recipe (sync from `package.json`/`.env.example`/OpenAPI) doesn't apply here — it's narrative capability docs (Description/Actors/Trigger/Flow/Output/Technical Mapping/Dependencies). Use targeted agents that read the existing sibling doc as a template instead.
 
 ## Business Documentation
 
@@ -175,7 +177,7 @@ When asked to modify or understand a feature, read the relevant `subsystems/<nam
 
 ## Pointers
 
-- **Where sessions live on disk:** `~/.claude/` (Claude Code) and equivalents for other CLIs. The server's `sessionManager.js` and `modules/projects/` watch this directory to auto-discover sessions for the UI.
+- **Where sessions live on disk:** `~/.claude/` (Claude Code) and equivalents for other CLIs. `server/modules/providers/services/sessions-watcher.service.ts` and `modules/projects/` watch this directory to auto-discover sessions for the UI.
 - **List of supported models:** runtime, `GET /api/providers/:provider/models`.
 - **Public docs:** https://cloudcli.ai/docs
 - **Plugin template:** https://github.com/cloudcli-ai/cloudcli-plugin-starter
