@@ -1253,4 +1253,63 @@ router.post('/', validateExternalApiKey, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/sessions/:id/lock-status
+ *
+ * Returns whether the given provider session ID is currently held by a
+ * background agent. The frontend calls this once when a session view opens,
+ * before any WebSocket lock event has had a chance to arrive.
+ */
+const sessionLockRouter = express.Router();
+
+sessionLockRouter.get('/:id/lock-status', async (req, res) => {
+  const { id } = req.params;
+  if (!id) {
+    return res.status(400).json({ error: 'Session id is required' });
+  }
+
+  try {
+    const { getLockedBgSessionIds } = await import(
+      '../modules/providers/services/session-lock-watcher.service.js'
+    );
+    const lockedIds = await getLockedBgSessionIds();
+    const isLocked = lockedIds.has(id);
+    res.json({ sessionId: id, isLocked, checkedAt: new Date().toISOString() });
+  } catch (error) {
+    console.warn('[LockStatus] Failed to check lock state:', error.message);
+    res.json({ sessionId: id, isLocked: false, checkedAt: new Date().toISOString() });
+  }
+});
+
+/**
+ * POST /api/sessions/:id/stop
+ *
+ * Stops a running background agent for the given session. After the daemon
+ * releases the lock, the lock-state watcher will broadcast an `unlocked`
+ * event and the frontend prompt composer will re-enable itself.
+ */
+sessionLockRouter.post('/:id/stop', async (req, res) => {
+  const { id } = req.params;
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'Session id is required' });
+  }
+
+  const shortId = id.split('-')[0];
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    await exec('claude', ['stop', shortId], { timeout: 5_000 });
+    // Give the daemon a beat to release the lock before responding.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    res.json({ success: true, message: 'Background agent stopped' });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: `Failed to stop session: ${error.message}`,
+    });
+  }
+});
+
 export default router;
+export { sessionLockRouter };

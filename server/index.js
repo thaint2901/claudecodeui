@@ -13,7 +13,12 @@ import mime from 'mime-types';
 import Database from 'better-sqlite3';
 
 import { AppError, WORKSPACES_ROOT, getOpenCodeDatabasePath, validateWorkspacePath } from '@/shared/utils.js';
-import { closeSessionsWatcher, initializeSessionsWatcher } from '@/modules/providers/index.js';
+import {
+    closeSessionLockWatcher,
+    closeSessionsWatcher,
+    initializeSessionsWatcher,
+    sessionLockWatcherService,
+} from '@/modules/providers/index.js';
 import { createWebSocketServer } from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
@@ -55,7 +60,7 @@ import taskmasterRoutes from './routes/taskmaster.js';
 import mcpUtilsRoutes from './routes/mcp-utils.js';
 import commandsRoutes from './routes/commands.js';
 import settingsRoutes from './routes/settings.js';
-import agentRoutes from './routes/agent.js';
+import agentRoutes, { sessionLockRouter } from './routes/agent.js';
 import projectModuleRoutes from './modules/projects/projects.routes.js';
 import userRoutes from './routes/user.js';
 import geminiRoutes from './routes/gemini.js';
@@ -222,6 +227,10 @@ app.use('/api/providers', authenticateToken, providerRoutes);
 
 // Agent API Routes (uses API key authentication)
 app.use('/api/agent', agentRoutes);
+
+// Session lock API Routes (JWT-protected; used by the chat UI to read
+// lock state and to invoke the daemon's "stop" command).
+app.use('/api/sessions', authenticateToken, sessionLockRouter);
 
 app.use('/api/voice', authenticateToken, voiceRoutes);
 
@@ -1689,6 +1698,12 @@ async function startServer() {
         // Initialize authentication database
         await initializeDatabase();
 
+        // Start the session-lock watcher before the WebSocket server begins
+        // accepting clients so the first broadcast can reach every connected
+        // socket. Failures are swallowed inside the service and the API
+        // endpoint still falls back to on-demand reads.
+        await sessionLockWatcherService.initialize();
+
         // Configure Web Push (VAPID keys)
         configureWebPush();
 
@@ -1722,6 +1737,13 @@ async function startServer() {
             // Start watching the projects folder for changes
             await initializeSessionsWatcher();
 
+            // Start watching the Claude daemon roster for bg-session lock state
+            try {
+                await sessionLockWatcherService.initialize();
+            } catch (watcherError) {
+                console.warn('[SessionLockWatcher] Failed to initialize:', watcherError?.message || watcherError);
+            }
+
             // Start server-side plugin processes for enabled plugins
             startEnabledPluginServers().catch(err => {
                 console.error('[Plugins] Error during startup:', err.message);
@@ -1729,12 +1751,18 @@ async function startServer() {
         });
 
         await closeSessionsWatcher();
+        await closeSessionLockWatcher();
         // Clean up plugin processes on shutdown
         const shutdownRuntimeServices = async () => {
             try {
                 await browserUseService.stopAllSessions();
             } catch (err) {
                 console.error('[Browser] Error stopping sessions during shutdown:', err?.message || err);
+            }
+            try {
+                await closeSessionLockWatcher();
+            } catch (err) {
+                console.error('[SessionLockWatcher] Error stopping watcher during shutdown:', err?.message || err);
             }
             try {
                 await stopAllPlugins();

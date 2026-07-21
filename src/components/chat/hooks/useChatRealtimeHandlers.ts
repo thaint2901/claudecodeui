@@ -164,6 +164,11 @@ export function useChatRealtimeHandlers({
         case 'loading_progress':
           return;
 
+        // Owned by SessionLockContext — not a chat message, must not fall
+        // through to the generic appendRealtime path below.
+        case 'session_lock_state_changed':
+          return;
+
         default:
           break;
       }

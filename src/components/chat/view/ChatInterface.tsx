@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
 import { useWebSocket } from '../../../contexts/WebSocketContext';
+import { useSessionLock } from '../../../contexts/SessionLockContext';
 import PermissionContext from '../../../contexts/PermissionContext';
 import { QuickSettingsPanel } from '../../quick-settings-panel';
 import type { ChatInterfaceProps, Provider  } from '../types/types';
@@ -15,6 +16,7 @@ import { useSessionStore } from '../../../stores/useSessionStore';
 import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatComposer from './subcomponents/ChatComposer';
 import CommandResultModal from './subcomponents/CommandResultModal';
+import { postStopSession } from './subcomponents/sessionLockApi';
 
 
 function ChatInterface({
@@ -252,6 +254,60 @@ function ChatInterface({
     sessionStore,
   });
 
+  // Session lock (daemon-holds-the-roster) state for the active session.
+  // `isLocked` is the render-time value; `isStopping` tracks the in-flight
+  // POST so the Stop & Resume button can show a spinner without disabling
+  // the underlying context update.
+  const { isLocked: isSessionLocked, refreshSession } = useSessionLock();
+  const [isStopping, setIsStopping] = useState(false);
+  const activeSessionIdForLock = currentSessionId || selectedSession?.id || null;
+  const isLocked = activeSessionIdForLock ? isSessionLocked(activeSessionIdForLock) : false;
+
+  // Seed the lock state when a session becomes active. The WS delta stream
+  // only reports *changes*; a session already locked before the view opened
+  // would otherwise render as unlocked until something toggled the roster.
+  useEffect(() => {
+    if (!activeSessionIdForLock) return;
+    refreshSession(activeSessionIdForLock);
+  }, [activeSessionIdForLock, refreshSession]);
+
+  const handleStopAndResume = useCallback(async () => {
+    if (!activeSessionIdForLock || isStopping) return;
+    setIsStopping(true);
+    try {
+      const result = await postStopSession(activeSessionIdForLock);
+      if (result?.success && selectedSession?.id) {
+        // Re-fetch the session so `isProcessing` flips back to false once
+        // the daemon has dropped the worker. The WebSocket `unlocked` event
+        // alone won't reset the activity indicator because that signal
+        // only flows through `chat.session_upserted` on a transcript change.
+        await sessionStore.refreshFromServer(selectedSession.id);
+      } else if (!result?.success) {
+        // Surface a non-blocking error — the lock is still held, the user
+        // can retry. We log to console rather than throw because nothing in
+        // the composer tree owns a toast channel; the warning bar stays
+        // visible and the input stays disabled, which is the correct state.
+        console.error('[SessionLock] Stop request failed', result?.message);
+      }
+    } catch (error) {
+      console.error('[SessionLock] Stop request errored', error);
+    } finally {
+      setIsStopping(false);
+    }
+  }, [activeSessionIdForLock, isStopping, selectedSession, sessionStore]);
+
+  // When the lock watcher reports this session is no longer locked (e.g.
+  // because the user stopped it from `claude stop` in another terminal),
+  // re-fetch the session so the activity indicator clears and the send
+  // button becomes interactive again.
+  useEffect(() => {
+    if (!activeSessionIdForLock) return;
+    if (isLocked) return;
+    if (!selectedSession?.id) return;
+    if (!isProcessing) return;
+    sessionStore.refreshFromServer(selectedSession.id);
+  }, [activeSessionIdForLock, isLocked, selectedSession, isProcessing, sessionStore]);
+
   useEffect(() => {
     if (!canAbortSession) {
       return;
@@ -429,6 +485,9 @@ function ChatInterface({
           })}
           isTextareaExpanded={isTextareaExpanded}
           sendByCtrlEnter={sendByCtrlEnter}
+          isLocked={isLocked}
+          onStopAndResume={isLocked ? handleStopAndResume : undefined}
+          isStopping={isStopping}
         />
       </div>
 

@@ -33,6 +33,7 @@ import ImageAttachment from './ImageAttachment';
 import VoiceInputButton from './VoiceInputButton';
 import PermissionRequestsBanner from './PermissionRequestsBanner';
 import TokenUsageSummary from './TokenUsageSummary';
+import { SessionLockBanner, SessionLockStopButton } from './SessionLockControls';
 
 interface MentionableFile {
   name: string;
@@ -104,6 +105,16 @@ interface ChatComposerProps {
   placeholder: string;
   isTextareaExpanded: boolean;
   sendByCtrlEnter?: boolean;
+  /**
+   * When `true`, the session is locked by a background agent. The composer
+   * shows a warning bar, disables the input, and swaps the Send button for
+   * a "Stop & Resume" action that releases the daemon's lock.
+   */
+  isLocked?: boolean;
+  /** Invoked when the user clicks the "Stop & Resume" button. */
+  onStopAndResume?: () => void;
+  /** While the stop request is in flight, the action button shows a spinner. */
+  isStopping?: boolean;
 }
 
 export default function ChatComposer({
@@ -158,6 +169,9 @@ export default function ChatComposer({
   placeholder,
   isTextareaExpanded,
   sendByCtrlEnter,
+  isLocked = false,
+  onStopAndResume,
+  isStopping = false,
 }: ChatComposerProps) {
   const { t } = useTranslation('chat');
 
@@ -210,6 +224,12 @@ export default function ChatComposer({
             handlePermissionDecision={handlePermissionDecision}
             handleGrantToolPermission={handleGrantToolPermission}
           />
+        </div>
+      )}
+
+      {isLocked && (
+        <div className="mx-auto mb-3 max-w-4xl">
+          <SessionLockBanner />
         </div>
       )}
 
@@ -325,6 +345,9 @@ export default function ChatComposer({
               onBlur={() => onInputFocusChange?.(false)}
               onInput={onTextareaInput}
               placeholder={placeholder}
+              disabled={isLocked}
+              aria-disabled={isLocked}
+              className={isLocked ? 'cursor-not-allowed opacity-60' : undefined}
             />
         </PromptInputBody>
 
@@ -418,22 +441,26 @@ export default function ChatComposer({
             >
               {sendByCtrlEnter ? t('input.hintText.ctrlEnter') : t('input.hintText.enter')}
             </div>
-            <PromptInputSubmit
-              onClick={
-                isLoading
-                  ? onAbortSession
-                  : isRecording
-                    ? (e: MouseEvent<HTMLButtonElement>) => {
-                        e.preventDefault();
-                        voiceStop({ send: true });
-                      }
-                    : undefined
-              }
-              disabled={isLoading ? false : isRecording ? false : isTranscribing ? true : !input.trim()}
-              className="h-10 w-10 sm:h-10 sm:w-10"
-            >
-              {isTranscribing ? <Loader2 className="h-4 w-4 animate-spin" /> : undefined}
-            </PromptInputSubmit>
+            {isLocked ? (
+              <SessionLockStopButton onClick={onStopAndResume ?? (() => {})} isStopping={isStopping} />
+            ) : (
+              <PromptInputSubmit
+                onClick={
+                  isLoading
+                    ? onAbortSession
+                    : isRecording
+                      ? (e: MouseEvent<HTMLButtonElement>) => {
+                          e.preventDefault();
+                          voiceStop({ send: true });
+                        }
+                      : undefined
+                }
+                disabled={isLoading ? false : isRecording ? false : isTranscribing ? true : !input.trim()}
+                className="h-10 w-10 sm:h-10 sm:w-10"
+              >
+                {isTranscribing ? <Loader2 className="h-4 w-4 animate-spin" /> : undefined}
+              </PromptInputSubmit>
+            )}
           </div>
         </PromptInputFooter>
       </PromptInput>
