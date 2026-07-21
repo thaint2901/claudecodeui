@@ -1,8 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 
 import { useWebSocket } from './WebSocketContext';
-
-import { fetchLockStatus } from '../components/chat/view/subcomponents/sessionLockApi';
+import { fetchLockStatus } from './sessionLockApi';
 
 interface SessionLockState {
   /** True if any session is currently being polled, prevents flicker between events */

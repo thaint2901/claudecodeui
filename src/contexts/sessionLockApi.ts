@@ -5,7 +5,7 @@
  * Stop & Resume action.
  */
 
-import { authenticatedFetch } from '../../../../utils/api';
+import { authenticatedFetch } from '../utils/api';
 
 const DEFAULT_BASE_PATH = '/api/sessions';
 

@@ -147,6 +147,11 @@
     "clearInput": "Clear input",
     "scrollToBottom": "Scroll to bottom"
   },
+  "sessionLock": {
+    "bannerText": "This session is running as a background agent. The prompt unlocks automatically when the session finishes — or use Stop & Resume to stop it now.",
+    "stopAndResume": "Stop & Resume",
+    "stopping": "Stopping…"
+  },
   "providerSelection": {
     "title": "Choose Your AI Assistant",
     "description": "Select a provider to start a new conversation",

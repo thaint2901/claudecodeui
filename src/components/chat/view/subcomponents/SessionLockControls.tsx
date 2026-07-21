@@ -1,5 +1,4 @@
 import React from 'react';
-
 import { useTranslation } from 'react-i18next';
 import { Loader2, OctagonX, TriangleAlert } from 'lucide-react';
 
@@ -18,7 +17,7 @@ import { Button } from '../../../../shared/view/ui/Button';
  * background.
  */
 export function SessionLockBanner(): React.ReactElement {
-  const { t } = useTranslation();
+  const { t } = useTranslation('chat');
   return (
     <Alert
       data-testid="session-lock-banner"
@@ -26,10 +25,7 @@ export function SessionLockBanner(): React.ReactElement {
     >
       <TriangleAlert aria-hidden="true" className="text-amber-600 dark:text-amber-400" />
       <AlertDescription className="text-amber-900 dark:text-amber-200">
-        {t(
-          'Session đang chạy dưới dạng background agent. Prompt sẽ được mở khóa khi session hoàn tất — hoặc dùng nút Stop & Resume bên dưới để dừng ngay.',
-          'This session is running as a background agent. The prompt unlocks automatically when the session finishes — or use Stop & Resume to stop it now.',
-        )}
+        {t('sessionLock.bannerText')}
       </AlertDescription>
     </Alert>
   );
@@ -51,8 +47,8 @@ interface SessionLockStopButtonProps {
  * wrap or crowd the token/message-count controls on narrow viewports.
  */
 export function SessionLockStopButton({ onClick, isStopping }: SessionLockStopButtonProps): React.ReactElement {
-  const { t } = useTranslation();
-  const label = isStopping ? t('Đang dừng...', 'Stopping…') : t('Stop & Resume', 'Stop & Resume');
+  const { t } = useTranslation('chat');
+  const label = isStopping ? t('sessionLock.stopping') : t('sessionLock.stopAndResume');
 
   return (
     <Button

@@ -12,14 +12,16 @@
  *   - Falls back to the CLI if the file disappears or is malformed
  */
 
-import chokidar, { type FSWatcher } from 'chokidar';
 import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
+import chokidar, { type FSWatcher } from 'chokidar';
+
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/index.js';
+import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -70,7 +72,7 @@ async function readRoster(): Promise<Set<string>> {
 async function readAgentsFromCli(): Promise<Set<string>> {
   try {
     const { stdout } = await execFileAsync(
-      'claude',
+      resolveClaudeCodeExecutablePath(process.env.CLAUDE_CLI_PATH),
       ['agents', '--json'],
       { timeout: CLI_FALLBACK_TIMEOUT_MS },
     );

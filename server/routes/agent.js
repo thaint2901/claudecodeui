@@ -1,19 +1,22 @@
-import express from 'express';
 import { spawn } from 'child_process';
 import path from 'path';
 import os from 'os';
 import { promises as fs } from 'fs';
 import crypto from 'crypto';
-import { userDb, apiKeysDb, githubTokensDb, projectsDb } from '../modules/database/index.js';
+
+import express from 'express';
+import { Octokit } from '@octokit/rest';
+
+import { userDb, apiKeysDb, githubTokensDb, projectsDb, sessionsDb } from '../modules/database/index.js';
 import { queryClaudeSDK } from '../claude-sdk.js';
 import { spawnCursor } from '../cursor-cli.js';
 import { queryCodex } from '../openai-codex.js';
 import { spawnGemini } from '../gemini-cli.js';
 import { spawnOpenCode } from '../opencode-cli.js';
-import { Octokit } from '@octokit/rest';
 import { providerModelsService } from '../modules/providers/services/provider-models.service.js';
 import { IS_PLATFORM } from '../constants/config.js';
 import { normalizeProjectPath } from '../shared/utils.js';
+import { resolveClaudeCodeExecutablePath } from '../shared/claude-cli-path.js';
 
 const router = express.Router();
 
@@ -1262,10 +1265,22 @@ router.post('/', validateExternalApiKey, async (req, res) => {
  */
 const sessionLockRouter = express.Router();
 
+// Session ids are UUIDs (app-allocated) or the provider's short worker id
+// (8 lowercase hex chars, from roster.json). Reject anything else before it
+// reaches a lookup or a subprocess argv.
+const SESSION_ID_PATTERN = /^[a-f0-9-]{8,36}$/i;
+
+function findKnownSession(id) {
+  return sessionsDb.getSessionById(id) || sessionsDb.getSessionByProviderSessionId(id);
+}
+
 sessionLockRouter.get('/:id/lock-status', async (req, res) => {
   const { id } = req.params;
-  if (!id) {
-    return res.status(400).json({ error: 'Session id is required' });
+  if (!id || !SESSION_ID_PATTERN.test(id)) {
+    return res.status(400).json({ error: 'Invalid session id' });
+  }
+  if (!findKnownSession(id)) {
+    return res.status(404).json({ error: 'Session not found' });
   }
 
   try {
@@ -1290,8 +1305,11 @@ sessionLockRouter.get('/:id/lock-status', async (req, res) => {
  */
 sessionLockRouter.post('/:id/stop', async (req, res) => {
   const { id } = req.params;
-  if (!id) {
-    return res.status(400).json({ success: false, message: 'Session id is required' });
+  if (!id || !SESSION_ID_PATTERN.test(id)) {
+    return res.status(400).json({ success: false, message: 'Invalid session id' });
+  }
+  if (!findKnownSession(id)) {
+    return res.status(404).json({ success: false, message: 'Session not found' });
   }
 
   const shortId = id.split('-')[0];
@@ -1299,14 +1317,16 @@ sessionLockRouter.post('/:id/stop', async (req, res) => {
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const exec = promisify(execFile);
-    await exec('claude', ['stop', shortId], { timeout: 5_000 });
+    const claudeExecutable = resolveClaudeCodeExecutablePath(process.env.CLAUDE_CLI_PATH);
+    await exec(claudeExecutable, ['stop', shortId], { timeout: 5_000 });
     // Give the daemon a beat to release the lock before responding.
     await new Promise((resolve) => setTimeout(resolve, 500));
     res.json({ success: true, message: 'Background agent stopped' });
   } catch (error) {
+    console.error('[SessionLock] Failed to stop session', id, error);
     res.status(500).json({
       success: false,
-      message: `Failed to stop session: ${error.message}`,
+      message: 'Failed to stop the background agent. Check the server logs for details.',
     });
   }
 });

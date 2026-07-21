@@ -1698,12 +1698,6 @@ async function startServer() {
         // Initialize authentication database
         await initializeDatabase();
 
-        // Start the session-lock watcher before the WebSocket server begins
-        // accepting clients so the first broadcast can reach every connected
-        // socket. Failures are swallowed inside the service and the API
-        // endpoint still falls back to on-demand reads.
-        await sessionLockWatcherService.initialize();
-
         // Configure Web Push (VAPID keys)
         configureWebPush();
 
