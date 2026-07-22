@@ -4,6 +4,7 @@ export { OneLineDisplay } from './OneLineDisplay';
 export { BashCommandDisplay } from './BashCommandDisplay';
 export { CollapsibleDisplay } from './CollapsibleDisplay';
 export { SubagentContainer } from './SubagentContainer';
+export { SubagentTranscriptPanel } from './SubagentTranscriptPanel';
 export * from './ContentRenderers';
 export * from './InteractiveRenderers';
 export { ToolStatusBadge } from './ToolStatusBadge';
