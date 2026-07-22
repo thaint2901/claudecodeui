@@ -22,13 +22,14 @@ ccui still hard-codes the old name in three places, so subagent grouping/renderi
 
 Effect observed live: a dispatched subagent renders as flat "Agent / Parameters" + "Agent / Detail" (the generic `Default` fallback config), with no progress indicator, no child-tool history, and the subagent's raw output visually indistinguishable from main-session text — because none of the purpose-built `Task` config/rendering ever matches.
 
-### Root cause 2: two divergent grouping code paths
+### Root cause 2: two divergent grouping code paths — and BOTH are broken
 
-Separately from the naming bug, there are two different mechanisms for grouping a subagent's child tool calls under their parent, and only one of them actually groups anything:
-- **Live (WebSocket):** `server/claude-sdk.js` already attaches `parent_tool_use_id` → `parentToolUseId` on every child message as it streams (line ~286-290). But `useChatRealtimeHandlers.ts` does nothing with it — it just appends raw messages to the store.
-- **Persisted (reload):** `claude-sessions.provider.ts` reconstructs history from the on-disk JSONL and pre-builds a `subagentTools` array attached to the parent tool_use message. `normalizedToChatMessages()` (`useChatMessages.ts`) only groups when this pre-built field is present.
+Separately from the naming bug, there are two different mechanisms for grouping a subagent's child tool calls under their parent, and adversarial verification (2026-07-22) established that **neither works today**:
 
-Result: even once the naming bug is fixed, a running subagent would render flat while streaming and only "snap" into a grouped block after the session reloads post-completion — an inconsistent experience, and a second place where client/server logic can drift out of sync (which is exactly the class of bug that produced root cause 1).
+- **Live (WebSocket):** `server/claude-sdk.js` attaches `parent_tool_use_id` → `parentToolUseId` on every child message as it streams (line ~286-290). But `useChatRealtimeHandlers.ts` does nothing with it — it just appends raw messages to the store, and `normalizedToChatMessages()` never reads the field.
+- **Persisted (reload):** `claude-sessions.provider.ts` intends to reconstruct grouping from disk by pre-building a `subagentTools` array on the parent tool_use message. **This path has a latent path bug:** `getSessionMessages()` (line ~151-153) does a flat `readdir(path.dirname(jsonlPath))` filtered by `agent-*.jsonl`, but Claude Code actually stores agent transcripts two levels deeper, at `<projectDir>/<session-id>/subagents/agent-<id>.jsonl` (verified against a real `~/.claude/projects/` tree; the synchronizer's own doc comment at `claude-session-synchronizer.provider.ts:35-36` documents the nested layout). The flat readdir never finds them, so `subagentTools` is never populated regardless of the Task/Agent naming bug.
+
+**Critical data constraint (verified):** `parent_tool_use_id` is **never persisted** to the on-disk JSONL — `grep -c parent_tool_use_id` returns 0 against both a real main-session transcript and a real `subagents/agent-*.jsonl`. It exists only transiently on the in-memory SDK stream. On disk, the parent↔child linkage is encoded differently: the parent message carries `toolUseResult.agentId`, and the child transcript lives in the separate `subagents/agent-<agentId>.jsonl` file (the child records themselves carry no parent pointer). Any unified grouping design must account for this: the persisted data does not natively contain the field the live data has.
 
 ### Root cause 3: subagent tool calls can be silently denied
 
@@ -44,7 +45,7 @@ Replace the three `'Task'` string checks with `'Agent'`. To avoid breaking rende
 const SUBAGENT_TOOL_NAMES = new Set(['Agent', 'Task']);
 ```
 
-Apply this constant everywhere the three files currently do a direct string comparison. `toolConfigs.ts` keeps the `Task:` config object but is looked up under both keys (or the key is renamed to `Agent` with `Task` as an alias in `getToolConfig`).
+Apply this constant everywhere the three files currently do a direct string comparison. `toolConfigs.ts` keeps the `Task:` config object but is looked up under both keys (or the key is renamed to `Agent` with `Task` as an alias in `getToolConfig`). Matching both names is not just backward-compat caution — the official `agent-sdk/subagents` docs themselves recommend detecting both `"Task"` and `"Agent"` for compatibility.
 
 ### 2. Single grouping algorithm, live and persisted alike (chosen over two alternatives)
 
@@ -52,12 +53,18 @@ Two other approaches were considered and rejected:
 - *Fix the live path to match the persisted path* (have `claude-sdk.js`/the store build `subagentTools` live too) — keeps two parallel implementations, the exact pattern that caused root cause 1.
 - *Accept flat rendering while running, only group after reload* — smaller diff, but leaves the "flat then snaps" UX gap and doesn't fix the live experience the user actually wants (watching subagent progress in real time).
 
-**Chosen approach:** delete the server-side `subagentTools` pre-build entirely (keep the unrelated logic in `claude-session-synchronizer.provider.ts` that skips `subagents/*.jsonl` files from the top-level session list — that's a different, still-needed concern). Add one grouping pass inside `normalizedToChatMessages()` that:
-1. Scans the full flat `NormalizedMessage[]` (works identically whether the array just grew via `appendRealtime` or was just loaded via `fetchFromServer` — it's the same array, same function, every render).
-2. For every message carrying `parentToolUseId`, nests it into the `childTools` of the tool_use message whose `toolId` matches.
-3. Builds `subagentState` (`childTools`, `currentToolIndex`, `isComplete`) purely from this scan — no reliance on any pre-built field.
+**Chosen approach — one field contract, one grouping algorithm.** The client-side grouping algorithm is single and shared; the server's only job is to guarantee the field it depends on (`parentToolUseId`) is present on child messages in **both** delivery paths. Because `parent_tool_use_id` is never persisted to disk (see Root cause 2), the persisted path cannot simply "scan for the field" — the server must stamp it during JSONL reconstruction:
 
-This removes the second code path outright rather than reconciling two.
+**Server side (`claude-sessions.provider.ts`):**
+1. Fix the agent-file discovery path bug: resolve agent transcripts at `<projectDir>/<session-id>/subagents/agent-<agentId>.jsonl` (per the parent message's `toolUseResult.agentId`), not via the current flat `readdir` that never matches.
+2. Replace the `subagentTools` pre-build: instead of aggregating child tools into an array on the parent, parse each `agent-<agentId>.jsonl` into ordinary `NormalizedMessage`s and **stamp `parentToolUseId` = the parent Agent tool_use's `toolId`** onto each. Emit them in the messages stream alongside main-session messages. The `subagentTools` field and its consumers are then deleted.
+
+**Client side (`normalizedToChatMessages()`):** one grouping pass that:
+1. Scans the full flat `NormalizedMessage[]` (works identically whether the array just grew via `appendRealtime` or was just loaded via `fetchFromServer` — same array, same function, every render).
+2. For every message carrying `parentToolUseId`, nests it under the tool_use message whose `toolId` matches.
+3. Builds `subagentState` (`childTools`, `currentToolIndex`, `isComplete`) purely from this scan — no reliance on any pre-built aggregate field.
+
+The invariant that keeps live and persisted rendering identical is now a *data contract* ("every subagent-child message carries `parentToolUseId`") rather than two parallel grouping implementations. The live path already satisfies the contract for free (`claude-sdk.js:286-290`); the persisted path satisfies it via the stamping step above. Keep the unrelated logic in `claude-session-synchronizer.provider.ts` that skips `subagents/*.jsonl` files from the top-level session list — that's a different, still-needed concern.
 
 ### 3. Suppress the synthetic "user" bubble from subagent delegation
 
