@@ -300,11 +300,15 @@ export class ClaudeSessionsProvider implements IProviderSessions {
       return [];
     }
 
-    if (raw.type === 'content_block_delta' && raw.delta?.text) {
-      return [createNormalizedMessage({ kind: 'stream_delta', content: raw.delta.text, sessionId, provider: PROVIDER })];
-    }
-    if (raw.type === 'content_block_stop') {
-      return [createNormalizedMessage({ kind: 'stream_end', sessionId, provider: PROVIDER })];
+    if (raw.type === 'stream_event') {
+      const event = readObjectRecord(raw.event);
+      if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta?.text) {
+        return [createNormalizedMessage({ kind: 'stream_delta', content: event.delta.text, sessionId, provider: PROVIDER })];
+      }
+      if (event?.type === 'content_block_stop') {
+        return [createNormalizedMessage({ kind: 'stream_end', sessionId, provider: PROVIDER })];
+      }
+      return [];
     }
 
     const messages: NormalizedMessage[] = [];
