@@ -18,7 +18,7 @@ import { useVoiceAvailable } from '../../hooks/useVoiceAvailable';
 import { matchLeadingCommand } from '../../utils/commandToken';
 import type { QueuedDraft } from '../../hooks/useChatComposerState';
 import type { SessionActivity } from '../../../../hooks/useSessionProtection';
-import type { PendingPermissionRequest, PermissionMode } from '../../types/types';
+import type { ChatMessage, PendingPermissionRequest, PermissionMode } from '../../types/types';
 import type { ProviderModelOption } from '../../../../types/app';
 import {
   PromptInput,
@@ -62,6 +62,8 @@ interface ChatComposerProps {
     decision: { allow?: boolean; message?: string; rememberEntry?: string | null; updatedInput?: unknown },
   ) => void;
   handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
+  /** Current chat transcript, forwarded to PermissionRequestsBanner for subagent attribution. */
+  chatMessages?: ChatMessage[];
   activity: SessionActivity | null;
   isLoading: boolean;
   onAbortSession: () => void;
@@ -131,6 +133,7 @@ export default function ChatComposer({
   pendingPermissionRequests,
   handlePermissionDecision,
   handleGrantToolPermission,
+  chatMessages,
   activity,
   isLoading,
   onAbortSession,
@@ -323,6 +326,7 @@ export default function ChatComposer({
             pendingPermissionRequests={pendingPermissionRequests}
             handlePermissionDecision={handlePermissionDecision}
             handleGrantToolPermission={handleGrantToolPermission}
+            chatMessages={chatMessages}
           />
         </div>
       )}

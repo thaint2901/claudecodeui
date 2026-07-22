@@ -442,6 +442,7 @@ function ChatInterface({
           pendingPermissionRequests={pendingPermissionRequests}
           handlePermissionDecision={handlePermissionDecision}
           handleGrantToolPermission={handleGrantToolPermission}
+          chatMessages={chatMessages}
           activity={sessionActivity}
           isLoading={isProcessing}
           onAbortSession={handleAbortSession}
