@@ -191,38 +191,58 @@ async function handleChatSend(
       return;
     }
 
-    // Allocate the fork its own app session row; the SDK announces the fork's
-    // provider id mid-run and the session writer maps it onto this row.
-    const forked = sessionsService.createAppSession('claude', session.project_path ?? '');
-    sessionsDb.updateSessionCustomName(
-      forked.sessionId,
-      `${session.custom_name || 'Session'} (fork)`,
-    );
+    let forked: ReturnType<typeof sessionsService.createAppSession>;
+    let forkRun: ReturnType<typeof chatRunRegistry.startRun>;
+    try {
+      // Allocate the fork its own app session row; the SDK announces the fork's
+      // provider id mid-run and the session writer maps it onto this row.
+      forked = sessionsService.createAppSession('claude', session.project_path ?? '');
+      sessionsDb.updateSessionCustomName(
+        forked.sessionId,
+        `${session.custom_name || 'Session'} (fork)`,
+      );
 
-    const forkRun = chatRunRegistry.startRun({
-      appSessionId: forked.sessionId,
-      provider,
-      providerSessionId: session.provider_session_id,
-      connection: ws,
-      userId,
-    });
-    if (!forkRun) {
-      sendProtocolError(ws, 'RUN_IN_PROGRESS', `Forked session "${forked.sessionId}" already has a run in progress.`, sessionId);
+      forkRun = chatRunRegistry.startRun({
+        appSessionId: forked.sessionId,
+        provider,
+        providerSessionId: session.provider_session_id,
+        connection: ws,
+        userId,
+      });
+      if (!forkRun) {
+        sendProtocolError(ws, 'RUN_IN_PROGRESS', `Forked session "${forked.sessionId}" already has a run in progress.`, sessionId);
+        return;
+      }
+
+      // Ack into the ORIGINAL session's transcript so the user sees where the fork went.
+      ws.send(JSON.stringify(createNormalizedMessage({
+        kind: 'task_notification',
+        sessionId,
+        provider,
+        status: 'completed',
+        summary: `Forked conversation into a new session${forkCommand.prompt ? ' and started it on the given prompt' : ''}. Find it in the sidebar as "${session.custom_name || 'Session'} (fork)".`,
+      })));
+    } catch (error) {
+      // Setup never marked the ORIGINAL session as processing, so there is no
+      // run state to clean up here beyond surfacing the failure. Report into
+      // the original session's transcript (not sendProtocolError) because a
+      // sessionId-less protocol error would only reach the console.
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[Chat] /fork setup failed', { sessionId, error: message });
+      ws.send(JSON.stringify(createNormalizedMessage({
+        kind: 'task_notification',
+        sessionId,
+        provider,
+        status: 'failed',
+        summary: `Failed to fork this conversation: ${message}`,
+      })));
       return;
     }
-
-    // Ack into the ORIGINAL session's transcript so the user sees where the fork went.
-    ws.send(JSON.stringify(createNormalizedMessage({
-      kind: 'task_notification',
-      sessionId,
-      provider,
-      status: 'completed',
-      summary: `Forked conversation into a new session${forkCommand.prompt ? ' and started it on the given prompt' : ''}. Find it in the sidebar as "${session.custom_name || 'Session'} (fork)".`,
-    })));
 
     const clientOptions = (data.options ?? {}) as AnyRecord;
     const forkOptions: AnyRecord = {
       ...clientOptions,
+      // Resume-only run: attachments belong to the original message, not this fork.
       images: [],
       sessionId: session.provider_session_id,
       resume: true,
