@@ -143,6 +143,54 @@ test('Claude synchronizer falls back to the existing DB name when disk has no ti
   }
 });
 
+test('Claude synchronizer keeps a custom-title as sticky even when a later last-prompt event is appended', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-session-sync-sticky-lastprompt-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+
+  try {
+    await writeClaudeTranscript(tempRoot, 'claude-sticky-1', workspacePath, [
+      { type: 'custom-title', customTitle: 'Renamed via CLI' },
+      { type: 'last-prompt', lastPrompt: 'what is the weather today' },
+    ]);
+
+    await withIsolatedDatabase(async () => {
+      const synchronizer = new ClaudeSessionSynchronizer();
+      await synchronizer.synchronize();
+
+      assert.equal(sessionsDb.getSessionByProviderSessionId('claude-sticky-1')?.custom_name, 'Renamed via CLI');
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('Claude synchronizer keeps a custom-title as sticky even when a later ai-title event is appended', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-session-sync-sticky-aititle-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+
+  try {
+    await writeClaudeTranscript(tempRoot, 'claude-sticky-2', workspacePath, [
+      { type: 'custom-title', customTitle: 'Renamed via CLI' },
+      { type: 'ai-title', aiTitle: 'Fix login bug' },
+    ]);
+
+    await withIsolatedDatabase(async () => {
+      const synchronizer = new ClaudeSessionSynchronizer();
+      await synchronizer.synchronize();
+
+      assert.equal(sessionsDb.getSessionByProviderSessionId('claude-sticky-2')?.custom_name, 'Renamed via CLI');
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('Claude synchronizer writeBackCustomName appends a custom-title event via renameSession', { concurrency: false }, async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-session-sync-writeback-'));
   const workspacePath = path.join(tempRoot, 'workspace');
