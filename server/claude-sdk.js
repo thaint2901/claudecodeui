@@ -167,6 +167,13 @@ function mapCliOptionsToSDK(options = {}) {
   // Since SDK 0.2.113, options.env replaces process.env instead of overlaying it.
   sdkOptions.env = { ...process.env };
 
+  // Spec 2026-07-22-subagent-fork-subtask: always-on subagent capabilities.
+  // FORK_SUBAGENT lets Claude request subagent_type "fork" (inherited-context
+  // subagent, the /subtask mechanism). FORWARD_SUBAGENT_TEXT makes the CLI
+  // emit subagent text/thinking blocks so the transcript panel can show them.
+  sdkOptions.env.CLAUDE_CODE_FORK_SUBAGENT = '1';
+  sdkOptions.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT = '1';
+
   // Resolve the executable eagerly on Windows because the SDK uses raw child_process.spawn,
   // which does not reliably follow npm's shell wrappers like cross-spawn does.
   sdkOptions.pathToClaudeCodeExecutable = resolveClaudeCodeExecutablePath(process.env.CLAUDE_CLI_PATH);
@@ -197,6 +204,15 @@ function mapCliOptionsToSDK(options = {}) {
       if (!allowedTools.includes(tool)) {
         allowedTools.push(tool);
       }
+    }
+  }
+
+  // Auto-approve subagent DISPATCH only (the act of starting a subagent).
+  // Tools the subagent itself calls still go through the normal approval
+  // flow — this does not widen the tools-disabled-by-default policy.
+  for (const dispatchTool of ['Agent', 'Task']) {
+    if (!allowedTools.includes(dispatchTool)) {
+      allowedTools.push(dispatchTool);
     }
   }
 
@@ -233,6 +249,12 @@ function mapCliOptionsToSDK(options = {}) {
 
   if (sessionId) {
     sdkOptions.resume = sessionId;
+  }
+
+  // /fork: resume an existing provider session but branch into a new session
+  // id instead of appending to it. Set by the websocket /fork interception.
+  if (options.forkSession) {
+    sdkOptions.forkSession = true;
   }
 
   return sdkOptions;
