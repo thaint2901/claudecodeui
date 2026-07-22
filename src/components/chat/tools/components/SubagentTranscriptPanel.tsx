@@ -1,8 +1,9 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 
 import type { ChatMessage } from '../../types/types';
+import { Button } from '../../../../shared/view/ui/Button';
 import { ToolRenderer } from '../ToolRenderer';
 
 import { MarkdownContent } from './ContentRenderers';
@@ -17,28 +18,80 @@ interface SubagentTranscriptPanelProps {
   finalResult: string | null;
 }
 
+const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 /**
  * Slide-over drawer showing a subagent's full transcript at main-session
  * fidelity. Read-only, live-updating (childMessages re-derive on every store
  * change while the run streams). Deliberately NOT a route: closing it must
  * return to the exact main-session scroll position.
+ *
+ * This panel hand-rolls its own overlay plumbing rather than reusing
+ * `src/shared/view/ui/Dialog.tsx` because `DialogContent` hardcodes a
+ * centered-modal layout (`left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2
+ * w-full max-w-lg` plus a scale/fade entrance animation). Overriding those
+ * utility classes to express a right-anchored, full-height drawer would
+ * leave `left-1/2` fighting a `right-0` override in the same box — with
+ * `width` also set explicitly, CSS treats the box as over-constrained and
+ * drops `right`, so the drawer would not reliably stick to the right edge.
+ * Instead this panel brings its own plumbing up to parity with Dialog:
+ * aria-modal, an initial-focus effect, focus restore on close, a Tab focus
+ * trap, and a body scroll lock.
  */
 export const SubagentTranscriptPanel: React.FC<SubagentTranscriptPanelProps> = ({
   open, onClose, title, prompt, childMessages, isComplete, finalResult,
 }) => {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+        return;
+      }
+      if (e.key === 'Tab' && panelRef.current) {
+        const focusable = Array.from(panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+
+    previousFocusRef.current = document.activeElement as HTMLElement;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    requestAnimationFrame(() => {
+      const first = panelRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+      first?.focus();
+    });
+
+    return () => {
+      document.removeEventListener('keydown', onKey, true);
+      document.body.style.overflow = prevOverflow;
+      previousFocusRef.current?.focus();
+      previousFocusRef.current = null;
+    };
   }, [open, onClose]);
 
   if (!open) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-[1100]" role="dialog" aria-label={title}>
+    <div className="fixed inset-0 z-[1100]" role="dialog" aria-modal="true" aria-label={title}>
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-      <div className="absolute bottom-0 right-0 top-0 flex w-full max-w-2xl flex-col border-l border-border bg-background shadow-2xl">
+      <div
+        ref={panelRef}
+        className="absolute bottom-0 right-0 top-0 flex w-full max-w-2xl flex-col border-l border-border bg-background shadow-2xl"
+      >
         <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold text-foreground">{title}</div>
@@ -46,14 +99,16 @@ export const SubagentTranscriptPanel: React.FC<SubagentTranscriptPanelProps> = (
               {isComplete ? 'Completed' : 'Running…'}
             </div>
           </div>
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="icon"
             onClick={onClose}
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
             aria-label="Close subagent transcript"
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
         <div className="flex-1 overflow-y-auto px-4 py-3">
           {prompt && (
@@ -63,22 +118,28 @@ export const SubagentTranscriptPanel: React.FC<SubagentTranscriptPanelProps> = (
             </div>
           )}
           {childMessages.map((message, index) => {
+            const key = message.toolId || `${String(message.timestamp)}-${index}`;
             if (message.isToolUse) {
               return (
-                <div key={message.toolId || index} className="my-1">
+                <div key={key} className="my-1">
+                  {message.displayText && (
+                    <div className="mb-1 text-sm text-foreground">{message.displayText}</div>
+                  )}
                   <ToolRenderer
                     toolName={message.toolName || 'UnknownTool'}
                     toolInput={message.toolInput}
                     toolResult={message.toolResult}
                     toolId={message.toolId}
                     mode="input"
+                    isSubagentContainer={message.isSubagentContainer}
+                    subagentState={message.subagentState}
                   />
                 </div>
               );
             }
             return (
               <div
-                key={index}
+                key={key}
                 className={`my-2 text-sm ${message.type === 'user' ? 'text-muted-foreground' : 'text-foreground'}`}
               >
                 <MarkdownContent content={message.content || ''} />
