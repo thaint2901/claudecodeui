@@ -285,7 +285,22 @@ async function handleChatSend(
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
-  const command = typeof data.content === 'string' ? data.content : '';
+  let command = typeof data.content === 'string' ? data.content : '';
+
+  const subtaskCommand = provider === 'claude' ? parseSubtaskCommand(command) : null;
+  if (subtaskCommand) {
+    // /subtask maps to the fork subagent (inherits full conversation context).
+    // There is no SDK API to force this — explicit prompting is the documented
+    // technique and CLAUDE_CODE_FORK_SUBAGENT=1 is always set. Best-effort:
+    // the model usually complies but may act directly instead.
+    command = [
+      `Use the Agent tool with subagent_type "fork" to work on the following task in the background`,
+      `(a fork inherits this conversation's full context, so do not re-explain the situation to it).`,
+      `Report its result back here when it finishes. Task:`,
+      '',
+      subtaskCommand.task,
+    ].join('\n');
+  }
 
   // The provider runtimes receive the provider-native session id (that is the
   // id their CLI/SDK understands for resume). Brand-new sessions have no
