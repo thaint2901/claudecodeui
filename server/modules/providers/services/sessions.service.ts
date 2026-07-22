@@ -10,6 +10,7 @@ import type {
   FetchHistoryResult,
   LLMProvider,
   NormalizedMessage,
+  ProviderSessionId,
 } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
 
@@ -296,8 +297,14 @@ export const sessionsService = {
    * Updates the DB immediately, then best-effort writes the name back into
    * the provider's own on-disk session artifact (currently only Claude
    * supports this) so native CLI tooling reflects the same name. A failed
-   * write-back (missing transcript, unsupported provider) never fails the
-   * rename itself — the DB is the source of truth for the webui regardless.
+   * write-back (missing transcript, unresolvable/unsupported provider) never
+   * fails the rename itself — the DB is the source of truth for the webui
+   * regardless. `resolveProvider` and `writeBackCustomName` are both inside
+   * the try/catch below so that contract holds even for a provider id that
+   * doesn't resolve; `writeBackCustomName` itself already logs and swallows
+   * its own errors for the (only) Claude implementation, so this catch is
+   * primarily defense-in-depth for a future provider whose implementation
+   * doesn't.
    */
   async renameSessionById(sessionId: string, summary: string): Promise<{ sessionId: string; summary: string }> {
     const session = sessionsDb.getSessionById(sessionId);
@@ -310,12 +317,13 @@ export const sessionsService = {
 
     sessionsDb.updateSessionCustomName(sessionId, summary);
 
-    const providerSessionId = session.provider_session_id ?? session.session_id;
-    const synchronizer = providerRegistry.resolveProvider(session.provider).sessionSynchronizer;
     try {
-      await synchronizer.writeBackCustomName?.(providerSessionId, summary);
+      const providerSessionId = (session.provider_session_id ?? session.session_id) as ProviderSessionId;
+      const synchronizer = providerRegistry.resolveProvider(session.provider).sessionSynchronizer;
+      await synchronizer.writeBackCustomName?.(providerSessionId, summary, session.project_path ?? undefined);
     } catch (error) {
-      console.warn(`Failed to write back session name for "${sessionId}":`, error);
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Failed to write back session name for "${sessionId}"`, { error: message });
     }
 
     return { sessionId, summary };

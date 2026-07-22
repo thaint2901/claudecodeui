@@ -12,6 +12,7 @@ import type {
   ProviderModelsDefinition,
   ProviderMcpServer,
   ProviderSessionActiveModelChange,
+  ProviderSessionId,
   ProviderSkillCreateInput,
   ProviderSkillRemoveInput,
   UpsertProviderMcpServerInput,
@@ -171,9 +172,17 @@ export interface IProviderSessionSynchronizer {
 
   /**
    * Best-effort write-back of a user-set display name into the provider's own
-   * on-disk session artifact, so native CLI tooling (e.g. `claude --resume`)
-   * reflects the same name the app shows. Providers with no such artifact
+   * on-disk session artifact, so native CLI tooling that later reads the
+   * transcript (terminal title, explicit-id `claude --resume <id>`) reflects
+   * the same name the app shows. This does NOT make a session appear in (or
+   * relabel it within) the interactive `claude --resume` picker for sessions
+   * originated by this app — Claude Code excludes Agent-SDK-origin sessions
+   * from that picker regardless of title. Providers with no on-disk artifact
    * format simply don't implement this.
+   *
+   * `projectPath`, when known, scopes the on-disk lookup to that project
+   * directory instead of searching every project under the provider's config
+   * dir — pass it whenever the caller already has it.
    */
-  writeBackCustomName?(providerSessionId: string, customName: string): Promise<void>;
+  writeBackCustomName?(providerSessionId: ProviderSessionId, customName: string, projectPath?: string): Promise<void>;
 }
