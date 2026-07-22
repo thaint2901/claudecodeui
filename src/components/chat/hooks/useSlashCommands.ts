@@ -202,6 +202,21 @@ export function useSlashCommands({
           : null;
         const skillCommands = dedupeProviderSkills(skillsData?.data?.skills || [])
           .map(mapSkillToSlashCommand);
+
+        // Built-ins by subtraction: system/init's slash_commands lists
+        // EVERYTHING the runtime can dispatch — true built-ins plus every
+        // bundled/user/project skill. A name belongs in the claude-builtin
+        // group only when no richer source (ccui, skills scan, custom .md
+        // commands) already knows it, so each command appears exactly once,
+        // in its most informative group.
+        const knownCommandNames = new Set<string>([
+          ...((data.builtIn || []) as SlashCommand[]).map((command) => command.name),
+          ...skillCommands.map((command) => command.name),
+          ...((data.custom || []) as SlashCommand[]).map((command) => command.name),
+        ]);
+        const claudeBuiltInCommands = ((data.claudeBuiltIn || []) as SlashCommand[])
+          .filter((command) => !knownCommandNames.has(command.name));
+
         const allCommands: SlashCommand[] = [
           // ccui pseudo-commands come first: for a colliding name, dispatch
           // interception in handleSubmit finds the ccui entry first.
@@ -209,7 +224,7 @@ export function useSlashCommands({
             ...command,
             type: 'built-in',
           })),
-          ...((data.claudeBuiltIn || []) as SlashCommand[]).map((command) => ({
+          ...claudeBuiltInCommands.map((command) => ({
             ...command,
             type: 'claude-builtin',
           })),
