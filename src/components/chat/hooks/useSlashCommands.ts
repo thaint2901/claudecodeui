@@ -81,11 +81,11 @@ const dedupeProviderSkills = (skills: ProviderSkill[]): ProviderSkill[] => {
 const mapSkillToSlashCommand = (skill: ProviderSkill): SlashCommand => ({
   name: skill.command,
   description: skill.description,
-  namespace: 'skill',
+  namespace: skill.scope === 'project' ? 'project' : 'user',
   path: skill.sourcePath,
   type: 'skill',
   metadata: {
-    type: skill.scope,
+    type: 'skill',
     scope: skill.scope,
     sourcePath: skill.sourcePath,
     pluginName: skill.pluginName,
@@ -203,9 +203,15 @@ export function useSlashCommands({
         const skillCommands = dedupeProviderSkills(skillsData?.data?.skills || [])
           .map(mapSkillToSlashCommand);
         const allCommands: SlashCommand[] = [
+          // ccui pseudo-commands come first: for a colliding name, dispatch
+          // interception in handleSubmit finds the ccui entry first.
           ...((data.builtIn || []) as SlashCommand[]).map((command) => ({
             ...command,
             type: 'built-in',
+          })),
+          ...((data.claudeBuiltIn || []) as SlashCommand[]).map((command) => ({
+            ...command,
+            type: 'claude-builtin',
           })),
           ...skillCommands,
           ...((data.custom || []) as SlashCommand[]).map((command) => ({

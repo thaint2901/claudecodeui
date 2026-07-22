@@ -576,8 +576,8 @@ export function useChatComposerState({
       {
         name: '/cost',
         description: 'Display token usage information',
-        namespace: 'builtin',
-        metadata: { type: 'builtin' },
+        namespace: 'ccui',
+        metadata: { type: 'ccui' },
       } as SlashCommand,
       '/cost',
       { preserveInput: true },
@@ -824,11 +824,11 @@ export function useChatComposerState({
             ? ({
                 name: '/help',
                 description: 'Show help documentation for Claude Code',
-                namespace: 'builtin',
-                metadata: { type: 'builtin' },
+                namespace: 'ccui',
+                metadata: { type: 'ccui' },
               } as SlashCommand)
             : undefined);
-        if (matchedCommand && matchedCommand.type !== 'skill') {
+        if (matchedCommand && matchedCommand.type !== 'skill' && matchedCommand.type !== 'claude-builtin') {
           executeCommand(matchedCommand, isHelpAlias ? '/help' : commandInput);
           setInput('');
           inputValueRef.current = '';
