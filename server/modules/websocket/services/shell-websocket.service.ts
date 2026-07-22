@@ -8,7 +8,7 @@ import { WebSocket, type RawData } from 'ws';
 import { parseIncomingJsonObject } from '@/shared/utils.js';
 import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 
-type ShellIncomingMessage = {
+export type ShellIncomingMessage = {
   type?: string;
   data?: string;
   cols?: number;
@@ -35,7 +35,7 @@ const ptySessionsMap = new Map<string, PtySessionEntry>();
 const PTY_SESSION_TIMEOUT = 30 * 60 * 1000;
 const SHELL_URL_PARSE_BUFFER_LIMIT = 32768;
 
-type ShellWebSocketDependencies = {
+export type ShellWebSocketDependencies = {
   resolveProviderSessionId: (
     sessionId: string,
     provider: string,
@@ -113,7 +113,7 @@ function resolveResumeSessionId(
 /**
  * Resolves provider command line for plain shell and agent-backed shell modes.
  */
-function buildShellCommand(
+export function buildShellCommand(
   message: ShellIncomingMessage,
   dependencies: ShellWebSocketDependencies
 ): string {
@@ -154,8 +154,12 @@ function buildShellCommand(
     return initialCommand || 'opencode';
   }
 
-  const claudeBin = resolveClaudeCodeExecutablePath().replace(/"/g, '\\"');
   const isWindows = os.platform() === 'win32';
+  // Backslash-escapes a quote for bash's double-quoted strings; PowerShell's
+  // double-quoted strings instead require doubling the quote character.
+  const claudeBin = isWindows
+    ? resolveClaudeCodeExecutablePath().replace(/"/g, '""')
+    : resolveClaudeCodeExecutablePath().replace(/"/g, '\\"');
   const invoke = isWindows ? `& "${claudeBin}"` : `"${claudeBin}"`;
   if (resumeSessionId) {
     if (isWindows) {
