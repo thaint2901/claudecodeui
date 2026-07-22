@@ -4,57 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { sessionsDb } from '@/modules/database/index.js';
 import { ClaudeSessionSynchronizer } from '@/modules/providers/list/claude/claude-session-synchronizer.provider.js';
-
-const patchHomeDir = (nextHomeDir: string) => {
-  const original = os.homedir;
-  (os as any).homedir = () => nextHomeDir;
-  return () => {
-    (os as any).homedir = original;
-  };
-};
-
-/**
- * `renameSession()` from `@anthropic-ai/claude-agent-sdk` resolves its config
- * directory via `process.env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), '.claude')`
- * using a named `import { homedir }` that does NOT observe `patchHomeDir`'s
- * reassignment of `os.homedir`. Tests that exercise `writeBackCustomName`
- * must also set `CLAUDE_CONFIG_DIR` to the same fake `.claude` directory.
- */
-const patchClaudeConfigDir = (fakeHomeDir: string) => {
-  const previous = process.env.CLAUDE_CONFIG_DIR;
-  process.env.CLAUDE_CONFIG_DIR = path.join(fakeHomeDir, '.claude');
-  return () => {
-    if (previous === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR;
-    } else {
-      process.env.CLAUDE_CONFIG_DIR = previous;
-    }
-  };
-};
-
-async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
-  const previousDatabasePath = process.env.DATABASE_PATH;
-  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), 'claude-provider-db-'));
-  const databasePath = path.join(tempDirectory, 'auth.db');
-
-  closeConnection();
-  process.env.DATABASE_PATH = databasePath;
-  await initializeDatabase();
-
-  try {
-    await runTest();
-  } finally {
-    closeConnection();
-    if (previousDatabasePath === undefined) {
-      delete process.env.DATABASE_PATH;
-    } else {
-      process.env.DATABASE_PATH = previousDatabasePath;
-    }
-    await rm(tempDirectory, { recursive: true, force: true });
-  }
-}
+import { patchClaudeConfigDir, patchHomeDir, withIsolatedDatabase } from '@/modules/providers/tests/test-helpers.js';
+import type { ProviderSessionId } from '@/shared/types.js';
 
 /**
  * Writes one Claude transcript file with the given lines, returning its path.
@@ -143,6 +96,39 @@ test('Claude synchronizer falls back to the existing DB name when disk has no ti
   }
 });
 
+test('Claude synchronizer uses history.jsonl display as a fallback name when disk has no title event but the DB has none either', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-session-sync-namemap-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+
+  try {
+    // No custom-title/ai-title/last-prompt event on disk for this session,
+    // so processSessionFile's first fallback tier (disk-derived) yields
+    // nothing and must fall through to history.jsonl's `display` field.
+    await writeClaudeTranscript(tempRoot, 'claude-namemap-1', workspacePath);
+    await mkdir(path.join(tempRoot, '.claude'), { recursive: true });
+    await writeFile(
+      path.join(tempRoot, '.claude', 'history.jsonl'),
+      `${JSON.stringify({ sessionId: 'claude-namemap-1', display: 'First prompt from history.jsonl' })}\n`,
+      'utf8'
+    );
+
+    await withIsolatedDatabase(async () => {
+      const synchronizer = new ClaudeSessionSynchronizer();
+      await synchronizer.synchronize();
+
+      assert.equal(
+        sessionsDb.getSessionByProviderSessionId('claude-namemap-1')?.custom_name,
+        'First prompt from history.jsonl'
+      );
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('Claude synchronizer keeps a custom-title as sticky even when a later last-prompt event is appended', { concurrency: false }, async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-session-sync-sticky-lastprompt-'));
   const workspacePath = path.join(tempRoot, 'workspace');
@@ -191,6 +177,34 @@ test('Claude synchronizer keeps a custom-title as sticky even when a later ai-ti
   }
 });
 
+test('Claude synchronizer keeps a custom-title as sticky even when it sits outside the tail-scan byte budget', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-session-sync-sticky-large-file-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+
+  try {
+    // Padding pushes the custom-title event (written before it) outside the
+    // synchronizer's tail-scan fast path (65536 bytes), so this only passes
+    // if the full-scan fallback for custom-title actually runs.
+    const filler = 'x'.repeat(80_000);
+    await writeClaudeTranscript(tempRoot, 'claude-sticky-large-1', workspacePath, [
+      { type: 'custom-title', customTitle: 'Renamed via CLI' },
+      { type: 'last-prompt', lastPrompt: filler },
+    ]);
+
+    await withIsolatedDatabase(async () => {
+      const synchronizer = new ClaudeSessionSynchronizer();
+      await synchronizer.synchronize();
+
+      assert.equal(sessionsDb.getSessionByProviderSessionId('claude-sticky-large-1')?.custom_name, 'Renamed via CLI');
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('Claude synchronizer writeBackCustomName appends a custom-title event via renameSession', { concurrency: false }, async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-session-sync-writeback-'));
   const workspacePath = path.join(tempRoot, 'workspace');
@@ -199,17 +213,48 @@ test('Claude synchronizer writeBackCustomName appends a custom-title event via r
   const restoreConfigDir = patchClaudeConfigDir(tempRoot);
 
   try {
-    const filePath = await writeClaudeTranscript(tempRoot, '11111111-2222-4333-8444-555555555555', workspacePath);
+    const providerSessionId = '11111111-2222-4333-8444-555555555555' as ProviderSessionId;
+    const filePath = await writeClaudeTranscript(tempRoot, providerSessionId, workspacePath);
 
     const synchronizer = new ClaudeSessionSynchronizer();
-    await synchronizer.writeBackCustomName('11111111-2222-4333-8444-555555555555', 'Renamed via webui');
+    await synchronizer.writeBackCustomName(providerSessionId, 'Renamed via webui');
 
     const contents = await readFile(filePath, 'utf8');
     const lastLine = contents.trim().split('\n').pop()!;
     assert.deepEqual(JSON.parse(lastLine), {
       type: 'custom-title',
       customTitle: 'Renamed via webui',
-      sessionId: '11111111-2222-4333-8444-555555555555',
+      sessionId: providerSessionId,
+    });
+  } finally {
+    restoreConfigDir();
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('Claude synchronizer writeBackCustomName scopes the lookup to projectPath when provided', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-session-sync-writeback-scoped-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+  const restoreConfigDir = patchClaudeConfigDir(tempRoot);
+
+  try {
+    const providerSessionId = '22222222-3333-4444-8555-666666666666' as ProviderSessionId;
+    const filePath = await writeClaudeTranscript(tempRoot, providerSessionId, workspacePath);
+
+    const synchronizer = new ClaudeSessionSynchronizer();
+    // Passing the project path should scope renameSession's lookup instead
+    // of searching every project under CLAUDE_CONFIG_DIR/projects.
+    await synchronizer.writeBackCustomName(providerSessionId, 'Renamed with scoped dir', workspacePath);
+
+    const contents = await readFile(filePath, 'utf8');
+    const lastLine = contents.trim().split('\n').pop()!;
+    assert.deepEqual(JSON.parse(lastLine), {
+      type: 'custom-title',
+      customTitle: 'Renamed with scoped dir',
+      sessionId: providerSessionId,
     });
   } finally {
     restoreConfigDir();
@@ -226,7 +271,7 @@ test('Claude synchronizer writeBackCustomName does not throw when the session ha
   try {
     const synchronizer = new ClaudeSessionSynchronizer();
     // No transcript was ever written for this id. Must resolve, not reject.
-    await synchronizer.writeBackCustomName('99999999-8888-4777-8666-555555555555', 'Anything');
+    await synchronizer.writeBackCustomName('99999999-8888-4777-8666-555555555555' as ProviderSessionId, 'Anything');
   } finally {
     restoreConfigDir();
     restoreHomeDir();

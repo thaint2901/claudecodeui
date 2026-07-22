@@ -4,52 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { sessionsDb } from '@/modules/database/index.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
-
-const patchHomeDir = (nextHomeDir: string) => {
-  const original = os.homedir;
-  (os as any).homedir = () => nextHomeDir;
-  return () => {
-    (os as any).homedir = original;
-  };
-};
-
-// See claude-sessions.test.ts for why both of these patches are required
-// together when exercising a path that calls the SDK's `renameSession`.
-const patchClaudeConfigDir = (fakeHomeDir: string) => {
-  const previous = process.env.CLAUDE_CONFIG_DIR;
-  process.env.CLAUDE_CONFIG_DIR = path.join(fakeHomeDir, '.claude');
-  return () => {
-    if (previous === undefined) {
-      delete process.env.CLAUDE_CONFIG_DIR;
-    } else {
-      process.env.CLAUDE_CONFIG_DIR = previous;
-    }
-  };
-};
-
-async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promise<void> {
-  const previousDatabasePath = process.env.DATABASE_PATH;
-  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), 'rename-session-db-'));
-  const databasePath = path.join(tempDirectory, 'auth.db');
-
-  closeConnection();
-  process.env.DATABASE_PATH = databasePath;
-  await initializeDatabase();
-
-  try {
-    await runTest();
-  } finally {
-    closeConnection();
-    if (previousDatabasePath === undefined) {
-      delete process.env.DATABASE_PATH;
-    } else {
-      process.env.DATABASE_PATH = previousDatabasePath;
-    }
-    await rm(tempDirectory, { recursive: true, force: true });
-  }
-}
+import { patchClaudeConfigDir, patchHomeDir, withIsolatedDatabase } from '@/modules/providers/tests/test-helpers.js';
 
 test('renameSessionById updates the DB and writes back a custom-title event for Claude sessions', { concurrency: false }, async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'rename-session-transcript-'));
