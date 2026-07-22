@@ -126,8 +126,8 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
   async writeBackCustomName(providerSessionId: string, customName: string): Promise<void> {
     try {
       await renameSession(providerSessionId, customName);
-    } catch {
-      // Session not found on disk yet, or another transient lookup failure.
+    } catch (error) {
+      console.warn(`Failed to write back Claude session name for "${providerSessionId}":`, error);
     }
   }
 
