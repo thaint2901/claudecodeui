@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
 
@@ -45,7 +44,6 @@ function isKnownIgnoredStreamEvent(event: AnyRecord): boolean {
 type ClaudeToolResult = {
   content: unknown;
   isError: boolean;
-  subagentTools?: unknown;
   toolUseResult?: unknown;
 };
 
@@ -67,70 +65,24 @@ type ClaudeHistoryMessagesResult =
     limit?: number | null;
   };
 
-async function parseAgentTools(filePath: string): Promise<AnyRecord[]> {
-  const tools: AnyRecord[] = [];
-
+async function parseAgentEntries(filePath: string): Promise<AnyRecord[]> {
+  const entries: AnyRecord[] = [];
   try {
     const fileStream = fs.createReadStream(filePath);
-    const rl = readline.createInterface({
-      input: fileStream,
-      crlfDelay: Infinity,
-    });
-
+    const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
     for await (const line of rl) {
-      if (!line.trim()) {
-        continue;
-      }
-
+      if (!line.trim()) continue;
       try {
-        const entry = JSON.parse(line) as AnyRecord;
-
-        if (entry.message?.role === 'assistant' && Array.isArray(entry.message?.content)) {
-          for (const part of entry.message.content as AnyRecord[]) {
-            if (part.type === 'tool_use') {
-              tools.push({
-                toolId: part.id,
-                toolName: part.name,
-                toolInput: part.input,
-                timestamp: entry.timestamp,
-              });
-            }
-          }
-        }
-
-        if (entry.message?.role === 'user' && Array.isArray(entry.message?.content)) {
-          for (const part of entry.message.content as AnyRecord[]) {
-            if (part.type !== 'tool_result') {
-              continue;
-            }
-
-            const tool = tools.find((candidate) => candidate.toolId === part.tool_use_id);
-            if (!tool) {
-              continue;
-            }
-
-            tool.toolResult = {
-              content: typeof part.content === 'string'
-                ? part.content
-                : Array.isArray(part.content)
-                  ? part.content
-                    .map((contentPart: AnyRecord) => contentPart?.text || '')
-                    .join('\n')
-                  : JSON.stringify(part.content),
-              isError: Boolean(part.is_error),
-            };
-          }
-        }
+        entries.push(JSON.parse(line) as AnyRecord);
       } catch {
-        // Skip malformed lines that can happen during concurrent writes.
+        // Skip malformed lines from concurrent writes.
       }
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`Error parsing agent file ${filePath}:`, message);
   }
-
-  return tools;
+  return entries;
 }
 
 async function getSessionMessages(
@@ -149,11 +101,8 @@ async function getSessionMessages(
     }
 
     const projectDir = path.dirname(jsonLPath);
-    const files = await fsp.readdir(projectDir);
-    const agentFiles = files.filter((file) => file.endsWith('.jsonl') && file.startsWith('agent-'));
 
     const messages: AnyRecord[] = [];
-    const agentToolsCache = new Map<string, AnyRecord[]>();
 
     const fileStream = fs.createReadStream(jsonLPath);
     const rl = readline.createInterface({
@@ -176,34 +125,31 @@ async function getSessionMessages(
       }
     }
 
-    const agentIds = new Set<string>();
+    // Map each subagent to its parent Agent tool_use id. The user-side record
+    // that carries toolUseResult.agentId also holds the tool_result whose
+    // tool_use_id IS the parent tool_use id (parent_tool_use_id itself is
+    // never persisted to disk).
+    const agentParentToolIds = new Map<string, string>();
     for (const message of messages) {
       const agentId = message.toolUseResult?.agentId;
-      if (agentId) {
-        agentIds.add(String(agentId));
+      if (!agentId || !Array.isArray(message.message?.content)) continue;
+      for (const part of message.message.content as AnyRecord[]) {
+        if (part.type === 'tool_result' && part.tool_use_id) {
+          agentParentToolIds.set(String(agentId), String(part.tool_use_id));
+          break;
+        }
       }
     }
 
-    for (const agentId of agentIds) {
-      const agentFileName = `agent-${agentId}.jsonl`;
-      if (!agentFiles.includes(agentFileName)) {
-        continue;
-      }
-
-      const agentFilePath = path.join(projectDir, agentFileName);
-      const tools = await parseAgentTools(agentFilePath);
-      agentToolsCache.set(agentId, tools);
-    }
-
-    for (const message of messages) {
-      const agentId = message.toolUseResult?.agentId;
-      if (!agentId) {
-        continue;
-      }
-
-      const agentTools = agentToolsCache.get(String(agentId));
-      if (agentTools && agentTools.length > 0) {
-        message.subagentTools = agentTools;
+    // Agent transcripts live at <projectDir>/<provider-session-id>/subagents/.
+    const subagentsDir = path.join(projectDir, providerSessionId, 'subagents');
+    for (const [agentId, parentToolUseId] of agentParentToolIds) {
+      const agentFilePath = path.join(subagentsDir, `agent-${agentId}.jsonl`);
+      const entries = await parseAgentEntries(agentFilePath);
+      for (const entry of entries) {
+        // Non-enumerable-safe internal marker; consumed by fetchHistory below.
+        entry.__parentToolUseId = parentToolUseId;
+        messages.push(entry);
       }
     }
 
@@ -376,7 +322,6 @@ export class ClaudeSessionsProvider implements IProviderSessions {
               toolId: part.tool_use_id,
               content: typeof part.content === 'string' ? part.content : JSON.stringify(part.content),
               isError: Boolean(part.is_error),
-              subagentTools: raw.subagentTools,
               toolUseResult: raw.toolUseResult,
             }));
           } else if (part.type === 'text') {
@@ -648,7 +593,6 @@ export class ClaudeSessionsProvider implements IProviderSessions {
             toolResultMap.set(part.tool_use_id, {
               content: part.content,
               isError: Boolean(part.is_error),
-              subagentTools: raw.subagentTools,
               toolUseResult: raw.toolUseResult,
             });
           }
@@ -658,7 +602,13 @@ export class ClaudeSessionsProvider implements IProviderSessions {
 
     const normalized: NormalizedMessage[] = [];
     for (const raw of rawMessages) {
-      normalized.push(...this.normalizeMessage(raw, sessionId));
+      const produced = this.normalizeMessage(raw, sessionId);
+      if (typeof raw.__parentToolUseId === 'string') {
+        for (const msg of produced) {
+          msg.parentToolUseId = raw.__parentToolUseId;
+        }
+      }
+      normalized.push(...produced);
     }
 
     for (const msg of normalized) {
@@ -675,7 +625,6 @@ export class ClaudeSessionsProvider implements IProviderSessions {
           isError: toolResult.isError,
           toolUseResult: toolResult.toolUseResult,
         };
-        msg.subagentTools = toolResult.subagentTools;
       }
     }
 
