@@ -8,7 +8,7 @@ A web/desktop UI for **Claude Code**, **Cursor CLI**, **Codex**, and **OpenCode*
 
 Distribution package: `@cloudcli-ai/cloudcli` (published to npm). Repo `name`/`productName` is "CloudCLI" but the GitHub repo and CLI command were historically `claudecodeui` — many file names, README translations, and the `cloudcli` bin all coexist.
 
-**This is a fork** of the upstream `siteboon/claudecodeui`. The fork lives at `thaint-udata/claudecodeui`; same source tree, no local rename.
+**This is a fork** of the upstream `siteboon/claudecodeui`. The fork lives at `thaint2901/claudecodeui`; same source tree, no local rename. (An earlier separate fork, `thaint-udata/claudecodeui`, diverged and is no longer used — `origin` was repointed to `thaint2901/claudecodeui` on 2026-07-22 since that fork is what's actually deployed to production and where ongoing development happens; `thaint-udata/claudecodeui` still exists on GitHub but should not be pushed to or treated as canonical.)
 
 ## Common Commands
 
@@ -192,7 +192,7 @@ A DeepWiki MCP server is registered in user scope at `https://mcp.deepwiki.com/m
 
 **When NOT to use it:**
 
-- This is a **fork** (`thaint-udata/claudecodeui`). DeepWiki only indexes the **public upstream** `siteboon/claudecodeui`. Any local-only changes (this `CLAUDE.md`, `.claude/hooks/hooks.json`, and any uncommitted worktree edits) are **invisible** to DeepWiki.
+- This is a **fork** (`thaint2901/claudecodeui`). DeepWiki only indexes the **public upstream** `siteboon/claudecodeui`. Any local-only changes (this `CLAUDE.md`, `.claude/hooks/hooks.json`, and any uncommitted worktree edits) are **invisible** to DeepWiki.
 - For fork-specific behavior, trust this `CLAUDE.md` and the local code over DeepWiki. If DeepWiki contradicts a fact recorded here, the local source wins.
 - DeepWiki only covers **public** repos. If the upstream were ever moved private, this MCP would return empty/error responses.
 
