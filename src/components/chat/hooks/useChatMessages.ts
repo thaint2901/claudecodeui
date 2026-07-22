@@ -65,11 +65,16 @@ function parseTaskNotification(content: string): ParsedTaskNotification | null {
  * intentionally preserved and annotated so they can render like normal chat.
  */
 export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMessage[] {
-  const converted: ChatMessage[] = [];
-
   // Group subagent children under their parent. `parentToolUseId` is the one
   // data contract both delivery paths honor: the live SDK stream sets it in
   // claude-sdk.js, the persisted reader stamps it during JSONL reconstruction.
+  //
+  // Built ONCE from the full flat array and threaded through the recursive
+  // conversion below (rather than re-partitioned per nesting level) so a
+  // nested Agent's own children resolve correctly. Children whose parent
+  // tool_use is on an older, not-yet-loaded page are intentionally dropped
+  // from view and self-heal when that page loads — same policy as the
+  // orphaned tool_result skip further down.
   const childrenByParent = new Map<string, NormalizedMessage[]>();
   const topLevel: NormalizedMessage[] = [];
   for (const msg of messages) {
@@ -81,6 +86,23 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
       topLevel.push(msg);
     }
   }
+
+  return convertMessages(topLevel, childrenByParent);
+}
+
+/**
+ * Converts one level of messages (top-level or a subagent's direct children)
+ * into ChatMessage[], using a single shared `childrenByParent` map (keyed by
+ * `parentToolUseId`, built once from the full flat array) for grouping at
+ * every nesting level. Recursing with this same map — rather than
+ * re-partitioning a slice — is what lets a nested Agent's own children
+ * (grandchildren of the outer call) resolve correctly.
+ */
+function convertMessages(
+  topLevel: NormalizedMessage[],
+  childrenByParent: Map<string, NormalizedMessage[]>,
+): ChatMessage[] {
+  const converted: ChatMessage[] = [];
 
   // First pass: collect tool results for attachment
   const toolResultMap = new Map<string, NormalizedMessage>();
@@ -182,11 +204,11 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
             });
           }
         }
-        // Full child transcript for the drawer: recursion handles nested
-        // subagents (a child Agent call groups its own children one level down).
+        // Full child transcript for the drawer: recurse with the SAME shared
+        // childrenByParent map so a nested Agent's own children (grandchildren
+        // of this call, keyed under the nested Agent's toolId) resolve too.
         const childMessages = isSubagentContainer && children.length > 0
-          ? normalizedToChatMessages(children.map((c) =>
-              c.parentToolUseId === msg.toolId ? { ...c, parentToolUseId: undefined } : c))
+          ? convertMessages(children, childrenByParent)
           : [];
 
         const toolResult = tr

@@ -60,3 +60,47 @@ test('orphan children (parent trimmed out of window) are dropped, not top-levele
   assert.equal(out.some((m) => m.type === 'user'), false);
   assert.equal(out.some((m) => m.toolName === 'Read'), false);
 });
+
+function nestedSubagentFixture(): NormalizedMessage[] {
+  return [
+    // Outer Agent (toolu_a)
+    { ...base, id: 'n1', kind: 'tool_use', toolName: 'Agent', toolId: 'toolu_a',
+      toolInput: JSON.stringify({ description: 'Outer', subagent_type: 'general-purpose', prompt: 'go' }) },
+    // Nested Agent (toolu_b), a direct child of the outer Agent
+    { ...base, id: 'n2', kind: 'tool_use', toolName: 'Agent', toolId: 'toolu_b',
+      toolInput: JSON.stringify({ description: 'Inner', subagent_type: 'general-purpose', prompt: 'go deeper' }),
+      parentToolUseId: 'toolu_a' },
+    { ...base, id: 'n3', kind: 'tool_result', toolId: 'toolu_b', content: 'Inner report', parentToolUseId: 'toolu_a' },
+    // Grandchildren: children of the NESTED Agent, not the outer one
+    { ...base, id: 'n4', kind: 'text', role: 'assistant', content: 'Inner thinking', parentToolUseId: 'toolu_b' },
+    { ...base, id: 'n5', kind: 'tool_use', toolName: 'Read', toolId: 'toolu_c',
+      toolInput: '{"file_path":"/tmp/nested.md"}', parentToolUseId: 'toolu_b' },
+    { ...base, id: 'n6', kind: 'tool_result', toolId: 'toolu_c', content: '# Nested', parentToolUseId: 'toolu_b' },
+  ] as NormalizedMessage[];
+}
+
+test('2-level nesting: nested Agent keeps its own children (grandchildren)', () => {
+  const out = normalizedToChatMessages(nestedSubagentFixture());
+
+  // Nothing rendered at top level besides the outer container.
+  assert.equal(out.length, 1);
+  const outerContainer = out[0];
+  assert.equal(outerContainer.isSubagentContainer, true);
+
+  // Outer container's childMessages contain the nested container (and nothing else stray).
+  const outerChildMessages = outerContainer.subagentState?.childMessages ?? [];
+  const nestedContainer = outerChildMessages.find((m) => m.isSubagentContainer);
+  assert.ok(nestedContainer, 'nested Agent container should appear in outer childMessages');
+  assert.equal(outerChildMessages.length, 1);
+
+  // The nested container's subagentState.childTools contains the Read with its result attached.
+  const childTools = nestedContainer.subagentState?.childTools ?? [];
+  assert.equal(childTools.length, 1);
+  assert.equal(childTools[0].toolName, 'Read');
+  assert.equal(childTools[0].toolResult?.content, '# Nested');
+
+  // The nested container's own childMessages include the grandchild text + tool.
+  const nestedChildMessages = nestedContainer.subagentState?.childMessages ?? [];
+  const kinds = nestedChildMessages.map((m) => (m.isToolUse ? 'tool' : m.type));
+  assert.deepEqual(kinds, ['assistant', 'tool']);
+});
