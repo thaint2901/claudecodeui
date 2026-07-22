@@ -67,10 +67,25 @@ function parseTaskNotification(content: string): ParsedTaskNotification | null {
 export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMessage[] {
   const converted: ChatMessage[] = [];
 
+  // Group subagent children under their parent. `parentToolUseId` is the one
+  // data contract both delivery paths honor: the live SDK stream sets it in
+  // claude-sdk.js, the persisted reader stamps it during JSONL reconstruction.
+  const childrenByParent = new Map<string, NormalizedMessage[]>();
+  const topLevel: NormalizedMessage[] = [];
+  for (const msg of messages) {
+    if (typeof msg.parentToolUseId === 'string' && msg.parentToolUseId) {
+      const siblings = childrenByParent.get(msg.parentToolUseId) ?? [];
+      siblings.push(msg);
+      childrenByParent.set(msg.parentToolUseId, siblings);
+    } else {
+      topLevel.push(msg);
+    }
+  }
+
   // First pass: collect tool results for attachment
   const toolResultMap = new Map<string, NormalizedMessage>();
   const toolUseIds = new Set<string>();
-  for (const msg of messages) {
+  for (const msg of topLevel) {
     if (msg.kind === 'tool_use' && msg.toolId) {
       toolUseIds.add(msg.toolId);
     }
@@ -80,7 +95,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
     }
   }
 
-  for (const msg of messages) {
+  for (const msg of topLevel) {
     const sharedMetadata = {
       displayText: msg.displayText,
       commandName: msg.commandName,
@@ -146,19 +161,33 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
         const tr = msg.toolResult || (msg.toolId ? toolResultMap.get(msg.toolId) : null);
         const isSubagentContainer = isSubagentToolName(msg.toolName);
 
-        // Build child tools from subagentTools
+        const children = (msg.toolId && childrenByParent.get(msg.toolId)) || [];
         const childTools: SubagentChildTool[] = [];
-        if (isSubagentContainer && msg.subagentTools && Array.isArray(msg.subagentTools)) {
-          for (const tool of msg.subagentTools as any[]) {
+        if (isSubagentContainer && children.length > 0) {
+          const childResults = new Map<string, NormalizedMessage>();
+          for (const child of children) {
+            if (child.kind === 'tool_result' && child.toolId) childResults.set(child.toolId, child);
+          }
+          for (const child of children) {
+            if (child.kind !== 'tool_use' || !child.toolId) continue;
+            const childResult = childResults.get(child.toolId);
             childTools.push({
-              toolId: tool.toolId,
-              toolName: tool.toolName,
-              toolInput: tool.toolInput,
-              toolResult: tool.toolResult || null,
-              timestamp: new Date(tool.timestamp || Date.now()),
+              toolId: child.toolId,
+              toolName: child.toolName || 'UnknownTool',
+              toolInput: child.toolInput,
+              toolResult: childResult
+                ? { content: formatToolResultContent(childResult.content), isError: Boolean(childResult.isError) }
+                : null,
+              timestamp: new Date(child.timestamp || Date.now()),
             });
           }
         }
+        // Full child transcript for the drawer: recursion handles nested
+        // subagents (a child Agent call groups its own children one level down).
+        const childMessages = isSubagentContainer && children.length > 0
+          ? normalizedToChatMessages(children.map((c) =>
+              c.parentToolUseId === msg.toolId ? { ...c, parentToolUseId: undefined } : c))
+          : [];
 
         const toolResult = tr
           ? {
@@ -181,6 +210,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
           subagentState: isSubagentContainer
             ? {
                 childTools,
+                childMessages,
                 currentToolIndex: childTools.length > 0 ? childTools.length - 1 : -1,
                 isComplete: Boolean(toolResult),
               }

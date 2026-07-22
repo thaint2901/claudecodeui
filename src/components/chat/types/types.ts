@@ -59,6 +59,7 @@ export interface ChatMessage {
   isSubagentContainer?: boolean;
   subagentState?: {
     childTools: SubagentChildTool[];
+    childMessages: ChatMessage[];
     currentToolIndex: number;
     isComplete: boolean;
   };

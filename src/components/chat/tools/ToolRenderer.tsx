@@ -1,7 +1,7 @@
 import React, { memo, useMemo, useCallback } from 'react';
 
 import type { Project } from '../../../types/app';
-import type { SubagentChildTool } from '../types/types';
+import type { SubagentChildTool, ChatMessage } from '../types/types';
 import { isSubagentToolName } from '../utils/subagentToolNames';
 
 import { getToolConfig } from './configs/toolConfigs';
@@ -30,6 +30,7 @@ interface ToolRendererProps {
   isSubagentContainer?: boolean;
   subagentState?: {
     childTools: SubagentChildTool[];
+    childMessages: ChatMessage[];
     currentToolIndex: number;
     isComplete: boolean;
   };
