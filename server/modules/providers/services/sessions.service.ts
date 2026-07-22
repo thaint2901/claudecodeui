@@ -292,8 +292,14 @@ export const sessionsService = {
 
   /**
    * Renames one session by id without requiring the caller to pass provider.
+   *
+   * Updates the DB immediately, then best-effort writes the name back into
+   * the provider's own on-disk session artifact (currently only Claude
+   * supports this) so native CLI tooling reflects the same name. A failed
+   * write-back (missing transcript, unsupported provider) never fails the
+   * rename itself — the DB is the source of truth for the webui regardless.
    */
-  renameSessionById(sessionId: string, summary: string): { sessionId: string; summary: string } {
+  async renameSessionById(sessionId: string, summary: string): Promise<{ sessionId: string; summary: string }> {
     const session = sessionsDb.getSessionById(sessionId);
     if (!session) {
       throw new AppError(`Session "${sessionId}" was not found.`, {
@@ -303,6 +309,15 @@ export const sessionsService = {
     }
 
     sessionsDb.updateSessionCustomName(sessionId, summary);
+
+    const providerSessionId = session.provider_session_id ?? session.session_id;
+    const synchronizer = providerRegistry.resolveProvider(session.provider).sessionSynchronizer;
+    try {
+      await synchronizer.writeBackCustomName?.(providerSessionId, summary);
+    } catch (error) {
+      console.warn(`Failed to write back session name for "${sessionId}":`, error);
+    }
+
     return { sessionId, summary };
   },
 };
