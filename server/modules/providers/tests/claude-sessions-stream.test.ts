@@ -51,3 +51,32 @@ test('normalizeMessage does not match a top-level content_block_delta (old, inco
 
   assert.deepEqual(result, []);
 });
+
+test('normalizeMessage does not warn for a known-but-ignored delta subtype (input_json_delta)', (t) => {
+  const warnMock = t.mock.method(console, 'warn');
+  const raw = {
+    type: 'stream_event',
+    session_id: 'sess-1',
+    event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{}' } },
+  };
+
+  const result = provider.normalizeMessage(raw, 'sess-1');
+
+  assert.deepEqual(result, []);
+  assert.equal(warnMock.mock.callCount(), 0);
+});
+
+test('normalizeMessage warns once for a genuinely unrecognized stream_event shape', (t) => {
+  const warnMock = t.mock.method(console, 'warn');
+  const raw = {
+    type: 'stream_event',
+    session_id: 'sess-1',
+    event: { type: 'some_never_before_seen_event' },
+  };
+
+  const result = provider.normalizeMessage(raw, 'sess-1');
+
+  assert.deepEqual(result, []);
+  assert.equal(warnMock.mock.callCount(), 1);
+  assert.match(warnMock.mock.calls[0].arguments[0], /\[ClaudeProvider\]/);
+});
