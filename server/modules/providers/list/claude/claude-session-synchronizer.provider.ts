@@ -2,6 +2,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 
+import { renameSession } from '@anthropic-ai/claude-agent-sdk';
+
 import { sessionsDb } from '@/modules/database/index.js';
 import {
   buildLookupMap,
@@ -108,6 +110,28 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
   }
 
   /**
+   * Renames the session's own transcript via the Agent SDK's `renameSession`,
+   * so a webui rename becomes visible to native CLI tooling (`claude
+   * --resume`, terminal title) the same way `claude -n <name>`/`/rename`
+   * would. `renameSession` locates the transcript by searching
+   * `~/.claude/projects/**` for the session id, so no jsonl path bookkeeping
+   * is needed here.
+   *
+   * Best-effort: if the session has no transcript on disk yet (e.g. an
+   * app-created session that hasn't produced a Claude Code process run yet),
+   * `renameSession` rejects and this silently swallows that instead of
+   * failing the rename API call — the DB name is the source of truth for
+   * the webui regardless of whether the disk write-back succeeded.
+   */
+  async writeBackCustomName(providerSessionId: string, customName: string): Promise<void> {
+    try {
+      await renameSession(providerSessionId, customName);
+    } catch {
+      // Session not found on disk yet, or another transient lookup failure.
+    }
+  }
+
+  /**
    * Extracts session metadata from one Claude JSONL session file.
    */
   private async processSessionFile(
@@ -137,17 +161,21 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
     // ids must be resolved through the provider-id mapping first.
     const existingSession = sessionsDb.getSessionByProviderSessionId(parsed.sessionId)
       ?? sessionsDb.getSessionById(parsed.sessionId);
-    const existingSessionName = existingSession?.custom_name;
-    if (existingSessionName && existingSessionName !== 'Untitled Claude Session') {
-      return {
-        ...parsed,
-        sessionName: normalizeSessionName(existingSessionName, 'Untitled Claude Session'),
-      };
-    }
+    const existingSessionName = existingSession?.custom_name ?? undefined;
 
-    let sessionName = nameMap.get(parsed.sessionId);
+    // The transcript is append-only and both a native CLI rename
+    // (`claude -n <name>`/`/rename`) and our own write-back path (see
+    // `writeBackCustomName`) append the same `custom-title` event shape, so
+    // "the latest title event in the file" is always the freshest name
+    // regardless of which side produced it. Re-deriving this on every pass
+    // (instead of freezing once `custom_name` is set) is what makes renames
+    // flow in both directions.
+    let sessionName = await this.extractSessionAiTitleFromEnd(filePath, parsed.sessionId);
     if (!sessionName) {
-      sessionName = await this.extractSessionAiTitleFromEnd(filePath, parsed.sessionId);
+      sessionName = nameMap.get(parsed.sessionId);
+    }
+    if (!sessionName) {
+      sessionName = existingSessionName;
     }
 
     return {
