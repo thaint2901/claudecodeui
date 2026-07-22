@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChangeEvent,
   ClipboardEvent,
@@ -604,6 +604,11 @@ export function useChatComposerState({
     setInput,
     textareaRef,
   });
+
+  const slashCommandNames = useMemo(
+    () => new Set(slashCommands.map((command) => command.name)),
+    [slashCommands],
+  );
 
   const {
     showFileDropdown,
@@ -1308,6 +1313,7 @@ export function useChatComposerState({
     inputHighlightRef,
     isTextareaExpanded,
     slashCommandsCount,
+    slashCommandNames,
     filteredCommands,
     frequentCommands,
     commandQuery,
