@@ -68,6 +68,17 @@ export type AuthenticatedWebSocketRequest = IncomingMessage & {
 export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode';
 
 /**
+ * A provider-native session id (e.g. the UUID Claude Code assigns), branded
+ * to keep it out of accidental interchange with the app-facing `sessionId`
+ * used elsewhere (`session_id` vs `provider_session_id` are distinct,
+ * sometimes-diverging id spaces at the DB layer — see
+ * `sessionsDb.getSessionByProviderSessionId`). Construct one only from
+ * `session.provider_session_id ?? session.session_id`, never from a raw
+ * app-facing id.
+ */
+export type ProviderSessionId = string & { readonly __brand: 'ProviderSessionId' };
+
+/**
  * One selectable model row in a provider model catalog.
  */
 export type ProviderModelOption = {
