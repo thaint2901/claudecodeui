@@ -553,6 +553,11 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
  * Get configuration for a tool, with fallback to default
  */
 export function getToolConfig(toolName: string): ToolDisplayConfig {
+  // 'Agent' is the current name of the subagent-dispatch tool; 'Task' is the
+  // legacy name still present in old transcripts. Same rendering config.
+  if (toolName === 'Agent') {
+    return TOOL_CONFIGS.Task;
+  }
   return TOOL_CONFIGS[toolName] || TOOL_CONFIGS.Default;
 }
 

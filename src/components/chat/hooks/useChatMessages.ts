@@ -6,6 +6,7 @@
 import type { NormalizedMessage } from '../../../stores/useSessionStore';
 import type { ChatMessage, SubagentChildTool } from '../types/types';
 import { decodeHtmlEntities, unescapeWithMathProtection, formatUsageLimitText } from '../utils/chatFormatting';
+import { isSubagentToolName } from '../utils/subagentToolNames';
 
 function formatToolResultContent(content: unknown): string {
   const text = typeof content === 'string' ? content : JSON.stringify(content);
@@ -143,7 +144,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
 
       case 'tool_use': {
         const tr = msg.toolResult || (msg.toolId ? toolResultMap.get(msg.toolId) : null);
-        const isSubagentContainer = msg.toolName === 'Task';
+        const isSubagentContainer = isSubagentToolName(msg.toolName);
 
         // Build child tools from subagentTools
         const childTools: SubagentChildTool[] = [];
