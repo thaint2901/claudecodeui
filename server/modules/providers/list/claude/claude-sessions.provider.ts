@@ -10,6 +10,38 @@ import { sessionsDb } from '@/modules/database/index.js';
 
 const PROVIDER = 'claude';
 
+// Known top-level stream_event types and known-but-intentionally-unhandled
+// content_block_delta subtypes. Anything outside these is unexpected and
+// warrants a diagnostic warning rather than a silent drop.
+const KNOWN_STREAM_EVENT_TYPES = new Set([
+  'message_start',
+  'message_delta',
+  'message_stop',
+  'content_block_start',
+  'content_block_delta',
+  'content_block_stop',
+  'ping',
+]);
+
+const KNOWN_IGNORED_DELTA_TYPES = new Set([
+  'text_delta',
+  'input_json_delta',
+  'thinking_delta',
+  'signature_delta',
+  'citations_delta',
+]);
+
+function isKnownIgnoredStreamEvent(event: AnyRecord): boolean {
+  if (typeof event.type !== 'string' || !KNOWN_STREAM_EVENT_TYPES.has(event.type)) {
+    return false;
+  }
+  if (event.type !== 'content_block_delta') {
+    return true;
+  }
+  const delta = readObjectRecord(event.delta);
+  return typeof delta?.type === 'string' && KNOWN_IGNORED_DELTA_TYPES.has(delta.type);
+}
+
 type ClaudeToolResult = {
   content: unknown;
   isError: boolean;
@@ -300,11 +332,18 @@ export class ClaudeSessionsProvider implements IProviderSessions {
       return [];
     }
 
-    if (raw.type === 'content_block_delta' && raw.delta?.text) {
-      return [createNormalizedMessage({ kind: 'stream_delta', content: raw.delta.text, sessionId, provider: PROVIDER })];
-    }
-    if (raw.type === 'content_block_stop') {
-      return [createNormalizedMessage({ kind: 'stream_end', sessionId, provider: PROVIDER })];
+    if (raw.type === 'stream_event') {
+      const event = readObjectRecord(raw.event);
+      if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta?.text) {
+        return [createNormalizedMessage({ kind: 'stream_delta', content: event.delta.text, sessionId, provider: PROVIDER })];
+      }
+      if (event?.type === 'content_block_stop') {
+        return [createNormalizedMessage({ kind: 'stream_end', sessionId, provider: PROVIDER })];
+      }
+      if (event && !isKnownIgnoredStreamEvent(event)) {
+        console.warn(`[ClaudeProvider] Unrecognized stream_event shape for session ${sessionId}:`, event.type, event.delta?.type);
+      }
+      return [];
     }
 
     const messages: NormalizedMessage[] = [];

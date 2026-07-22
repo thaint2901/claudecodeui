@@ -226,6 +226,10 @@ function mapCliOptionsToSDK(options = {}) {
 
   sdkOptions.settingSources = ['project', 'user', 'local'];
 
+  // Emit SDKPartialAssistantMessage ("stream_event") messages so the UI can
+  // render assistant text incrementally instead of waiting for a full turn.
+  sdkOptions.includePartialMessages = true;
+
   if (sessionId) {
     sdkOptions.resume = sessionId;
   }
@@ -829,5 +833,6 @@ export {
   getActiveClaudeSDKSessions,
   resolveToolApproval,
   getPendingApprovalsForSession,
-  reconnectSessionWriter
+  reconnectSessionWriter,
+  mapCliOptionsToSDK
 };
