@@ -10,6 +10,7 @@ import {
   stripFrontMatter,
 } from "../utils/command-paths.js";
 import { findAppRoot, getModuleDir } from "../utils/runtime-paths.js";
+import { getClaudeBuiltinCommandEntries } from "../utils/claude-builtin-commands.js";
 
 const __dirname = getModuleDir(import.meta.url);
 // This route reads the top-level package.json for the status command, so it needs the real
@@ -182,38 +183,38 @@ const builtInCommands = [
   {
     name: "/help",
     description: "Show help documentation for Claude Code",
-    namespace: "builtin",
-    metadata: { type: "builtin" },
+    namespace: "ccui",
+    metadata: { type: "ccui" },
   },
   {
     name: "/models",
     description: "View available models for the current provider",
-    namespace: "builtin",
-    metadata: { type: "builtin" },
+    namespace: "ccui",
+    metadata: { type: "ccui" },
   },
   {
     name: "/cost",
     description: "Display token usage information",
-    namespace: "builtin",
-    metadata: { type: "builtin" },
+    namespace: "ccui",
+    metadata: { type: "ccui" },
   },
   {
     name: "/memory",
     description: "Open CLAUDE.md memory file for editing",
-    namespace: "builtin",
-    metadata: { type: "builtin" },
+    namespace: "ccui",
+    metadata: { type: "ccui" },
   },
   {
     name: "/config",
     description: "Open settings and configuration",
-    namespace: "builtin",
-    metadata: { type: "builtin" },
+    namespace: "ccui",
+    metadata: { type: "ccui" },
   },
   {
     name: "/status",
     description: "Show system status and version information",
-    namespace: "builtin",
-    metadata: { type: "builtin" },
+    namespace: "ccui",
+    metadata: { type: "ccui" },
   },
 ];
 
@@ -484,16 +485,24 @@ router.post("/list", async (req, res) => {
 
     // Separate built-in and custom commands
     const customCommands = allCommands.filter(
-      (cmd) => cmd.namespace !== "builtin",
+      (cmd) => cmd.namespace !== "ccui",
     );
 
     // Sort commands alphabetically by name
     customCommands.sort((a, b) => a.name.localeCompare(b.name));
 
+    // Claude Code's own built-ins, captured live from the CLI's system/init
+    // message. Collisions with ccui pseudo-commands are excluded so a name
+    // appears in exactly one group (ccui wins: it intercepts dispatch first).
+    const claudeBuiltIn = provider === "claude"
+      ? getClaudeBuiltinCommandEntries(builtInCommands.map((cmd) => cmd.name))
+      : [];
+
     res.json({
       builtIn: builtInCommands,
+      claudeBuiltIn,
       custom: customCommands,
-      count: allCommands.length,
+      count: allCommands.length + claudeBuiltIn.length,
     });
   } catch (error) {
     console.error("Error listing commands:", error);

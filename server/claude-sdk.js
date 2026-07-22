@@ -32,6 +32,7 @@ import {
 import { sessionsService } from './modules/providers/services/sessions.service.js';
 import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
 import { createCompleteMessage, createNormalizedMessage } from './shared/utils.js';
+import { setClaudeBuiltinCommands } from './utils/claude-builtin-commands.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
@@ -655,6 +656,13 @@ async function queryClaudeSDK(command, options = {}, ws) {
         }
       } else {
         // session_id already captured
+      }
+
+      // The init message enumerates the CLI's dispatchable built-in commands.
+      // Cache them process-wide so /api/commands/list can group them for the
+      // palette — sourced live from the running binary, never hardcoded.
+      if (message.type === 'system' && message.subtype === 'init') {
+        setClaudeBuiltinCommands(message.slash_commands);
       }
 
       // Transform and normalize message via adapter
