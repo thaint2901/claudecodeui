@@ -168,4 +168,12 @@ export interface IProviderSessionSynchronizer {
    * Parses and upserts one provider artifact file without running a full scan.
    */
   synchronizeFile(filePath: string): Promise<string | null>;
+
+  /**
+   * Best-effort write-back of a user-set display name into the provider's own
+   * on-disk session artifact, so native CLI tooling (e.g. `claude --resume`)
+   * reflects the same name the app shows. Providers with no such artifact
+   * format simply don't implement this.
+   */
+  writeBackCustomName?(providerSessionId: string, customName: string): Promise<void>;
 }
