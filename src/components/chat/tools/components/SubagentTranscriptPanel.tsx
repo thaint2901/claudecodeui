@@ -20,6 +20,18 @@ interface SubagentTranscriptPanelProps {
 
 const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+// Every mounted panel registers its keydown listener on `document` (capture
+// phase) so nested panels (panel opened from inside another panel) can trap
+// focus regardless of DOM position. Capture-phase listeners on the SAME
+// target fire in registration order, not reverse — so the most-recently-
+// mounted (topmost, innermost) panel's listener runs LAST, and
+// stopPropagation/stopImmediatePropagation from it cannot un-run earlier
+// listeners that already fired. This stack lets every panel check whether it
+// is currently the topmost open panel before acting, so only one panel ever
+// responds to a given Escape/Tab press.
+let panelIdCounter = 0;
+const openPanelStack: number[] = [];
+
 /**
  * Slide-over drawer showing a subagent's full transcript at main-session
  * fidelity. Read-only, live-updating (childMessages re-derive on every store
@@ -43,10 +55,20 @@ export const SubagentTranscriptPanel: React.FC<SubagentTranscriptPanelProps> = (
 }) => {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const panelIdRef = useRef<number>();
+  if (panelIdRef.current === undefined) {
+    panelIdRef.current = ++panelIdCounter;
+  }
 
   useEffect(() => {
     if (!open) return;
+    const panelId = panelIdRef.current!;
+    openPanelStack.push(panelId);
     const onKey = (e: KeyboardEvent) => {
+      // Only the topmost open panel (last one pushed onto the stack) reacts;
+      // see the comment above `openPanelStack` for why this — not
+      // stopPropagation — is what makes "topmost wins" hold.
+      if (openPanelStack[openPanelStack.length - 1] !== panelId) return;
       if (e.key === 'Escape') {
         onClose();
         return;
@@ -77,6 +99,8 @@ export const SubagentTranscriptPanel: React.FC<SubagentTranscriptPanelProps> = (
 
     return () => {
       document.removeEventListener('keydown', onKey, true);
+      const idx = openPanelStack.indexOf(panelId);
+      if (idx !== -1) openPanelStack.splice(idx, 1);
       document.body.style.overflow = prevOverflow;
       previousFocusRef.current?.focus();
       previousFocusRef.current = null;
