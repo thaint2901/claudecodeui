@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { WebSocket } from 'ws';
 
 import { sessionsDb } from '@/modules/database/index.js';
+import { sessionsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import { getGlobalImageAssetsDir, normalizeImageDescriptors } from '@/shared/image-attachments.js';
@@ -11,7 +12,7 @@ import type {
   AuthenticatedWebSocketRequest,
   LLMProvider,
 } from '@/shared/types.js';
-import { parseIncomingJsonObject } from '@/shared/utils.js';
+import { createNormalizedMessage, parseIncomingJsonObject } from '@/shared/utils.js';
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -133,6 +134,21 @@ function readRequiredSessionId(data: AnyRecord): string | null {
   return sessionId.length > 0 ? sessionId : null;
 }
 
+/** Matches "/fork" or "/fork <prompt>" typed as the whole message. */
+export function parseForkCommand(content: string): { prompt: string } | null {
+  const match = content.trim().match(/^\/fork(?:\s+([\s\S]*))?$/);
+  if (!match) return null;
+  return { prompt: (match[1] ?? '').trim() };
+}
+
+/** Matches "/subtask <task>" typed as the whole message (task text required). */
+export function parseSubtaskCommand(content: string): { task: string } | null {
+  const match = content.trim().match(/^\/subtask\s+([\s\S]+)$/);
+  if (!match) return null;
+  const task = match[1].trim();
+  return task ? { task } : null;
+}
+
 /**
  * Handles `chat.send`: resolves the session row (provider, project path, and
  * provider-native id all come from the database — never from the client),
@@ -165,6 +181,68 @@ async function handleChatSend(
   const spawnFn = dependencies.spawnFns[provider];
   if (!spawnFn) {
     sendProtocolError(ws, 'UNSUPPORTED_PROVIDER', `Provider "${provider}" is not available.`, sessionId);
+    return;
+  }
+
+  const forkCommand = provider === 'claude' ? parseForkCommand(typeof data.content === 'string' ? data.content : '') : null;
+  if (forkCommand) {
+    if (!session.provider_session_id) {
+      sendProtocolError(ws, 'FORK_NO_HISTORY', 'Cannot fork a session that has no conversation yet.', sessionId);
+      return;
+    }
+
+    // Allocate the fork its own app session row; the SDK announces the fork's
+    // provider id mid-run and the session writer maps it onto this row.
+    const forked = sessionsService.createAppSession('claude', session.project_path ?? '');
+    sessionsDb.updateSessionCustomName(
+      forked.sessionId,
+      `${session.custom_name || 'Session'} (fork)`,
+    );
+
+    const forkRun = chatRunRegistry.startRun({
+      appSessionId: forked.sessionId,
+      provider,
+      providerSessionId: session.provider_session_id,
+      connection: ws,
+      userId,
+    });
+    if (!forkRun) {
+      sendProtocolError(ws, 'RUN_IN_PROGRESS', `Forked session "${forked.sessionId}" already has a run in progress.`, sessionId);
+      return;
+    }
+
+    // Ack into the ORIGINAL session's transcript so the user sees where the fork went.
+    ws.send(JSON.stringify(createNormalizedMessage({
+      kind: 'task_notification',
+      sessionId,
+      provider,
+      status: 'completed',
+      summary: `Forked conversation into a new session${forkCommand.prompt ? ' and started it on the given prompt' : ''}. Find it in the sidebar as "${session.custom_name || 'Session'} (fork)".`,
+    })));
+
+    const clientOptions = (data.options ?? {}) as AnyRecord;
+    const forkOptions: AnyRecord = {
+      ...clientOptions,
+      images: [],
+      sessionId: session.provider_session_id,
+      resume: true,
+      forkSession: true,
+      cwd: session.project_path ?? undefined,
+      projectPath: session.project_path ?? undefined,
+    };
+
+    try {
+      await spawnFn(
+        forkCommand.prompt || 'Continue from where the conversation left off. Wait for further instructions and summarize the current state briefly.',
+        forkOptions,
+        forkRun.writer,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[Chat] /fork run failed', { sessionId: forked.sessionId, error: message });
+    } finally {
+      chatRunRegistry.completeRunIfCurrent(forkRun, { exitCode: 1 });
+    }
     return;
   }
 
