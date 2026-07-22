@@ -6,6 +6,7 @@ import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
 import { parseIncomingJsonObject } from '@/shared/utils.js';
+import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 
 type ShellIncomingMessage = {
   type?: string;
@@ -153,14 +154,16 @@ function buildShellCommand(
     return initialCommand || 'opencode';
   }
 
-  const command = initialCommand || 'claude';
+  const claudeBin = resolveClaudeCodeExecutablePath().replace(/"/g, '\\"');
+  const isWindows = os.platform() === 'win32';
+  const invoke = isWindows ? `& "${claudeBin}"` : `"${claudeBin}"`;
   if (resumeSessionId) {
-    if (os.platform() === 'win32') {
-      return `claude --resume "${resumeSessionId}"; if ($LASTEXITCODE -ne 0) { claude }`;
+    if (isWindows) {
+      return `${invoke} --resume "${resumeSessionId}"; if ($LASTEXITCODE -ne 0) { ${invoke} }`;
     }
-    return `claude --resume "${resumeSessionId}" || claude`;
+    return `${invoke} --resume "${resumeSessionId}" || ${invoke}`;
   }
-  return command;
+  return initialCommand || invoke;
 }
 
 function readEnvValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
