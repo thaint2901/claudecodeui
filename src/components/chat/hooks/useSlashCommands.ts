@@ -23,7 +23,6 @@ interface UseSlashCommandsOptions {
   input: string;
   setInput: Dispatch<SetStateAction<string>>;
   textareaRef: RefObject<HTMLTextAreaElement>;
-  onExecuteCommand: (command: SlashCommand, rawInput?: string) => void | Promise<void>;
 }
 
 type ProviderSkill = {
@@ -62,12 +61,6 @@ const readCommandHistory = (projectName: string): Record<string, number> => {
 const saveCommandHistory = (projectName: string, history: Record<string, number>) => {
   safeLocalStorage.setItem(getCommandHistoryKey(projectName), JSON.stringify(history));
 };
-
-const isPromiseLike = (value: unknown): value is Promise<unknown> =>
-  Boolean(value) && typeof (value as Promise<unknown>).then === 'function';
-
-const isSkillCommand = (command: SlashCommand) =>
-  command.type === 'skill' || command.metadata?.type === 'skill';
 
 const dedupeProviderSkills = (skills: ProviderSkill[]): ProviderSkill[] => {
   const seenCommands = new Set<string>();
@@ -141,7 +134,6 @@ export function useSlashCommands({
   input,
   setInput,
   textareaRef,
-  onExecuteCommand,
 }: UseSlashCommandsOptions) {
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([]);
@@ -313,36 +305,11 @@ export function useSlashCommands({
     [input, resetCommandMenuState, setInput, slashPosition, textareaRef],
   );
 
-  const executeNonSkillCommand = useCallback(
-    (command: SlashCommand) => {
-      const executionResult = onExecuteCommand(command);
-      if (isPromiseLike(executionResult)) {
-        executionResult.then(
-          () => {
-            resetCommandMenuState();
-          },
-          () => {
-            resetCommandMenuState();
-            // Keep behavior silent; execution errors are handled by caller.
-          },
-        );
-      } else {
-        resetCommandMenuState();
-      }
-    },
-    [onExecuteCommand, resetCommandMenuState],
-  );
-
   const selectCommandFromKeyboard = useCallback(
     (command: SlashCommand) => {
-      if (isSkillCommand(command)) {
-        insertCommandIntoInput(command);
-        return;
-      }
-
-      executeNonSkillCommand(command);
+      insertCommandIntoInput(command);
     },
-    [executeNonSkillCommand, insertCommandIntoInput],
+    [insertCommandIntoInput],
   );
 
   const handleCommandSelect = useCallback(
@@ -357,14 +324,9 @@ export function useSlashCommands({
       }
 
       trackCommandUsage(command);
-      if (isSkillCommand(command)) {
-        insertCommandIntoInput(command);
-        return;
-      }
-
-      executeNonSkillCommand(command);
+      insertCommandIntoInput(command);
     },
-    [selectedProject, trackCommandUsage, insertCommandIntoInput, executeNonSkillCommand],
+    [selectedProject, trackCommandUsage, insertCommandIntoInput],
   );
 
   const handleToggleCommandMenu = useCallback(() => {
