@@ -37,12 +37,21 @@ const getCompactToolDisplay = (toolName: string, toolInput: unknown): string => 
   }
 };
 
+// Fork-mode subagents (see spec 2026-07-22-subagent-fork-subtask) always run
+// in the background, so their tool_result is this launch-ack boilerplate
+// rather than the subagent's actual output. Users who enable background mode
+// themselves can hit the same boilerplate, so guard defensively here too.
+const BACKGROUND_LAUNCH_ACK_PREFIX = 'Async agent launched successfully';
+export const isBackgroundLaunchAck = (text: string | null): boolean =>
+  typeof text === 'string' && text.trim().startsWith(BACKGROUND_LAUNCH_ACK_PREFIX);
+
 /**
  * Parses a tool result's content into a plain-text string, handling both the
  * raw string/array shapes and the JSON-stringified array-of-text-parts shape
- * the SDK sometimes emits for subagent (Task tool) results.
+ * the SDK sometimes emits for subagent (Task tool) results. Suppresses the
+ * background-launch-ack boilerplate in favor of a neutral status line.
  */
-const extractResultText = (toolResult?: { content?: unknown; isError?: boolean } | null): string | null => {
+export const extractResultText = (toolResult?: { content?: unknown; isError?: boolean } | null): string | null => {
   if (!toolResult) return null;
 
   let content = toolResult.content;
@@ -70,7 +79,9 @@ const extractResultText = (toolResult?: { content?: unknown; isError?: boolean }
     }
   }
 
-  if (typeof content === 'string') return content;
+  if (typeof content === 'string') {
+    return isBackgroundLaunchAck(content) ? 'Running in background...' : content;
+  }
   if (content) return JSON.stringify(content, null, 2);
   return null;
 };
