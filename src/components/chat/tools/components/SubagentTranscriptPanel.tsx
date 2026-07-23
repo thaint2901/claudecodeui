@@ -6,6 +6,7 @@ import type { ChatMessage } from '../../types/types';
 import { Button } from '../../../../shared/view/ui/Button';
 import { ToolRenderer } from '../ToolRenderer';
 import { createCachedDiffCalculator, type DiffCalculator } from '../../utils/messageTransforms';
+import { transcriptEndsWithText as computeTranscriptEndsWithText } from '../../utils/subagentToolNames';
 
 import { MarkdownContent } from './ContentRenderers';
 
@@ -73,10 +74,7 @@ export const SubagentTranscriptPanel: React.FC<SubagentTranscriptPanelProps> = (
   // (forwarding off, incomplete transcripts): error results are normally
   // shown via the per-tool error boxes above, but finalResult for an error
   // still renders here when the transcript lacks a trailing text message.
-  const transcriptEndsWithText = useMemo(() => {
-    const lastChild = childMessages[childMessages.length - 1];
-    return Boolean(lastChild && lastChild.type === 'assistant' && !lastChild.isToolUse && (lastChild.content || '').trim());
-  }, [childMessages]);
+  const transcriptEndsWithText = useMemo(() => computeTranscriptEndsWithText(childMessages), [childMessages]);
 
   useEffect(() => {
     if (!open) return;
