@@ -20,8 +20,9 @@ export async function findForkResumePoint(
   providerSessionId: string,
   editAtMessageUuid: string,
 ): Promise<{ resumeSessionAt: string | null }> {
+  const stream = createReadStream(jsonlPath, 'utf8');
   const rl = readline.createInterface({
-    input: createReadStream(jsonlPath, 'utf8'),
+    input: stream,
     crlfDelay: Infinity,
   });
 
@@ -47,6 +48,7 @@ export async function findForkResumePoint(
     }
   } finally {
     rl.close();
+    stream.destroy();
   }
 
   throw new ForkResumePointError(
