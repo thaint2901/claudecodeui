@@ -209,6 +209,69 @@ test('fetchHistory resolves with parent messages intact when the subagent transc
   }
 });
 
+test('fetchHistory locates an inherited subagent transcript under a sibling session directory', async () => {
+  // A fork transcript is a copy of the parent's history: the inherited Agent
+  // tool_use entry keeps toolUseResult.agentId, but the agent's own transcript
+  // file only ever existed under the PARENT session's directory, not the
+  // fork's. fetchHistory must fall back to scanning sibling session dirs.
+  const parentSessionId = '55555555-5555-5555-5555-555555555555';
+  const forkSessionId = '66666666-6666-6666-6666-666666666666';
+  const siblingAgentId = 'sibling-agent-id';
+  const siblingParentToolId = 'toolu_sibling_parent';
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'claude-proj-'));
+  try {
+    // The fork's own JSONL — inherited Agent tool_use/tool_result, stamped
+    // with the FORK's sessionId (as a real fork transcript copy would be).
+    const forkJsonl = path.join(projectDir, `${forkSessionId}.jsonl`);
+    await writeFile(forkJsonl, [
+      jsonlLine({
+        sessionId: forkSessionId, timestamp: '2026-07-23T10:00:00Z', type: 'assistant',
+        message: { role: 'assistant', content: [
+          { type: 'tool_use', id: siblingParentToolId, name: 'Agent',
+            input: { description: 'Review readme', subagent_type: 'general-purpose', prompt: 'Review the readme' } },
+        ] },
+      }),
+      jsonlLine({
+        sessionId: forkSessionId, timestamp: '2026-07-23T10:01:00Z', type: 'user',
+        toolUseResult: { agentId: siblingAgentId },
+        message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: siblingParentToolId, content: 'Report: looks fine' },
+        ] },
+      }),
+    ].join(''));
+
+    // The agent transcript file lives only under the PARENT session's dir —
+    // deliberately NOT under <projectDir>/<forkSessionId>/subagents/.
+    const parentSubagentsDir = path.join(projectDir, parentSessionId, 'subagents');
+    await mkdir(parentSubagentsDir, { recursive: true });
+    await writeFile(path.join(parentSubagentsDir, `agent-${siblingAgentId}.jsonl`), [
+      jsonlLine({
+        timestamp: '2026-07-23T10:00:10Z', type: 'assistant',
+        message: { role: 'assistant', content: [
+          { type: 'text', text: 'Reading the readme now.' },
+          { type: 'tool_use', id: 'toolu_sibling_child', name: 'Read', input: { file_path: '/tmp/README.md' } },
+        ] },
+      }),
+    ].join(''));
+
+    const appSessionId = sessionsDb.createSession(
+      forkSessionId, 'claude', projectDir, undefined, undefined, undefined, forkJsonl,
+    );
+
+    const provider = new ClaudeSessionsProvider();
+    const result = await provider.fetchHistory(appSessionId, {
+      providerSessionId: forkSessionId, limit: null, offset: 0,
+    });
+
+    const children = result.messages.filter((m) => m.parentToolUseId === siblingParentToolId);
+    assert.ok(children.length >= 2, `expected stamped children from the sibling dir, got ${children.length}`);
+    const childToolUse = children.find((m) => m.kind === 'tool_use');
+    assert.equal(childToolUse?.toolName, 'Read');
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
 test('fetchHistory stamps each of two subagents with its own correct parentToolUseId', async () => {
   const dualSessionId = '33333333-3333-3333-3333-333333333333';
   const agentIdOne = 'dual-agent-one';

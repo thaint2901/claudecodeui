@@ -84,6 +84,39 @@ function collectEntryToolIds(entry: AnyRecord): string[] {
   return ids;
 }
 
+/**
+ * Fork transcripts inherit the parent's Agent tool calls verbatim, but the
+ * copy carries no pointer back to the parent session — and the agent's own
+ * transcript file only ever existed under the PARENT session's directory.
+ * When the primary path (under the current session) misses, scan sibling
+ * session directories in the same project for `agent-<agentId>.jsonl`; agent
+ * ids are unique random hex, so any match found is unambiguous.
+ */
+function resolveAgentFilePath(projectDir: string, primaryPath: string, agentId: string): string | null {
+  if (fs.existsSync(primaryPath)) {
+    return primaryPath;
+  }
+
+  const targetFileName = `agent-${agentId}.jsonl`;
+  let sessionDirs: string[];
+  try {
+    sessionDirs = fs.readdirSync(projectDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return null;
+  }
+
+  for (const sessionDir of sessionDirs) {
+    const candidate = path.join(projectDir, sessionDir, 'subagents', targetFileName);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 async function parseAgentEntries(filePath: string): Promise<AnyRecord[]> {
   const entries: AnyRecord[] = [];
   try {
@@ -170,7 +203,15 @@ async function getSessionMessages(
     // Agent transcripts live at <projectDir>/<provider-session-id>/subagents/.
     const subagentsDir = path.join(projectDir, providerSessionId, 'subagents');
     for (const [agentId, parentToolUseId] of agentParentToolIds) {
-      const agentFilePath = path.join(subagentsDir, `agent-${agentId}.jsonl`);
+      const primaryAgentFilePath = path.join(subagentsDir, `agent-${agentId}.jsonl`);
+      // Forked sessions inherit Agent tool calls whose transcript file lives
+      // only under the PARENT session's directory — fall back to scanning
+      // sibling session dirs in this project when the primary path misses.
+      const agentFilePath = resolveAgentFilePath(projectDir, primaryAgentFilePath, agentId);
+      if (!agentFilePath) {
+        console.warn(`Error parsing agent file ${primaryAgentFilePath}: not found in this session or any sibling session directory`);
+        continue;
+      }
       const entries = await parseAgentEntries(agentFilePath);
       for (const entry of entries) {
         // A `fork` subagent inherits the parent conversation, so its
