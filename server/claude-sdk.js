@@ -295,6 +295,40 @@ function shouldRecaptureSessionId(isFork, announcedId, capturedId) {
 }
 
 /**
+ * Re-captures a fork run's session id once `shouldRecaptureSessionId` says
+ * the SDK has announced the fork's own (distinct) id mid-stream: swaps the
+ * active-sessions tracking entry from the parent-seeded id to the new one,
+ * relabels the writer so its outgoing events carry the new id, and lets the
+ * caller announce `session_created` to the client.
+ *
+ * Extracted from the stream loop (and dependency-injected) purely so the
+ * wiring — order of operations, `setSessionId` call, `session_created` send —
+ * can be unit-tested without spinning up a real SDK query stream.
+ *
+ * @param {Object} deps
+ * @param {string} deps.oldId - The currently captured (parent-seeded) session id.
+ * @param {string} deps.newId - The newly announced fork session id.
+ * @param {Object} deps.queryInstance - The SDK query instance to re-track under the new id.
+ * @param {Object} deps.ws - The websocket writer; its `setSessionId` (if present) labels its outgoing events.
+ * @param {(sessionId: string) => void} deps.removeSession
+ * @param {(sessionId: string, queryInstance: Object, writer?: Object) => void} deps.addSession
+ * @param {() => void} deps.sendSessionCreated - Announces the new id to the client; caller controls once-only guarding.
+ * @returns {string} `deps.newId`, so callers can reassign their captured-id variable in one line.
+ */
+function recaptureForkSession({ oldId, newId, queryInstance, ws, removeSession, addSession, sendSessionCreated }) {
+  removeSession(oldId);
+  addSession(newId, queryInstance, ws);
+
+  if (ws.setSessionId && typeof ws.setSessionId === 'function') {
+    ws.setSessionId(newId);
+  }
+
+  sendSessionCreated();
+
+  return newId;
+}
+
+/**
  * Adds a session to the active sessions map
  * @param {string} sessionId - Session identifier
  * @param {Object} queryInstance - SDK query instance
@@ -715,18 +749,21 @@ async function queryClaudeSDK(command, options = {}, ws) {
         // but the SDK announces the fork's own new id on its first system/init
         // message. Treat that announced id as authoritative so the app session
         // row gets mapped onto the fork's transcript instead of staying a ghost.
-        removeSession(capturedSessionId);
-        capturedSessionId = message.session_id;
-        addSession(capturedSessionId, queryInstance, ws);
-
-        if (ws.setSessionId && typeof ws.setSessionId === 'function') {
-          ws.setSessionId(capturedSessionId);
-        }
-
-        if (!sessionCreatedSent) {
-          sessionCreatedSent = true;
-          ws.send(createNormalizedMessage({ kind: 'session_created', newSessionId: capturedSessionId, sessionId: capturedSessionId, provider: 'claude' }));
-        }
+        const newSessionId = message.session_id;
+        capturedSessionId = recaptureForkSession({
+          oldId: capturedSessionId,
+          newId: newSessionId,
+          queryInstance,
+          ws,
+          removeSession,
+          addSession,
+          sendSessionCreated: () => {
+            if (!sessionCreatedSent) {
+              sessionCreatedSent = true;
+              ws.send(createNormalizedMessage({ kind: 'session_created', newSessionId, sessionId: newSessionId, provider: 'claude' }));
+            }
+          },
+        });
       } else {
         // session_id already captured
       }
@@ -916,5 +953,6 @@ export {
   getPendingApprovalsForSession,
   reconnectSessionWriter,
   mapCliOptionsToSDK,
-  shouldRecaptureSessionId
+  shouldRecaptureSessionId,
+  recaptureForkSession
 };
