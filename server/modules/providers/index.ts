@@ -12,3 +12,5 @@ export {
   sessionLockWatcherService,
 } from './services/session-lock-watcher.service.js';
 export { closeSessionLockWatcher } from './services/session-lock-watcher.service.js';
+
+export { findForkResumePoint, ForkResumePointError } from './list/claude/claude-fork.provider.js';
