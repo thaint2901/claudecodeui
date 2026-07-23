@@ -32,6 +32,7 @@ import {
 import { sessionsService } from './modules/providers/services/sessions.service.js';
 import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
 import { createCompleteMessage, createNormalizedMessage } from './shared/utils.js';
+import { setClaudeBuiltinCommands } from './utils/claude-builtin-commands.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
@@ -158,13 +159,33 @@ function matchesToolPermission(entry, toolName, input) {
 }
 
 function mapCliOptionsToSDK(options = {}) {
-  const { sessionId, cwd, toolsSettings, permissionMode, effort } = options;
+  const { sessionId, cwd, toolsSettings, permissionMode, effort, forkSubagent } = options;
 
   const sdkOptions = {};
 
   // Forward all host env vars (e.g. ANTHROPIC_BASE_URL) to the subprocess.
   // Since SDK 0.2.113, options.env replaces process.env instead of overlaying it.
   sdkOptions.env = { ...process.env };
+
+  // FORWARD_SUBAGENT_TEXT makes the CLI emit subagent text/thinking blocks so
+  // the transcript panel can show them. Harmless and always on.
+  sdkOptions.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT = '1';
+
+  // FORK_SUBAGENT lets Claude request subagent_type "fork" (inherited-context
+  // subagent, the /subtask mechanism), but per the docs it forces EVERY
+  // subagent launched during the run into the background. Background
+  // subagents lose the canUseTool approval channel, so any tool needing
+  // approval fails with "AbortError: Stream closed", and their results
+  // surface as duplicate task-notifications plus an "Async agent launched
+  // successfully..." boilerplate leaking into the Agent tool_result.
+  // CLAUDE_CODE_DISABLE_BACKGROUND_TASKS takes precedence over fork mode and
+  // keeps subagents foreground (docs-confirmed precedence rule) — but it also
+  // disables Bash run_in_background entirely, so it must stay scoped to
+  // /subtask runs only, not global.
+  if (forkSubagent === true) {
+    sdkOptions.env.CLAUDE_CODE_FORK_SUBAGENT = '1';
+    sdkOptions.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
+  }
 
   // Resolve the executable eagerly on Windows because the SDK uses raw child_process.spawn,
   // which does not reliably follow npm's shell wrappers like cross-spawn does.
@@ -196,6 +217,17 @@ function mapCliOptionsToSDK(options = {}) {
       if (!allowedTools.includes(tool)) {
         allowedTools.push(tool);
       }
+    }
+  }
+
+  // Auto-approve subagent DISPATCH only (the act of starting a subagent),
+  // so dispatch isn't silently denied — unless the user explicitly
+  // disallowed the tool, in which case that opt-out wins. Tools the
+  // subagent itself calls still go through the normal approval flow.
+  const disallowedTools = Array.isArray(settings.disallowedTools) ? settings.disallowedTools : [];
+  for (const dispatchTool of ['Agent', 'Task']) {
+    if (!allowedTools.includes(dispatchTool) && !disallowedTools.includes(dispatchTool)) {
+      allowedTools.push(dispatchTool);
     }
   }
 
@@ -234,7 +266,85 @@ function mapCliOptionsToSDK(options = {}) {
     sdkOptions.resume = sessionId;
   }
 
+  // /fork: resume an existing provider session but branch into a new session
+  // id instead of appending to it. Set by the websocket /fork interception.
+  if (options.forkSession) {
+    sdkOptions.forkSession = true;
+  }
+
   return sdkOptions;
+}
+
+/**
+ * Determines whether a mid-stream `session_id` announcement should replace
+ * the currently captured session id.
+ *
+ * Fork runs are the one case where the provider session id CHANGES mid-stream:
+ * the resume seed is the PARENT's id, but the SDK announces the fork's own new
+ * id on its first `system/init` message and never re-announces the parent id.
+ * Non-fork runs must never re-capture — the first announced id is authoritative
+ * for them, and resume runs intentionally keep the pre-seeded parent id.
+ *
+ * @param {boolean} isFork - Whether this run was started with forkSession.
+ * @param {string|undefined} announcedId - `message.session_id` from the SDK stream.
+ * @param {string|undefined} capturedId - The currently captured session id.
+ * @returns {boolean}
+ */
+function shouldRecaptureSessionId(isFork, announcedId, capturedId) {
+  return Boolean(isFork) && Boolean(announcedId) && announcedId !== capturedId;
+}
+
+/**
+ * Re-captures a fork run's session id once `shouldRecaptureSessionId` says
+ * the SDK has announced the fork's own (distinct) id mid-stream: swaps the
+ * active-sessions tracking entry from the parent-seeded id to the new one,
+ * relabels the writer so its outgoing events carry the new id, and lets the
+ * caller announce `session_created` to the client.
+ *
+ * Extracted from the stream loop (and dependency-injected) purely so the
+ * wiring — order of operations, `setSessionId` call, `session_created` send —
+ * can be unit-tested without spinning up a real SDK query stream.
+ *
+ * @param {Object} deps
+ * @param {string} deps.oldId - The currently captured (parent-seeded) session id.
+ * @param {string} deps.newId - The newly announced fork session id.
+ * @param {Object} deps.queryInstance - The SDK query instance to re-track under the new id.
+ * @param {Object} deps.ws - The websocket writer; its `setSessionId` (if present) labels its outgoing events.
+ * @param {(sessionId: string) => void} deps.removeSession
+ * @param {(sessionId: string, queryInstance: Object, writer?: Object) => void} deps.addSession
+ * @param {() => void} deps.sendSessionCreated - Announces the new id to the client; caller controls once-only guarding.
+ * @returns {string} `deps.newId`, so callers can reassign their captured-id variable in one line.
+ */
+function recaptureForkSession({ oldId, newId, queryInstance, ws, removeSession, addSession, sendSessionCreated }) {
+  removeSession(oldId);
+  addSession(newId, queryInstance, ws);
+  setWriterSessionId(ws, newId);
+  sendSessionCreated();
+
+  return newId;
+}
+
+/**
+ * Labels a websocket writer's outgoing events with the captured session id,
+ * when the writer supports it. Shared by the first-capture and fork-recapture
+ * paths so both stamp the writer the same way.
+ * @param {Object} ws - The websocket writer.
+ * @param {string} sessionId - The session id to label outgoing events with.
+ */
+function setWriterSessionId(ws, sessionId) {
+  if (ws.setSessionId && typeof ws.setSessionId === 'function') {
+    ws.setSessionId(sessionId);
+  }
+}
+
+/**
+ * Sends the `session_created` event announcing a (newly captured or
+ * re-captured) session id to the client.
+ * @param {Object} ws - The websocket writer.
+ * @param {string} newSessionId - The session id to announce.
+ */
+function sendSessionCreatedEvent(ws, newSessionId) {
+  ws.send(createNormalizedMessage({ kind: 'session_created', newSessionId, sessionId: newSessionId, provider: 'claude' }));
 }
 
 /**
@@ -629,7 +739,11 @@ async function queryClaudeSDK(command, options = {}, ws) {
       delete process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
     }
 
-    // Track the query instance for abort capability
+    // Track the query instance for abort capability. For fork runs,
+    // capturedSessionId is still the PARENT's id here (pre-seeded) until the
+    // first init message triggers recaptureForkSession — so this briefly
+    // registers the fork's query under the parent's id. Tolerated because the
+    // parent can't have a concurrent run: the /fork flow guards on isProcessing.
     if (capturedSessionId) {
       addSession(capturedSessionId, queryInstance, ws);
     }
@@ -637,24 +751,47 @@ async function queryClaudeSDK(command, options = {}, ws) {
     // Process streaming messages
     console.log('Starting async generator loop for session:', capturedSessionId || 'NEW');
     for await (const message of queryInstance) {
-      // Capture session ID from first message
+      // Capture session ID from first message. Any other message (session_id
+      // already captured, or not a recapture candidate per
+      // shouldRecaptureSessionId) needs no handling here — fall through.
       if (message.session_id && !capturedSessionId) {
 
         capturedSessionId = message.session_id;
         addSession(capturedSessionId, queryInstance, ws);
-
-        // Set session ID on writer
-        if (ws.setSessionId && typeof ws.setSessionId === 'function') {
-          ws.setSessionId(capturedSessionId);
-        }
+        setWriterSessionId(ws, capturedSessionId);
 
         // Send session-created event only once for new sessions
         if (!sessionId && !sessionCreatedSent) {
           sessionCreatedSent = true;
-          ws.send(createNormalizedMessage({ kind: 'session_created', newSessionId: capturedSessionId, sessionId: capturedSessionId, provider: 'claude' }));
+          sendSessionCreatedEvent(ws, capturedSessionId);
         }
-      } else {
-        // session_id already captured
+      } else if (shouldRecaptureSessionId(sdkOptions.forkSession, message.session_id, capturedSessionId)) {
+        // Fork runs are pre-seeded with the PARENT's session id (resume target),
+        // but the SDK announces the fork's own new id on its first system/init
+        // message. Treat that announced id as authoritative so the app session
+        // row gets mapped onto the fork's transcript instead of staying a ghost.
+        const newSessionId = message.session_id;
+        capturedSessionId = recaptureForkSession({
+          oldId: capturedSessionId,
+          newId: newSessionId,
+          queryInstance,
+          ws,
+          removeSession,
+          addSession,
+          sendSessionCreated: () => {
+            if (!sessionCreatedSent) {
+              sessionCreatedSent = true;
+              sendSessionCreatedEvent(ws, newSessionId);
+            }
+          },
+        });
+      }
+
+      // The init message enumerates the CLI's dispatchable built-in commands.
+      // Cache them process-wide so /api/commands/list can group them for the
+      // palette — sourced live from the running binary, never hardcoded.
+      if (message.type === 'system' && message.subtype === 'init') {
+        setClaudeBuiltinCommands(message.slash_commands);
       }
 
       // Transform and normalize message via adapter
@@ -834,5 +971,7 @@ export {
   resolveToolApproval,
   getPendingApprovalsForSession,
   reconnectSessionWriter,
-  mapCliOptionsToSDK
+  mapCliOptionsToSDK,
+  shouldRecaptureSessionId,
+  recaptureForkSession
 };

@@ -152,6 +152,7 @@ function ChatInterface({
     inputHighlightRef,
     isTextareaExpanded,
     slashCommandsCount,
+    slashCommandNames,
     filteredCommands,
     frequentCommands,
     commandQuery,
@@ -441,6 +442,7 @@ function ChatInterface({
           pendingPermissionRequests={pendingPermissionRequests}
           handlePermissionDecision={handlePermissionDecision}
           handleGrantToolPermission={handleGrantToolPermission}
+          chatMessages={chatMessages}
           activity={sessionActivity}
           isLoading={isProcessing}
           onAbortSession={handleAbortSession}
@@ -483,6 +485,7 @@ function ChatInterface({
           openImagePicker={openImagePicker}
           inputHighlightRef={inputHighlightRef}
           renderInputWithMentions={renderInputWithMentions}
+          slashCommandNames={slashCommandNames}
           textareaRef={textareaRef}
           input={input}
           onVoiceTranscript={handleVoiceTranscript}

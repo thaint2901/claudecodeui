@@ -23,7 +23,6 @@ interface UseSlashCommandsOptions {
   input: string;
   setInput: Dispatch<SetStateAction<string>>;
   textareaRef: RefObject<HTMLTextAreaElement>;
-  onExecuteCommand: (command: SlashCommand, rawInput?: string) => void | Promise<void>;
 }
 
 type ProviderSkill = {
@@ -63,12 +62,6 @@ const saveCommandHistory = (projectName: string, history: Record<string, number>
   safeLocalStorage.setItem(getCommandHistoryKey(projectName), JSON.stringify(history));
 };
 
-const isPromiseLike = (value: unknown): value is Promise<unknown> =>
-  Boolean(value) && typeof (value as Promise<unknown>).then === 'function';
-
-const isSkillCommand = (command: SlashCommand) =>
-  command.type === 'skill' || command.metadata?.type === 'skill';
-
 const dedupeProviderSkills = (skills: ProviderSkill[]): ProviderSkill[] => {
   const seenCommands = new Set<string>();
 
@@ -88,11 +81,11 @@ const dedupeProviderSkills = (skills: ProviderSkill[]): ProviderSkill[] => {
 const mapSkillToSlashCommand = (skill: ProviderSkill): SlashCommand => ({
   name: skill.command,
   description: skill.description,
-  namespace: 'skill',
+  namespace: skill.scope === 'project' ? 'project' : 'user',
   path: skill.sourcePath,
   type: 'skill',
   metadata: {
-    type: skill.scope,
+    type: 'skill',
     scope: skill.scope,
     sourcePath: skill.sourcePath,
     pluginName: skill.pluginName,
@@ -141,7 +134,6 @@ export function useSlashCommands({
   input,
   setInput,
   textareaRef,
-  onExecuteCommand,
 }: UseSlashCommandsOptions) {
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([]);
@@ -210,10 +202,35 @@ export function useSlashCommands({
           : null;
         const skillCommands = dedupeProviderSkills(skillsData?.data?.skills || [])
           .map(mapSkillToSlashCommand);
+
+        // Built-ins by subtraction: system/init's slash_commands lists
+        // EVERYTHING the runtime can dispatch — true built-ins plus every
+        // bundled/user/project skill. A name belongs in the claude-builtin
+        // group only when no richer source (ccui, skills scan, custom .md
+        // commands) already knows it, so each command appears exactly once,
+        // in its most informative group. Additionally, any name containing
+        // ":" is plugin-namespaced by construction (/plugin:skill) and is
+        // definitionally not a Claude Code built-in, so it's dropped even
+        // though our skills inventory doesn't yet know about it (issue #4 —
+        // bare-named unknown skills can still leak until that's fixed).
+        const knownCommandNames = new Set<string>([
+          ...((data.builtIn || []) as SlashCommand[]).map((command) => command.name),
+          ...skillCommands.map((command) => command.name),
+          ...((data.custom || []) as SlashCommand[]).map((command) => command.name),
+        ]);
+        const claudeBuiltInCommands = ((data.claudeBuiltIn || []) as SlashCommand[])
+          .filter((command) => !knownCommandNames.has(command.name) && !command.name.includes(':'));
+
         const allCommands: SlashCommand[] = [
+          // ccui pseudo-commands come first: for a colliding name, dispatch
+          // interception in handleSubmit finds the ccui entry first.
           ...((data.builtIn || []) as SlashCommand[]).map((command) => ({
             ...command,
             type: 'built-in',
+          })),
+          ...claudeBuiltInCommands.map((command) => ({
+            ...command,
+            type: 'claude-builtin',
           })),
           ...skillCommands,
           ...((data.custom || []) as SlashCommand[]).map((command) => ({
@@ -313,36 +330,11 @@ export function useSlashCommands({
     [input, resetCommandMenuState, setInput, slashPosition, textareaRef],
   );
 
-  const executeNonSkillCommand = useCallback(
-    (command: SlashCommand) => {
-      const executionResult = onExecuteCommand(command);
-      if (isPromiseLike(executionResult)) {
-        executionResult.then(
-          () => {
-            resetCommandMenuState();
-          },
-          () => {
-            resetCommandMenuState();
-            // Keep behavior silent; execution errors are handled by caller.
-          },
-        );
-      } else {
-        resetCommandMenuState();
-      }
-    },
-    [onExecuteCommand, resetCommandMenuState],
-  );
-
   const selectCommandFromKeyboard = useCallback(
     (command: SlashCommand) => {
-      if (isSkillCommand(command)) {
-        insertCommandIntoInput(command);
-        return;
-      }
-
-      executeNonSkillCommand(command);
+      insertCommandIntoInput(command);
     },
-    [executeNonSkillCommand, insertCommandIntoInput],
+    [insertCommandIntoInput],
   );
 
   const handleCommandSelect = useCallback(
@@ -357,14 +349,9 @@ export function useSlashCommands({
       }
 
       trackCommandUsage(command);
-      if (isSkillCommand(command)) {
-        insertCommandIntoInput(command);
-        return;
-      }
-
-      executeNonSkillCommand(command);
+      insertCommandIntoInput(command);
     },
-    [selectedProject, trackCommandUsage, insertCommandIntoInput, executeNonSkillCommand],
+    [selectedProject, trackCommandUsage, insertCommandIntoInput],
   );
 
   const handleToggleCommandMenu = useCallback(() => {

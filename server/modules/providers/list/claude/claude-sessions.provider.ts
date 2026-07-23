@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
 
@@ -45,7 +44,6 @@ function isKnownIgnoredStreamEvent(event: AnyRecord): boolean {
 type ClaudeToolResult = {
   content: unknown;
   isError: boolean;
-  subagentTools?: unknown;
   toolUseResult?: unknown;
 };
 
@@ -67,70 +65,79 @@ type ClaudeHistoryMessagesResult =
     limit?: number | null;
   };
 
-async function parseAgentTools(filePath: string): Promise<AnyRecord[]> {
-  const tools: AnyRecord[] = [];
+/**
+ * Collects every tool_use id and tool_result target id (`tool_use_id`)
+ * referenced by a single transcript entry's message content blocks.
+ */
+function collectEntryToolIds(entry: AnyRecord): string[] {
+  const content = entry.message?.content;
+  if (!Array.isArray(content)) return [];
+  const ids: string[] = [];
+  for (const part of content as AnyRecord[]) {
+    if (!part || typeof part !== 'object') continue;
+    if (part.type === 'tool_use' && typeof part.id === 'string') {
+      ids.push(part.id);
+    } else if (part.type === 'tool_result' && typeof part.tool_use_id === 'string') {
+      ids.push(part.tool_use_id);
+    }
+  }
+  return ids;
+}
 
+/**
+ * Fork transcripts inherit the parent's Agent tool calls verbatim, but the
+ * copy carries no pointer back to the parent session — and the agent's own
+ * transcript file only ever existed under the PARENT session's directory.
+ * When the primary path (under the current session) misses, scan sibling
+ * session directories in the same project for `agent-<agentId>.jsonl`; agent
+ * ids are unique random hex, so any match found is unambiguous.
+ */
+function resolveAgentFilePath(projectDir: string, primaryPath: string, agentId: string): string | null {
+  if (fs.existsSync(primaryPath)) {
+    return primaryPath;
+  }
+
+  // Fallback path only: O(session-dirs) synchronous FS calls (readdir + one
+  // existsSync per sibling dir), and only runs when primaryPath misses.
+  // Acceptable for now — revisit if project dirs grow large.
+  const targetFileName = `agent-${agentId}.jsonl`;
+  let sessionDirs: string[];
+  try {
+    sessionDirs = fs.readdirSync(projectDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return null;
+  }
+
+  for (const sessionDir of sessionDirs) {
+    const candidate = path.join(projectDir, sessionDir, 'subagents', targetFileName);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function parseAgentEntries(filePath: string): Promise<AnyRecord[]> {
+  const entries: AnyRecord[] = [];
   try {
     const fileStream = fs.createReadStream(filePath);
-    const rl = readline.createInterface({
-      input: fileStream,
-      crlfDelay: Infinity,
-    });
-
+    const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
     for await (const line of rl) {
-      if (!line.trim()) {
-        continue;
-      }
-
+      if (!line.trim()) continue;
       try {
-        const entry = JSON.parse(line) as AnyRecord;
-
-        if (entry.message?.role === 'assistant' && Array.isArray(entry.message?.content)) {
-          for (const part of entry.message.content as AnyRecord[]) {
-            if (part.type === 'tool_use') {
-              tools.push({
-                toolId: part.id,
-                toolName: part.name,
-                toolInput: part.input,
-                timestamp: entry.timestamp,
-              });
-            }
-          }
-        }
-
-        if (entry.message?.role === 'user' && Array.isArray(entry.message?.content)) {
-          for (const part of entry.message.content as AnyRecord[]) {
-            if (part.type !== 'tool_result') {
-              continue;
-            }
-
-            const tool = tools.find((candidate) => candidate.toolId === part.tool_use_id);
-            if (!tool) {
-              continue;
-            }
-
-            tool.toolResult = {
-              content: typeof part.content === 'string'
-                ? part.content
-                : Array.isArray(part.content)
-                  ? part.content
-                    .map((contentPart: AnyRecord) => contentPart?.text || '')
-                    .join('\n')
-                  : JSON.stringify(part.content),
-              isError: Boolean(part.is_error),
-            };
-          }
-        }
+        entries.push(JSON.parse(line) as AnyRecord);
       } catch {
-        // Skip malformed lines that can happen during concurrent writes.
+        // Skip malformed lines from concurrent writes.
       }
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`Error parsing agent file ${filePath}:`, message);
   }
-
-  return tools;
+  return entries;
 }
 
 async function getSessionMessages(
@@ -149,11 +156,8 @@ async function getSessionMessages(
     }
 
     const projectDir = path.dirname(jsonLPath);
-    const files = await fsp.readdir(projectDir);
-    const agentFiles = files.filter((file) => file.endsWith('.jsonl') && file.startsWith('agent-'));
 
     const messages: AnyRecord[] = [];
-    const agentToolsCache = new Map<string, AnyRecord[]>();
 
     const fileStream = fs.createReadStream(jsonLPath);
     const rl = readline.createInterface({
@@ -176,34 +180,58 @@ async function getSessionMessages(
       }
     }
 
-    const agentIds = new Set<string>();
+    // Map each subagent to its parent Agent tool_use id. The user-side record
+    // that carries toolUseResult.agentId also holds the tool_result whose
+    // tool_use_id IS the parent tool_use id (parent_tool_use_id itself is
+    // never persisted to disk).
+    const agentParentToolIds = new Map<string, string>();
     for (const message of messages) {
       const agentId = message.toolUseResult?.agentId;
-      if (agentId) {
-        agentIds.add(String(agentId));
+      if (!agentId || !Array.isArray(message.message?.content)) continue;
+      for (const part of message.message.content as AnyRecord[]) {
+        if (part.type === 'tool_result' && part.tool_use_id) {
+          agentParentToolIds.set(String(agentId), String(part.tool_use_id));
+          break;
+        }
       }
     }
 
-    for (const agentId of agentIds) {
-      const agentFileName = `agent-${agentId}.jsonl`;
-      if (!agentFiles.includes(agentFileName)) {
-        continue;
-      }
-
-      const agentFilePath = path.join(projectDir, agentFileName);
-      const tools = await parseAgentTools(agentFilePath);
-      agentToolsCache.set(agentId, tools);
+    // Ids of every tool_use/tool_result already present in the main-session
+    // stream, used below to drop inherited copies from fork transcripts.
+    const mainSessionToolIds = new Set<string>();
+    for (const message of messages) {
+      for (const id of collectEntryToolIds(message)) mainSessionToolIds.add(id);
     }
 
-    for (const message of messages) {
-      const agentId = message.toolUseResult?.agentId;
-      if (!agentId) {
+    // Agent transcripts live at <projectDir>/<provider-session-id>/subagents/.
+    const subagentsDir = path.join(projectDir, providerSessionId, 'subagents');
+    for (const [agentId, parentToolUseId] of agentParentToolIds) {
+      const primaryAgentFilePath = path.join(subagentsDir, `agent-${agentId}.jsonl`);
+      // Forked sessions inherit Agent tool calls whose transcript file lives
+      // only under the PARENT session's directory — fall back to scanning
+      // sibling session dirs in this project when the primary path misses.
+      const agentFilePath = resolveAgentFilePath(projectDir, primaryAgentFilePath, agentId);
+      if (!agentFilePath) {
+        console.warn(`Error parsing agent file ${primaryAgentFilePath}: not found in this session or any sibling session directory`);
         continue;
       }
-
-      const agentTools = agentToolsCache.get(String(agentId));
-      if (agentTools && agentTools.length > 0) {
-        message.subagentTools = agentTools;
+      const entries = await parseAgentEntries(agentFilePath);
+      for (const entry of entries) {
+        // A `fork` subagent inherits the parent conversation, so its
+        // transcript can contain verbatim copies of main-session records
+        // (including the Agent dispatch tool_use/tool_result that spawned
+        // it). Stamping those copies with __parentToolUseId would make a
+        // tool_use's own id equal to its own parentToolUseId, a self-cycle
+        // in the client's childrenByParent grouping. Skip entries whose
+        // tool ids are entirely already in the main session — they carry
+        // no genuinely new child content.
+        const entryToolIds = collectEntryToolIds(entry);
+        if (entryToolIds.length > 0 && entryToolIds.every((id) => mainSessionToolIds.has(id))) {
+          continue;
+        }
+        // Non-enumerable-safe internal marker; consumed by fetchHistory below.
+        entry.__parentToolUseId = parentToolUseId;
+        messages.push(entry);
       }
     }
 
@@ -376,7 +404,6 @@ export class ClaudeSessionsProvider implements IProviderSessions {
               toolId: part.tool_use_id,
               content: typeof part.content === 'string' ? part.content : JSON.stringify(part.content),
               isError: Boolean(part.is_error),
-              subagentTools: raw.subagentTools,
               toolUseResult: raw.toolUseResult,
             }));
           } else if (part.type === 'text') {
@@ -648,7 +675,6 @@ export class ClaudeSessionsProvider implements IProviderSessions {
             toolResultMap.set(part.tool_use_id, {
               content: part.content,
               isError: Boolean(part.is_error),
-              subagentTools: raw.subagentTools,
               toolUseResult: raw.toolUseResult,
             });
           }
@@ -658,7 +684,13 @@ export class ClaudeSessionsProvider implements IProviderSessions {
 
     const normalized: NormalizedMessage[] = [];
     for (const raw of rawMessages) {
-      normalized.push(...this.normalizeMessage(raw, sessionId));
+      const produced = this.normalizeMessage(raw, sessionId);
+      if (typeof raw.__parentToolUseId === 'string') {
+        for (const msg of produced) {
+          msg.parentToolUseId = raw.__parentToolUseId;
+        }
+      }
+      normalized.push(...produced);
     }
 
     for (const msg of normalized) {
@@ -675,7 +707,6 @@ export class ClaudeSessionsProvider implements IProviderSessions {
           isError: toolResult.isError,
           toolUseResult: toolResult.toolUseResult,
         };
-        msg.subagentTools = toolResult.subagentTools;
       }
     }
 

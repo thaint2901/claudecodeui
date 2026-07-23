@@ -19,7 +19,7 @@ Every chat the user has ever had — across Claude, Cursor, Codex, and OpenCode 
 | **GitHub clone** | Clone a repo with progress streamed over Server-Sent Events |
 | **TaskMaster detection** | Per-project task metadata (parses `tasks.json` with status counts) |
 | **Loading-progress broadcasts** | WebSocket `kind: loading_progress` |
-| **Session create / resume** | Allocate a stable app session id, map to provider-native id |
+| **Session create / resume** | Allocate a stable app session id, map to provider-native id. `/fork` is the one path where the provider-native id is announced *mid-run* rather than at creation, onto a session row already allocated before the run started. |
 | **Session history** | Fetch and normalize past messages for display |
 | **Session archive / rename / delete** | Lifecycle management |
 | **Session search** | Cross-provider SSE search |

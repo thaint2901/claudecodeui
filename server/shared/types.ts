@@ -274,7 +274,7 @@ export type NormalizedMessage = {
   status?: string;
   summary?: string;
   tokenBudget?: unknown;
-  subagentTools?: unknown;
+  parentToolUseId?: string;
   toolUseResult?: unknown;
   sequence?: number;
   rowid?: number;

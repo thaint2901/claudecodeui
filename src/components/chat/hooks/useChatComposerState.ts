@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChangeEvent,
   ClipboardEvent,
@@ -576,8 +576,8 @@ export function useChatComposerState({
       {
         name: '/cost',
         description: 'Display token usage information',
-        namespace: 'builtin',
-        metadata: { type: 'builtin' },
+        namespace: 'ccui',
+        metadata: { type: 'ccui' },
       } as SlashCommand,
       '/cost',
       { preserveInput: true },
@@ -603,8 +603,12 @@ export function useChatComposerState({
     input,
     setInput,
     textareaRef,
-    onExecuteCommand: executeCommand,
   });
+
+  const slashCommandNames = useMemo(
+    () => new Set(slashCommands.map((command) => command.name)),
+    [slashCommands],
+  );
 
   const {
     showFileDropdown,
@@ -825,11 +829,11 @@ export function useChatComposerState({
             ? ({
                 name: '/help',
                 description: 'Show help documentation for Claude Code',
-                namespace: 'builtin',
-                metadata: { type: 'builtin' },
+                namespace: 'ccui',
+                metadata: { type: 'ccui' },
               } as SlashCommand)
             : undefined);
-        if (matchedCommand && matchedCommand.type !== 'skill') {
+        if (matchedCommand && matchedCommand.type !== 'skill' && matchedCommand.type !== 'claude-builtin') {
           executeCommand(matchedCommand, isHelpAlias ? '/help' : commandInput);
           setInput('');
           inputValueRef.current = '';
@@ -1309,6 +1313,7 @@ export function useChatComposerState({
     inputHighlightRef,
     isTextareaExpanded,
     slashCommandsCount,
+    slashCommandNames,
     filteredCommands,
     frequentCommands,
     commandQuery,

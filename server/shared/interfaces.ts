@@ -183,6 +183,11 @@ export interface IProviderSessionSynchronizer {
    * `projectPath`, when known, scopes the on-disk lookup to that project
    * directory instead of searching every project under the provider's config
    * dir — pass it whenever the caller already has it.
+   *
+   * Returns `true` when the write-back actually landed, `false` when it was
+   * swallowed (missing transcript, unsupported provider, etc.) — callers
+   * that need to know whether the name will survive the next sync (e.g. the
+   * `/fork` flow) can act on this instead of only seeing the resolved promise.
    */
-  writeBackCustomName?(providerSessionId: ProviderSessionId, customName: string, projectPath?: string): Promise<void>;
+  writeBackCustomName?(providerSessionId: ProviderSessionId, customName: string, projectPath?: string): Promise<boolean>;
 }

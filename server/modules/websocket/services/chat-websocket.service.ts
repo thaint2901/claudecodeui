@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { WebSocket } from 'ws';
 
 import { sessionsDb } from '@/modules/database/index.js';
+import { sessionsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import { getGlobalImageAssetsDir, normalizeImageDescriptors } from '@/shared/image-attachments.js';
@@ -11,7 +12,7 @@ import type {
   AuthenticatedWebSocketRequest,
   LLMProvider,
 } from '@/shared/types.js';
-import { parseIncomingJsonObject } from '@/shared/utils.js';
+import { createNormalizedMessage, parseIncomingJsonObject } from '@/shared/utils.js';
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -106,6 +107,13 @@ function sendJson(ws: WebSocket, payload: unknown): void {
   }
 }
 
+/** Guarded send for pre-built (already-stringified) frames, e.g. `createNormalizedMessage` output. */
+function sendIfOpen(ws: WebSocket, payload: string): void {
+  if (ws.readyState === WS_OPEN_STATE) {
+    ws.send(payload);
+  }
+}
+
 /**
  * Reports a protocol-level failure to the requesting client.
  *
@@ -131,6 +139,37 @@ function sendProtocolError(
 function readRequiredSessionId(data: AnyRecord): string | null {
   const sessionId = typeof data.sessionId === 'string' ? data.sessionId.trim() : '';
   return sessionId.length > 0 ? sessionId : null;
+}
+
+/** Matches "/fork" or "/fork <prompt>" typed as the whole message. */
+export function parseForkCommand(content: string): { prompt: string } | null {
+  const match = content.trim().match(/^\/fork(?:\s+([\s\S]*))?$/);
+  if (!match) return null;
+  return { prompt: (match[1] ?? '').trim() };
+}
+
+/** Matches "/subtask <task>" typed as the whole message (task text required). */
+export function parseSubtaskCommand(content: string): { task: string } | null {
+  const match = content.trim().match(/^\/subtask\s+([\s\S]+)$/);
+  if (!match) return null;
+  const task = match[1].trim();
+  return task ? { task } : null;
+}
+
+/**
+ * Rewrites a `/subtask <task>` payload into the explicit fork-subagent prompt
+ * sent to the runtime. There is no SDK API to force this — explicit prompting
+ * is the documented technique and CLAUDE_CODE_FORK_SUBAGENT=1 is always set.
+ * Best-effort: the model usually complies but may act directly instead.
+ */
+export function buildSubtaskPrompt(task: string): string {
+  return [
+    `Use the Agent tool with subagent_type "fork" to work on the following task in the background`,
+    `(a fork inherits this conversation's full context, so do not re-explain the situation to it).`,
+    `Report its result back here when it finishes. Task:`,
+    '',
+    task,
+  ].join('\n');
 }
 
 /**
@@ -168,6 +207,169 @@ async function handleChatSend(
     return;
   }
 
+  const forkCommand = provider === 'claude' ? parseForkCommand(typeof data.content === 'string' ? data.content : '') : null;
+  if (forkCommand) {
+    if (!session.provider_session_id) {
+      sendProtocolError(ws, 'FORK_NO_HISTORY', 'Cannot fork a session that has no conversation yet.', sessionId);
+      return;
+    }
+
+    if (chatRunRegistry.isProcessing(sessionId)) {
+      sendProtocolError(ws, 'RUN_IN_PROGRESS', `Session "${sessionId}" already has a run in progress.`, sessionId);
+      return;
+    }
+
+    let forked: ReturnType<typeof sessionsService.createAppSession>;
+    let forkRun: ReturnType<typeof chatRunRegistry.startRun>;
+    const forkedName = `${session.custom_name || 'Session'} (fork)`;
+    const parentProviderSessionId = session.provider_session_id;
+    // Resolves to whether the write-back attempted at announcement time (see
+    // `onProviderSessionId` below) landed. `null` means it never got a chance
+    // to run at all (e.g. the SDK never announced a distinct id before the
+    // run ended) — treated the same as "failed" below, since either way the
+    // post-spawn retry is the only thing that can still make it land.
+    let earlyRenameWriteBack: Promise<boolean> | null = null;
+    try {
+      // Allocate the fork its own app session row; the SDK announces the fork's
+      // provider id mid-run and the session writer maps it onto this row.
+      forked = sessionsService.createAppSession('claude', session.project_path ?? '');
+      sessionsDb.updateSessionCustomName(forked.sessionId, forkedName);
+
+      forkRun = chatRunRegistry.startRun({
+        appSessionId: forked.sessionId,
+        provider,
+        providerSessionId: session.provider_session_id,
+        connection: ws,
+        userId,
+        // The fork's transcript is a copy of the parent's history, so the
+        // sessions-watcher sync would otherwise pick up the parent's inherited
+        // title event and clobber the " (fork)" suffix set above. Write the
+        // fork's own name back into its transcript as a `custom-title` event
+        // (highest sync precedence) as soon as the SDK announces the fork's
+        // OWN provider session id (distinct from the parent's, which this run
+        // was seeded with to resume) — not after the whole run finishes,
+        // which could be minutes away and leaves the wrong name visible in
+        // the sidebar until then. A run that ends without ever announcing a
+        // distinct id (e.g. spawn fails immediately) leaves
+        // `earlyRenameWriteBack` `null`; the post-spawn check below covers
+        // the retry either way.
+        onProviderSessionId: (announcedProviderSessionId) => {
+          if (earlyRenameWriteBack || announcedProviderSessionId === parentProviderSessionId) {
+            return;
+          }
+          earlyRenameWriteBack = sessionsService
+            .renameSessionById(forked.sessionId, forkedName)
+            .then((result) => result.writeBack)
+            .catch((renameError) => {
+              const message = renameError instanceof Error ? renameError.message : String(renameError);
+              console.warn('[Chat] Failed to write back forked session name at announcement', {
+                sessionId: forked.sessionId,
+                error: message,
+              });
+              return false;
+            });
+        },
+      });
+      if (!forkRun) {
+        sendProtocolError(ws, 'RUN_IN_PROGRESS', `Forked session "${forked.sessionId}" already has a run in progress.`, sessionId);
+        return;
+      }
+
+      // Ack into the ORIGINAL session's transcript so the user sees where the fork went.
+      sendIfOpen(ws, JSON.stringify(createNormalizedMessage({
+        kind: 'task_notification',
+        sessionId,
+        provider,
+        status: 'completed',
+        summary: `Forked conversation into a new session${forkCommand.prompt ? ' and started it on the given prompt' : ''}. Find it in the sidebar as "${session.custom_name || 'Session'} (fork)".`,
+      })));
+    } catch (error) {
+      // Setup never marked the ORIGINAL session as processing, so there is no
+      // run state to clean up here beyond surfacing the failure. Report into
+      // the original session's transcript (not sendProtocolError) because a
+      // sessionId-less protocol error would only reach the console.
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[Chat] /fork setup failed', { sessionId, error: message });
+      sendIfOpen(ws, JSON.stringify(createNormalizedMessage({
+        kind: 'task_notification',
+        sessionId,
+        provider,
+        status: 'failed',
+        summary: `Failed to fork this conversation: ${message}`,
+      })));
+      return;
+    }
+
+    const clientOptions = (data.options ?? {}) as AnyRecord;
+    const forkOptions: AnyRecord = {
+      ...clientOptions,
+      // Resume-only run: attachments belong to the original message, not this fork.
+      images: [],
+      sessionId: session.provider_session_id,
+      resume: true,
+      forkSession: true,
+      cwd: session.project_path ?? undefined,
+      projectPath: session.project_path ?? undefined,
+    };
+
+    try {
+      await spawnFn(
+        forkCommand.prompt || 'Continue from where the conversation left off. Wait for further instructions and summarize the current state briefly.',
+        forkOptions,
+        forkRun.writer,
+      );
+
+      // The early write-back above (fired from `onProviderSessionId`) is the
+      // common case; this retries only when that either never got a chance
+      // to run or itself reported failure. Best-effort: naming must never
+      // fail the fork run.
+      let writeBackOk = earlyRenameWriteBack ? await earlyRenameWriteBack : false;
+      if (!writeBackOk) {
+        try {
+          const retryResult = await sessionsService.renameSessionById(forked.sessionId, forkedName);
+          writeBackOk = retryResult.writeBack;
+        } catch (renameError) {
+          const renameMessage = renameError instanceof Error ? renameError.message : String(renameError);
+          console.warn('[Chat] Failed to write back forked session name', { sessionId: forked.sessionId, error: renameMessage });
+        }
+      }
+
+      if (!writeBackOk) {
+        // Both the announcement-time attempt and the post-spawn retry failed
+        // (or the announcement never happened) — the fork's " (fork)" suffix
+        // may be overwritten by the next sessions-watcher sync. Surface this
+        // into the ORIGINAL session so the user knows to double-check/rename
+        // manually, mirroring the shape of the other task_notification sends
+        // in this function.
+        sendIfOpen(ws, JSON.stringify(createNormalizedMessage({
+          kind: 'task_notification',
+          sessionId,
+          provider,
+          status: 'completed',
+          summary: `Forked conversation completed, but its name may not persist as "${forkedName}" — a background sync could revert it. Rename it manually if needed.`,
+        })));
+      }
+    } catch (error) {
+      // The success ack above already told the user the fork was created, so
+      // a spawn failure here must be surfaced too — otherwise the user is
+      // left believing the fork is running when it silently died. Report
+      // into the ORIGINAL session's transcript, mirroring the setup-failure
+      // block above (same shape/fields).
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[Chat] /fork run failed', { sessionId: forked.sessionId, error: message });
+      sendIfOpen(ws, JSON.stringify(createNormalizedMessage({
+        kind: 'task_notification',
+        sessionId,
+        provider,
+        status: 'failed',
+        summary: `Forked conversation failed to start: ${message}`,
+      })));
+    } finally {
+      chatRunRegistry.completeRunIfCurrent(forkRun, { exitCode: 1 });
+    }
+    return;
+  }
+
   const run = chatRunRegistry.startRun({
     appSessionId: sessionId,
     provider,
@@ -187,7 +389,13 @@ async function handleChatSend(
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
-  const command = typeof data.content === 'string' ? data.content : '';
+  let command = typeof data.content === 'string' ? data.content : '';
+
+  const subtaskCommand = provider === 'claude' ? parseSubtaskCommand(command) : null;
+  if (subtaskCommand) {
+    // /subtask maps to the fork subagent (inherits full conversation context).
+    command = buildSubtaskPrompt(subtaskCommand.task);
+  }
 
   // The provider runtimes receive the provider-native session id (that is the
   // id their CLI/SDK understands for resume). Brand-new sessions have no
@@ -202,6 +410,9 @@ async function handleChatSend(
     resume: Boolean(session.provider_session_id),
     cwd: clientOptions.cwd ?? session.project_path ?? undefined,
     projectPath: session.project_path ?? clientOptions.projectPath,
+    // /subtask is the only caller that needs the fork subagent env vars —
+    // scoped to this run only (see mapCliOptionsToSDK for why).
+    ...(subtaskCommand ? { forkSubagent: true } : {}),
   };
 
   try {
