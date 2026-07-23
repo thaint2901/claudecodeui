@@ -318,14 +318,33 @@ function shouldRecaptureSessionId(isFork, announcedId, capturedId) {
 function recaptureForkSession({ oldId, newId, queryInstance, ws, removeSession, addSession, sendSessionCreated }) {
   removeSession(oldId);
   addSession(newId, queryInstance, ws);
-
-  if (ws.setSessionId && typeof ws.setSessionId === 'function') {
-    ws.setSessionId(newId);
-  }
-
+  setWriterSessionId(ws, newId);
   sendSessionCreated();
 
   return newId;
+}
+
+/**
+ * Labels a websocket writer's outgoing events with the captured session id,
+ * when the writer supports it. Shared by the first-capture and fork-recapture
+ * paths so both stamp the writer the same way.
+ * @param {Object} ws - The websocket writer.
+ * @param {string} sessionId - The session id to label outgoing events with.
+ */
+function setWriterSessionId(ws, sessionId) {
+  if (ws.setSessionId && typeof ws.setSessionId === 'function') {
+    ws.setSessionId(sessionId);
+  }
+}
+
+/**
+ * Sends the `session_created` event announcing a (newly captured or
+ * re-captured) session id to the client.
+ * @param {Object} ws - The websocket writer.
+ * @param {string} newSessionId - The session id to announce.
+ */
+function sendSessionCreatedEvent(ws, newSessionId) {
+  ws.send(createNormalizedMessage({ kind: 'session_created', newSessionId, sessionId: newSessionId, provider: 'claude' }));
 }
 
 /**
@@ -720,7 +739,11 @@ async function queryClaudeSDK(command, options = {}, ws) {
       delete process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
     }
 
-    // Track the query instance for abort capability
+    // Track the query instance for abort capability. For fork runs,
+    // capturedSessionId is still the PARENT's id here (pre-seeded) until the
+    // first init message triggers recaptureForkSession — so this briefly
+    // registers the fork's query under the parent's id. Tolerated because the
+    // parent can't have a concurrent run: the /fork flow guards on isProcessing.
     if (capturedSessionId) {
       addSession(capturedSessionId, queryInstance, ws);
     }
@@ -728,21 +751,19 @@ async function queryClaudeSDK(command, options = {}, ws) {
     // Process streaming messages
     console.log('Starting async generator loop for session:', capturedSessionId || 'NEW');
     for await (const message of queryInstance) {
-      // Capture session ID from first message
+      // Capture session ID from first message. Any other message (session_id
+      // already captured, or not a recapture candidate per
+      // shouldRecaptureSessionId) needs no handling here — fall through.
       if (message.session_id && !capturedSessionId) {
 
         capturedSessionId = message.session_id;
         addSession(capturedSessionId, queryInstance, ws);
-
-        // Set session ID on writer
-        if (ws.setSessionId && typeof ws.setSessionId === 'function') {
-          ws.setSessionId(capturedSessionId);
-        }
+        setWriterSessionId(ws, capturedSessionId);
 
         // Send session-created event only once for new sessions
         if (!sessionId && !sessionCreatedSent) {
           sessionCreatedSent = true;
-          ws.send(createNormalizedMessage({ kind: 'session_created', newSessionId: capturedSessionId, sessionId: capturedSessionId, provider: 'claude' }));
+          sendSessionCreatedEvent(ws, capturedSessionId);
         }
       } else if (shouldRecaptureSessionId(sdkOptions.forkSession, message.session_id, capturedSessionId)) {
         // Fork runs are pre-seeded with the PARENT's session id (resume target),
@@ -760,12 +781,10 @@ async function queryClaudeSDK(command, options = {}, ws) {
           sendSessionCreated: () => {
             if (!sessionCreatedSent) {
               sessionCreatedSent = true;
-              ws.send(createNormalizedMessage({ kind: 'session_created', newSessionId, sessionId: newSessionId, provider: 'claude' }));
+              sendSessionCreatedEvent(ws, newSessionId);
             }
           },
         });
-      } else {
-        // session_id already captured
       }
 
       // The init message enumerates the CLI's dispatchable built-in commands.

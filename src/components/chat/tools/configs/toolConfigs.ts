@@ -3,7 +3,7 @@
  * Defines display behavior for all tool types
  */
 
-import { isAgentMetadataBlockText } from '../../utils/subagentToolNames';
+import { extractSubagentText } from '../../utils/subagentToolNames';
 
 export interface ToolDisplayConfig {
   input: {
@@ -448,11 +448,8 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
           }
           // If content is an array (typical for agent responses with multiple text blocks)
           if (Array.isArray(content)) {
-            const textContent = content
-              .filter((item: any) => item.type === 'text' && !isAgentMetadataBlockText(item.text))
-              .map((item: any) => item.text)
-              .join('\n\n');
-            return { content: textContent || 'No response text' };
+            const extracted = extractSubagentText(content, '\n\n');
+            return { content: extracted ?? 'No response text' };
           }
           return { content: String(content) };
         }

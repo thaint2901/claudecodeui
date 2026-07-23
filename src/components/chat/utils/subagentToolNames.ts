@@ -21,6 +21,20 @@ export function isAgentMetadataBlockText(text: string): boolean {
 }
 
 /**
+ * Filters an Agent tool result's content array down to its actual text
+ * blocks (excluding the routing-metadata block from `isAgentMetadataBlockText`)
+ * and joins them. Returns null when `parts` isn't an array or no text blocks
+ * survive the filter, so callers can apply their own fallback.
+ */
+export function extractSubagentText(parts: unknown, separator = '\n'): string | null {
+  if (!Array.isArray(parts)) return null;
+  const textParts = parts
+    .filter((p: any) => p && p.type === 'text' && p.text && !isAgentMetadataBlockText(p.text))
+    .map((p: any) => p.text);
+  return textParts.length > 0 ? textParts.join(separator) : null;
+}
+
+/**
  * The Agent tool's result is, by construction, the subagent's final text
  * message — so when the transcript already ends with that plain assistant
  * text, a separate "Result" box would duplicate it verbatim. This predicate

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 
 import type { SubagentState } from '../../types/types';
-import { isAgentMetadataBlockText } from '../../utils/subagentToolNames';
+import { extractSubagentText } from '../../utils/subagentToolNames';
 
 import { SubagentTranscriptPanel } from './SubagentTranscriptPanel';
 
@@ -61,22 +61,18 @@ export const extractResultText = (toolResult?: { content?: unknown; isError?: bo
     try {
       const parsed = JSON.parse(content);
       if (Array.isArray(parsed)) {
-        const textParts = parsed
-          .filter((p: any) => p.type === 'text' && p.text && !isAgentMetadataBlockText(p.text))
-          .map((p: any) => p.text);
-        if (textParts.length > 0) {
-          content = textParts.join('\n');
+        const extracted = extractSubagentText(parsed);
+        if (extracted !== null) {
+          content = extracted;
         }
       }
     } catch {
       // Not JSON, use as-is
     }
   } else if (Array.isArray(content)) {
-    const textParts = content
-      .filter((p: any) => p.type === 'text' && p.text && !isAgentMetadataBlockText(p.text))
-      .map((p: any) => p.text);
-    if (textParts.length > 0) {
-      content = textParts.join('\n');
+    const extracted = extractSubagentText(content);
+    if (extracted !== null) {
+      content = extracted;
     }
   }
 

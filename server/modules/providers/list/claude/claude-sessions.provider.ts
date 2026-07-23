@@ -97,6 +97,9 @@ function resolveAgentFilePath(projectDir: string, primaryPath: string, agentId: 
     return primaryPath;
   }
 
+  // Fallback path only: O(session-dirs) synchronous FS calls (readdir + one
+  // existsSync per sibling dir), and only runs when primaryPath misses.
+  // Acceptable for now — revisit if project dirs grow large.
   const targetFileName = `agent-${agentId}.jsonl`;
   let sessionDirs: string[];
   try {

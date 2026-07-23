@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isSubagentToolName, isAgentMetadataBlockText, SUBAGENT_TOOL_NAMES, transcriptEndsWithText } from './subagentToolNames.js';
+import {
+  isSubagentToolName,
+  isAgentMetadataBlockText,
+  extractSubagentText,
+  SUBAGENT_TOOL_NAMES,
+  transcriptEndsWithText,
+} from './subagentToolNames.js';
 
 test('recognizes the current Agent tool name', () => {
   assert.equal(isSubagentToolName('Agent'), true);
@@ -70,4 +76,39 @@ test('transcriptEndsWithText is false when the last message is from the user', (
     ]),
     false,
   );
+});
+
+test('extractSubagentText returns null for a metadata-only array', () => {
+  assert.equal(
+    extractSubagentText([{ type: 'text', text: "agentId: abc123 (use SendMessage with to: '...')" }]),
+    null,
+  );
+});
+
+test('extractSubagentText filters metadata blocks out of a mixed array', () => {
+  assert.equal(
+    extractSubagentText([
+      { type: 'text', text: 'Here is the summary.' },
+      { type: 'text', text: "agentId: abc123 (use SendMessage with to: '...')" },
+    ]),
+    'Here is the summary.',
+  );
+});
+
+test('extractSubagentText joins multiple text blocks with the given separator', () => {
+  assert.equal(
+    extractSubagentText([
+      { type: 'text', text: 'First.' },
+      { type: 'text', text: 'Second.' },
+    ], '\n\n'),
+    'First.\n\nSecond.',
+  );
+});
+
+test('extractSubagentText returns null for an empty array', () => {
+  assert.equal(extractSubagentText([]), null);
+});
+
+test('extractSubagentText returns null for a non-array input', () => {
+  assert.equal(extractSubagentText('not an array'), null);
 });
