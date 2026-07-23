@@ -13,6 +13,7 @@ type SessionSummary = {
   summary: string;
   messageCount: number;
   lastActivity: string;
+  branchCount?: number;
 };
 
 type SessionRepositoryRow = {
@@ -21,6 +22,7 @@ type SessionRepositoryRow = {
   custom_name?: string | null;
   updated_at?: string | null;
   created_at?: string | null;
+  fork_root_session_id?: string | null;
 };
 
 export type ProjectListItem = {
@@ -117,21 +119,23 @@ function normalizeSessionPagination(options: SessionPaginationOptions = {}): { l
   };
 }
 
-function mapSessionRowToSummary(row: SessionRepositoryRow): SessionSummary {
+function mapSessionRowToSummary(row: SessionRepositoryRow, clusterSizes: Map<string, number>): SessionSummary {
   return {
     id: row.session_id,
     provider: row.provider,
     summary: row.custom_name || '',
     messageCount: 0,
     lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
+    branchCount: row.fork_root_session_id ? clusterSizes.get(row.fork_root_session_id) ?? 0 : 0,
   };
 }
 
 function readProjectSessionsIncludingArchived(projectPath: string): ProjectSessionsPageResult {
   const rows = sessionsDb.getSessionsByProjectPathIncludingArchived(projectPath) as SessionRepositoryRow[];
+  const clusterSizes = sessionsDb.getForkClusterSizesByProjectPath(projectPath);
 
   return {
-    sessions: rows.map(mapSessionRowToSummary),
+    sessions: rows.map((row) => mapSessionRowToSummary(row, clusterSizes)),
     total: rows.length,
     hasMore: false,
   };
@@ -151,9 +155,10 @@ function readProjectSessionsPageByPath(
     pagination.offset,
   ) as SessionRepositoryRow[];
   const total = sessionsDb.countSessionsByProjectPath(projectPath);
+  const clusterSizes = sessionsDb.getForkClusterSizesByProjectPath(projectPath);
 
   return {
-    sessions: rows.map(mapSessionRowToSummary),
+    sessions: rows.map((row) => mapSessionRowToSummary(row, clusterSizes)),
     total,
     hasMore: pagination.offset + rows.length < total,
   };

@@ -111,6 +111,25 @@ test('activateBranch on a nonexistent session id returns null', async () => {
   });
 });
 
+test('getForkClusterSizesByProjectPath groups cluster sizes by root id, scoped to project path', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createSession('plain', 'claude', '/workspace/p');
+    sessionsDb.createSession('root-s', 'claude', '/workspace/p');
+    sessionsDb.createForkedSession({
+      providerSessionId: 'branch-1', parentSessionId: 'root-s',
+      forkedAtMessageUuid: 'u2', provider: 'claude', projectPath: '/workspace/p',
+    });
+    sessionsDb.createSession('other-root', 'claude', '/workspace/other');
+
+    const sizes = sessionsDb.getForkClusterSizesByProjectPath('/workspace/p');
+    assert.equal(sizes.get('root-s'), 2);
+    assert.equal(sizes.size, 1);
+
+    const otherSizes = sessionsDb.getForkClusterSizesByProjectPath('/workspace/other');
+    assert.equal(otherSizes.size, 0);
+  });
+});
+
 test('createForkedSession with a nonexistent parent throws and leaves no partial state', async () => {
   await withIsolatedDatabase(() => {
     assert.throws(
