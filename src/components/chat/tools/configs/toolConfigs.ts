@@ -1,7 +1,9 @@
 /**
  * Centralized tool configuration registry
- * Defines display behavior for all tool types 
+ * Defines display behavior for all tool types
  */
+
+import { isAgentMetadataBlockText } from '../../utils/subagentToolNames';
 
 export interface ToolDisplayConfig {
   input: {
@@ -447,7 +449,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
           // If content is an array (typical for agent responses with multiple text blocks)
           if (Array.isArray(content)) {
             const textContent = content
-              .filter((item: any) => item.type === 'text')
+              .filter((item: any) => item.type === 'text' && !isAgentMetadataBlockText(item.text))
               .map((item: any) => item.text)
               .join('\n\n');
             return { content: textContent || 'No response text' };

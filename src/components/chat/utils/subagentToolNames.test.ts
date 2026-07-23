@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isSubagentToolName, SUBAGENT_TOOL_NAMES } from './subagentToolNames.js';
+import { isSubagentToolName, isAgentMetadataBlockText, SUBAGENT_TOOL_NAMES } from './subagentToolNames.js';
 
 test('recognizes the current Agent tool name', () => {
   assert.equal(isSubagentToolName('Agent'), true);
@@ -20,4 +20,12 @@ test('rejects other tools and empty input', () => {
 
 test('set contains exactly the two known names', () => {
   assert.deepEqual([...SUBAGENT_TOOL_NAMES].sort(), ['Agent', 'Task']);
+});
+
+test('isAgentMetadataBlockText matches runtime routing metadata', () => {
+  assert.equal(isAgentMetadataBlockText("agentId: ae810e7... (use SendMessage with to: '...', summary: '...')"), true);
+});
+
+test('isAgentMetadataBlockText does not match normal result text', () => {
+  assert.equal(isAgentMetadataBlockText('Here is the summary of the changes.'), false);
 });
