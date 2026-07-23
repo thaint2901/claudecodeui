@@ -221,14 +221,12 @@ async function handleChatSend(
 
     let forked: ReturnType<typeof sessionsService.createAppSession>;
     let forkRun: ReturnType<typeof chatRunRegistry.startRun>;
+    const forkedName = `${session.custom_name || 'Session'} (fork)`;
     try {
       // Allocate the fork its own app session row; the SDK announces the fork's
       // provider id mid-run and the session writer maps it onto this row.
       forked = sessionsService.createAppSession('claude', session.project_path ?? '');
-      sessionsDb.updateSessionCustomName(
-        forked.sessionId,
-        `${session.custom_name || 'Session'} (fork)`,
-      );
+      sessionsDb.updateSessionCustomName(forked.sessionId, forkedName);
 
       forkRun = chatRunRegistry.startRun({
         appSessionId: forked.sessionId,
@@ -285,6 +283,20 @@ async function handleChatSend(
         forkOptions,
         forkRun.writer,
       );
+
+      // The fork's transcript is a copy of the parent's history, so the
+      // sessions-watcher sync would otherwise pick up the parent's inherited
+      // title event and clobber the " (fork)" suffix set above. Write the
+      // fork's own name back into its transcript as a `custom-title` event
+      // (highest sync precedence) once the runtime has announced the fork's
+      // provider session id, so every later sync keeps this name instead.
+      // Best-effort: naming must never fail the fork run.
+      try {
+        await sessionsService.renameSessionById(forked.sessionId, forkedName);
+      } catch (renameError) {
+        const renameMessage = renameError instanceof Error ? renameError.message : String(renameError);
+        console.warn('[Chat] Failed to write back forked session name', { sessionId: forked.sessionId, error: renameMessage });
+      }
     } catch (error) {
       // The success ack above already told the user the fork was created, so
       // a spawn failure here must be surfaced too — otherwise the user is
