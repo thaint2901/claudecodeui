@@ -7,17 +7,28 @@ import { useWebSocket } from '../../../contexts/WebSocketContext';
 import { useSessionLock } from '../../../contexts/SessionLockContext';
 import PermissionContext from '../../../contexts/PermissionContext';
 import { QuickSettingsPanel } from '../../quick-settings-panel';
-import type { ChatInterfaceProps, Provider  } from '../types/types';
+import type { ChatInterfaceProps, ChatMessage, Provider  } from '../types/types';
 import { useChatProviderState } from '../hooks/useChatProviderState';
 import { useChatSessionState } from '../hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '../hooks/useChatComposerState';
 import { useSessionStore } from '../../../stores/useSessionStore';
 import { postStopSession } from '../../../contexts/sessionLockApi';
+import { api } from '../../../utils/api';
 
 import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatComposer from './subcomponents/ChatComposer';
 import CommandResultModal from './subcomponents/CommandResultModal';
+import { BranchSwitcher } from './subcomponents/BranchSwitcher';
+
+/** A row from `GET /api/providers/sessions/:id/branches`. */
+type SessionBranch = {
+  sessionId: string;
+  forkedFromSessionId: string | null;
+  forkedAtMessageUuid: string | null;
+  createdAt: string;
+  activeLeaf: boolean;
+};
 
 function ChatInterface({
   selectedProject,
@@ -147,6 +158,67 @@ function ChatInterface({
     onNavigateToSession?.(sessionId);
   }, [setCurrentSessionId, onSessionEstablished, onNavigateToSession]);
 
+  // Sibling branches for the viewed session, refetched whenever the viewed
+  // session changes (including the swap `onBranchCreated` performs below).
+  const [branches, setBranches] = useState<SessionBranch[]>([]);
+  const fetchBranches = useCallback(async (sessionId: string) => {
+    try {
+      const response = await api.sessionBranches(sessionId);
+      if (!response.ok) {
+        setBranches([]);
+        return;
+      }
+      const json = await response.json();
+      setBranches(json?.data?.branches ?? []);
+    } catch (error) {
+      console.error('[ChatInterface] Failed to fetch session branches', error);
+      setBranches([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!currentSessionId) {
+      setBranches([]);
+      return;
+    }
+    void fetchBranches(currentSessionId);
+  }, [currentSessionId, fetchBranches]);
+
+  // Alternatives at a fork point `uuid`: every branch forked at that message,
+  // plus the common parent they split from, parent-first then by createdAt.
+  const siblingsAt = useCallback((uuid: string) => {
+    const forks = branches.filter((b) => b.forkedAtMessageUuid === uuid);
+    if (forks.length === 0) return [];
+    const parentIds = [...new Set(forks.map((b) => b.forkedFromSessionId).filter(Boolean))] as string[];
+    const parents = branches.filter((b) => parentIds.includes(b.sessionId));
+    return [...parents, ...forks];
+  }, [branches]);
+
+  const switchBranch = useCallback(async (branchSessionId?: string) => {
+    if (!branchSessionId) return;
+    await api.activateBranch(branchSessionId);
+    await sessionStore.refreshFromServer(branchSessionId);
+    sessionStore.setActiveSession(branchSessionId);
+    setCurrentSessionId(branchSessionId);
+    onNavigateToSession?.(branchSessionId, { replace: true });
+    clearForkView();
+  }, [sessionStore, setCurrentSessionId, onNavigateToSession, clearForkView]);
+
+  const renderBranchSwitcher = useCallback((message: ChatMessage) => {
+    if (!message.uuid) return null;
+    const sibs = siblingsAt(message.uuid);
+    if (sibs.length < 2) return null;
+    const idx = sibs.findIndex((b) => b.sessionId === currentSessionId || b.activeLeaf);
+    return (
+      <BranchSwitcher
+        current={idx + 1}
+        total={sibs.length}
+        onPrev={() => void switchBranch(sibs[idx - 1]?.sessionId)}
+        onNext={() => void switchBranch(sibs[idx + 1]?.sessionId)}
+      />
+    );
+  }, [siblingsAt, currentSessionId, switchBranch]);
+
   const {
     input,
     setInput,
@@ -272,6 +344,7 @@ function ChatInterface({
       sessionStore.setActiveSession(branchId);
       setCurrentSessionId(branchId);
       onNavigateToSession?.(branchId, { replace: true });
+      void fetchBranches(branchId);
     },
     onForkFailed: (_sid, error) => {
       clearForkView();
@@ -444,6 +517,7 @@ function ChatInterface({
           selectedProject={selectedProject}
           canEditPrompt={provider === 'claude' && !isProcessing}
           onEditPrompt={(m) => m.uuid && startEditSentPrompt(m.uuid, typeof m.content === 'string' ? m.content : '')}
+          renderBranchSwitcher={renderBranchSwitcher}
         />
 
         <div className="relative flex-shrink-0">

@@ -1,4 +1,5 @@
 import { memo, useMemo, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Pencil } from 'lucide-react';
 
@@ -39,6 +40,8 @@ type MessageComponentProps = {
   /** Whether the active provider/session supports edit-and-fork (Claude only, not while streaming). */
   canEditPrompt?: boolean;
   onEditPrompt?: (message: ChatMessage) => void;
+  /** Renders the `< n/total >` branch switcher under this message, or null. */
+  renderBranchSwitcher?: (message: ChatMessage) => ReactNode;
 };
 
 type InteractiveOption = {
@@ -49,7 +52,7 @@ type InteractiveOption = {
 
 const COPY_HIDDEN_TOOL_NAMES = new Set(['Bash', 'Edit', 'Write', 'ApplyPatch']);
 
-const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider, canEditPrompt, onEditPrompt }: MessageComponentProps) => {
+const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider, canEditPrompt, onEditPrompt, renderBranchSwitcher }: MessageComponentProps) => {
   const { t } = useTranslation('chat');
   const isGrouped = prevMessage && prevMessage.type === message.type &&
     ((prevMessage.type === 'assistant') ||
@@ -127,6 +130,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                 <span>{formattedTime}</span>
               </div>
             )}
+            {renderBranchSwitcher?.(message)}
           </div>
           {!isGrouped && (
             <div className="hidden h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm text-white sm:flex">

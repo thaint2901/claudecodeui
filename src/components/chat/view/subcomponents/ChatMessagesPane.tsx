@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import { memo, useCallback, useMemo } from 'react';
-import type { Dispatch, RefObject, SetStateAction } from 'react';
+import type { Dispatch, ReactNode, RefObject, SetStateAction } from 'react';
 
 import type { ChatMessage } from '../../types/types';
 import type {
@@ -68,6 +68,8 @@ interface ChatMessagesPaneProps {
   /** Whether the active provider/session supports edit-and-fork (Claude only, not while streaming). */
   canEditPrompt?: boolean;
   onEditPrompt?: (message: ChatMessage) => void;
+  /** Renders the `< n/total >` branch switcher under a user message forked at that point, or null. */
+  renderBranchSwitcher?: (message: ChatMessage) => ReactNode;
 }
 
 function ChatMessagesPane({
@@ -118,6 +120,7 @@ function ChatMessagesPane({
   selectedProject,
   canEditPrompt,
   onEditPrompt,
+  renderBranchSwitcher,
 }: ChatMessagesPaneProps) {
   const { t } = useTranslation('chat');
   const groupedVisibleMessages = useMemo(
@@ -292,6 +295,7 @@ function ChatMessagesPane({
                   provider={provider}
                   canEditPrompt={canEditPrompt}
                   onEditPrompt={onEditPrompt}
+                  renderBranchSwitcher={renderBranchSwitcher}
                 />
               );
             });
