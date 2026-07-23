@@ -196,6 +196,9 @@ export const SubagentTranscriptPanel: React.FC<SubagentTranscriptPanelProps> = (
               </div>
             );
           })}
+          {isComplete && childMessages.length === 0 && (
+            <div className="text-xs text-muted-foreground">No transcript available for this subagent.</div>
+          )}
           {isComplete && finalResult && !transcriptEndsWithText && (
             <div className="mt-3 rounded-md border border-green-500/30 bg-green-500/5 p-2 text-xs">
               <div className="mb-1 font-semibold uppercase tracking-wide text-green-600 dark:text-green-400">Result</div>
