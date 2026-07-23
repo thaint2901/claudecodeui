@@ -159,7 +159,7 @@ function matchesToolPermission(entry, toolName, input) {
 }
 
 function mapCliOptionsToSDK(options = {}) {
-  const { sessionId, cwd, toolsSettings, permissionMode, effort } = options;
+  const { sessionId, cwd, toolsSettings, permissionMode, effort, forkSubagent } = options;
 
   const sdkOptions = {};
 
@@ -167,12 +167,25 @@ function mapCliOptionsToSDK(options = {}) {
   // Since SDK 0.2.113, options.env replaces process.env instead of overlaying it.
   sdkOptions.env = { ...process.env };
 
-  // Spec 2026-07-22-subagent-fork-subtask: always-on subagent capabilities.
-  // FORK_SUBAGENT lets Claude request subagent_type "fork" (inherited-context
-  // subagent, the /subtask mechanism). FORWARD_SUBAGENT_TEXT makes the CLI
-  // emit subagent text/thinking blocks so the transcript panel can show them.
-  sdkOptions.env.CLAUDE_CODE_FORK_SUBAGENT = '1';
+  // FORWARD_SUBAGENT_TEXT makes the CLI emit subagent text/thinking blocks so
+  // the transcript panel can show them. Harmless and always on.
   sdkOptions.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT = '1';
+
+  // FORK_SUBAGENT lets Claude request subagent_type "fork" (inherited-context
+  // subagent, the /subtask mechanism), but per the docs it forces EVERY
+  // subagent launched during the run into the background. Background
+  // subagents lose the canUseTool approval channel, so any tool needing
+  // approval fails with "AbortError: Stream closed", and their results
+  // surface as duplicate task-notifications plus an "Async agent launched
+  // successfully..." boilerplate leaking into the Agent tool_result.
+  // CLAUDE_CODE_DISABLE_BACKGROUND_TASKS takes precedence over fork mode and
+  // keeps subagents foreground (docs-confirmed precedence rule) — but it also
+  // disables Bash run_in_background entirely, so it must stay scoped to
+  // /subtask runs only, not global.
+  if (forkSubagent === true) {
+    sdkOptions.env.CLAUDE_CODE_FORK_SUBAGENT = '1';
+    sdkOptions.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
+  }
 
   // Resolve the executable eagerly on Windows because the SDK uses raw child_process.spawn,
   // which does not reliably follow npm's shell wrappers like cross-spawn does.

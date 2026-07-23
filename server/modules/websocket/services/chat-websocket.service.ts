@@ -346,6 +346,9 @@ async function handleChatSend(
     resume: Boolean(session.provider_session_id),
     cwd: clientOptions.cwd ?? session.project_path ?? undefined,
     projectPath: session.project_path ?? clientOptions.projectPath,
+    // /subtask is the only caller that needs the fork subagent env vars —
+    // scoped to this run only (see mapCliOptionsToSDK for why).
+    ...(subtaskCommand ? { forkSubagent: true } : {}),
   };
 
   try {

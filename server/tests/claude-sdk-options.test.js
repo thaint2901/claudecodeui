@@ -2,9 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mapCliOptionsToSDK } from '../claude-sdk.js';
 
-test('always enables fork-subagent and subagent-text-forwarding env vars', () => {
+test('always forwards subagent text, but does not enable fork-subagent by default', () => {
   const sdkOptions = mapCliOptionsToSDK({});
+  assert.equal(sdkOptions.env.CLAUDE_CODE_FORK_SUBAGENT, undefined);
+  assert.equal(sdkOptions.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, undefined);
+  assert.equal(sdkOptions.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT, '1');
+});
+
+test('enables fork-subagent and disables background tasks when forkSubagent is requested', () => {
+  const sdkOptions = mapCliOptionsToSDK({ forkSubagent: true });
   assert.equal(sdkOptions.env.CLAUDE_CODE_FORK_SUBAGENT, '1');
+  assert.equal(sdkOptions.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, '1');
   assert.equal(sdkOptions.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT, '1');
 });
 
