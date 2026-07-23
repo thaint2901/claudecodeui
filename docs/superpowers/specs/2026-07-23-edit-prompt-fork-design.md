@@ -42,9 +42,15 @@ Verified against the pinned `@anthropic-ai/claude-agent-sdk` **0.3.165**
 - `forkSession: boolean` — with `resume`, forks to a new session ID; the
   original session is untouched.
 - `resumeSessionAt: string` — with `resume`, resumes messages **up to and
-  including** the message with this UUID. Doc comment says the UUID should
-  come from `SDKAssistantMessage.uuid`; behavior with a *user* message UUID
-  must be confirmed by the spike in §7 before implementation.
+  including** the message with this UUID. Confirmed by the spike in §7:
+  `RESUME_POINT_RULE = 'preceding-assistant-uuid'` — the UUID must be the
+  preceding *assistant* message's uuid (`SDKAssistantMessage.uuid`, per the
+  doc comment). A *user* message uuid does not error or get ignored, but
+  "up to and including" is taken literally on that user turn: the original
+  user message stays in the forked history and the new prompt is appended
+  right after it (no assistant reply is synthesized for the original turn) —
+  the opposite of what "edit this prompt" needs, since the edited prompt's
+  original text is not removed.
 - The new session ID is announced on the system `init` message
   (`message.session_id`) and on the result message.
 - Transcript message UUIDs already flow to the frontend: the JSONL parser uses
@@ -96,8 +102,8 @@ Semantics:
    when `editAtMessageUuid` is present, scan the current session's JSONL for
    the message **immediately preceding** the edited message; pass its uuid as
    the resume point. Edge case: editing the **first** prompt sends no
-   `resumeSessionAt` (fork from the beginning). Exact preceding-message rule
-   is finalized by the spike (§7).
+   `resumeSessionAt` (fork from the beginning). Preceding-message rule per
+   the spike (§7): the immediately preceding **assistant** message's uuid.
 3. **`mapCliOptionsToSDK()`** (`server/claude-sdk.js:160-237`) additions:
    `resumeSessionAt` passthrough and `forkSession: true` when forking.
 4. **Branch row creation:** when the SDK announces the new `session_id`
@@ -166,6 +172,14 @@ Per repo reality (no `npm test`; server tests run via
    assistant-message uuid → inspect the branch JSONL. Locks down the
    "up to and including" boundary and the first-prompt case. Results are
    recorded in this spec before the resume-point logic is written.
+
+   Spike result (2026-07-23): `RESUME_POINT_RULE = 'preceding-assistant-uuid'`
+   — `resumeSessionAt` must be the uuid of the assistant message preceding
+   the edited prompt; a user-message uuid works (no error, not ignored) but
+   is taken literally as "up to and including" that user turn, so the
+   original (pre-edit) user message remains in the forked transcript with
+   the new prompt appended immediately after it — not the desired
+   replacement semantics. Script: `scripts/spike-resume-session-at.mjs`.
 1. **Server unit tests (`tsx --test`):**
    - Sessions repository: one-active-leaf-per-cluster invariant;
      activate-branch transactionality; non-forked sessions unaffected.
