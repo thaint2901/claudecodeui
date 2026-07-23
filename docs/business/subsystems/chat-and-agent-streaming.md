@@ -26,6 +26,7 @@ It is the single feature that every other subsystem exists to support: providers
 | **Message actions** | Copy any message, text-to-speech any message. |
 | **Effort controls** | Pick a reasoning-effort level (low, medium, high, etc.) for Claude and Codex models, per-session. |
 | **Session lock (background agent)** | Detect and disable the composer when a session is held by a Claude Code background/daemon worker; Stop & Resume to reclaim it. |
+| **Edit sent prompt (conversation fork)** | Edit and re-send a previously sent prompt (Claude only); forks the conversation in place via the Agent SDK's resume mechanics, with a branch switcher at each fork point. Code changes are never reverted. |
 
 ## Stakeholders
 
@@ -80,3 +81,4 @@ It is the single feature that every other subsystem exists to support: providers
 - [capabilities/chat-and-agent-streaming/token-usage-and-context-window.md](capabilities/chat-and-agent-streaming/token-usage-and-context-window.md)
 - [capabilities/chat-and-agent-streaming/effort-controls.md](capabilities/chat-and-agent-streaming/effort-controls.md)
 - [capabilities/chat-and-agent-streaming/session-lock.md](capabilities/chat-and-agent-streaming/session-lock.md)
+- [capabilities/chat-and-agent-streaming/edit-prompt-fork.md](capabilities/chat-and-agent-streaming/edit-prompt-fork.md)
