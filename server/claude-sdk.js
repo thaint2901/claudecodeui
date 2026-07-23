@@ -276,6 +276,25 @@ function mapCliOptionsToSDK(options = {}) {
 }
 
 /**
+ * Determines whether a mid-stream `session_id` announcement should replace
+ * the currently captured session id.
+ *
+ * Fork runs are the one case where the provider session id CHANGES mid-stream:
+ * the resume seed is the PARENT's id, but the SDK announces the fork's own new
+ * id on its first `system/init` message and never re-announces the parent id.
+ * Non-fork runs must never re-capture — the first announced id is authoritative
+ * for them, and resume runs intentionally keep the pre-seeded parent id.
+ *
+ * @param {boolean} isFork - Whether this run was started with forkSession.
+ * @param {string|undefined} announcedId - `message.session_id` from the SDK stream.
+ * @param {string|undefined} capturedId - The currently captured session id.
+ * @returns {boolean}
+ */
+function shouldRecaptureSessionId(isFork, announcedId, capturedId) {
+  return Boolean(isFork) && Boolean(announcedId) && announcedId !== capturedId;
+}
+
+/**
  * Adds a session to the active sessions map
  * @param {string} sessionId - Session identifier
  * @param {Object} queryInstance - SDK query instance
@@ -691,6 +710,23 @@ async function queryClaudeSDK(command, options = {}, ws) {
           sessionCreatedSent = true;
           ws.send(createNormalizedMessage({ kind: 'session_created', newSessionId: capturedSessionId, sessionId: capturedSessionId, provider: 'claude' }));
         }
+      } else if (shouldRecaptureSessionId(sdkOptions.forkSession, message.session_id, capturedSessionId)) {
+        // Fork runs are pre-seeded with the PARENT's session id (resume target),
+        // but the SDK announces the fork's own new id on its first system/init
+        // message. Treat that announced id as authoritative so the app session
+        // row gets mapped onto the fork's transcript instead of staying a ghost.
+        removeSession(capturedSessionId);
+        capturedSessionId = message.session_id;
+        addSession(capturedSessionId, queryInstance, ws);
+
+        if (ws.setSessionId && typeof ws.setSessionId === 'function') {
+          ws.setSessionId(capturedSessionId);
+        }
+
+        if (!sessionCreatedSent) {
+          sessionCreatedSent = true;
+          ws.send(createNormalizedMessage({ kind: 'session_created', newSessionId: capturedSessionId, sessionId: capturedSessionId, provider: 'claude' }));
+        }
       } else {
         // session_id already captured
       }
@@ -879,5 +915,6 @@ export {
   resolveToolApproval,
   getPendingApprovalsForSession,
   reconnectSessionWriter,
-  mapCliOptionsToSDK
+  mapCliOptionsToSDK,
+  shouldRecaptureSessionId
 };
