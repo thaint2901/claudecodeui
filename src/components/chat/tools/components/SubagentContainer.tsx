@@ -45,6 +45,11 @@ const BACKGROUND_LAUNCH_ACK_PREFIX = 'Async agent launched successfully';
 export const isBackgroundLaunchAck = (text: string | null): boolean =>
   typeof text === 'string' && text.trim().startsWith(BACKGROUND_LAUNCH_ACK_PREFIX);
 
+// The Agent tool's persisted content array can carry a trailing text block
+// that is runtime routing metadata (agentId/usage) for the model to continue
+// the conversation, not part of the subagent's actual result — exclude it.
+const isAgentMetadataBlock = (t: string): boolean => /^agentId: /.test(t);
+
 /**
  * Parses a tool result's content into a plain-text string, handling both the
  * raw string/array shapes and the JSON-stringified array-of-text-parts shape
@@ -61,7 +66,7 @@ export const extractResultText = (toolResult?: { content?: unknown; isError?: bo
       const parsed = JSON.parse(content);
       if (Array.isArray(parsed)) {
         const textParts = parsed
-          .filter((p: any) => p.type === 'text' && p.text)
+          .filter((p: any) => p.type === 'text' && p.text && !isAgentMetadataBlock(p.text))
           .map((p: any) => p.text);
         if (textParts.length > 0) {
           content = textParts.join('\n');
@@ -72,7 +77,7 @@ export const extractResultText = (toolResult?: { content?: unknown; isError?: bo
     }
   } else if (Array.isArray(content)) {
     const textParts = content
-      .filter((p: any) => p.type === 'text' && p.text)
+      .filter((p: any) => p.type === 'text' && p.text && !isAgentMetadataBlock(p.text))
       .map((p: any) => p.text);
     if (textParts.length > 0) {
       content = textParts.join('\n');

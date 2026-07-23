@@ -66,6 +66,18 @@ export const SubagentTranscriptPanel: React.FC<SubagentTranscriptPanelProps> = (
   // it caches its own rather than sharing one.
   const createDiff = useMemo<DiffCalculator>(() => createCachedDiffCalculator(), []);
 
+  // The Agent tool's result is, by construction, the subagent's final text
+  // message — so when the transcript already ends with that plain assistant
+  // text, the Result box below would duplicate it verbatim. It stays as a
+  // fallback for transcripts that don't end with a trailing text message
+  // (forwarding off, incomplete transcripts): error results are normally
+  // shown via the per-tool error boxes above, but finalResult for an error
+  // still renders here when the transcript lacks a trailing text message.
+  const transcriptEndsWithText = useMemo(() => {
+    const lastChild = childMessages[childMessages.length - 1];
+    return Boolean(lastChild && lastChild.type === 'assistant' && !lastChild.isToolUse && (lastChild.content || '').trim());
+  }, [childMessages]);
+
   useEffect(() => {
     if (!open) return;
     const panelId = panelIdRef.current!;
@@ -186,7 +198,7 @@ export const SubagentTranscriptPanel: React.FC<SubagentTranscriptPanelProps> = (
               </div>
             );
           })}
-          {isComplete && finalResult && (
+          {isComplete && finalResult && !transcriptEndsWithText && (
             <div className="mt-3 rounded-md border border-green-500/30 bg-green-500/5 p-2 text-xs">
               <div className="mb-1 font-semibold uppercase tracking-wide text-green-600 dark:text-green-400">Result</div>
               <MarkdownContent content={finalResult} />

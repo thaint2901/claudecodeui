@@ -31,3 +31,24 @@ test('extractResultText still parses JSON array-of-text-parts content', () => {
   const result = extractResultText({ content: JSON.stringify([{ type: 'text', text: 'part one' }]) });
   assert.equal(result, 'part one');
 });
+
+test('extractResultText excludes a trailing agentId metadata block', () => {
+  const result = extractResultText({
+    content: [
+      { type: 'text', text: 'The subagent finished the task successfully.' },
+      { type: 'text', text: "agentId: adc93d067b08cef32 (use SendMessage with to: '...', summary: 'did the thing') <usage>subagent_tokens: 39026</usage>" },
+    ],
+  });
+  assert.equal(result, 'The subagent finished the task successfully.');
+});
+
+test('extractResultText falls back gracefully when every block is metadata', () => {
+  // If ALL text parts are metadata blocks, textParts.length is 0 and the
+  // filter-then-join path is skipped entirely, so `content` stays the
+  // original array and gets JSON.stringify'd (existing fallback behavior).
+  const original = [
+    { type: 'text', text: 'agentId: abc123 (use SendMessage to continue)' },
+  ];
+  const result = extractResultText({ content: original });
+  assert.equal(result, JSON.stringify(original, null, 2));
+});
