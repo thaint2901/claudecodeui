@@ -86,3 +86,126 @@ test('fetchHistory stamps parentToolUseId onto subagent child messages', async (
     await rm(projectDir, { recursive: true, force: true });
   }
 });
+
+test('fetchHistory resolves with parent messages intact when the subagent transcript file is missing', async () => {
+  const missingSessionId = '22222222-2222-2222-2222-222222222222';
+  const missingAgentId = 'missing-agent-id';
+  const missingParentToolId = 'toolu_parent_missing';
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'claude-proj-'));
+  try {
+    const mainJsonl = path.join(projectDir, `${missingSessionId}.jsonl`);
+    await writeFile(mainJsonl, [
+      jsonlLine({
+        sessionId: missingSessionId, timestamp: '2026-07-22T10:00:00Z', type: 'assistant',
+        message: { role: 'assistant', content: [
+          { type: 'tool_use', id: missingParentToolId, name: 'Agent',
+            input: { description: 'Review readme', subagent_type: 'general-purpose', prompt: 'Review the readme' } },
+        ] },
+      }),
+      jsonlLine({
+        sessionId: missingSessionId, timestamp: '2026-07-22T10:01:00Z', type: 'user',
+        toolUseResult: { agentId: missingAgentId },
+        message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: missingParentToolId, content: 'Report: looks fine' },
+        ] },
+      }),
+    ].join(''));
+
+    // Deliberately do NOT create the subagents/agent-<id>.jsonl file.
+
+    const appSessionId = sessionsDb.createSession(
+      missingSessionId, 'claude', projectDir, undefined, undefined, undefined, mainJsonl,
+    );
+
+    const provider = new ClaudeSessionsProvider();
+    const result = await provider.fetchHistory(appSessionId, {
+      providerSessionId: missingSessionId, limit: null, offset: 0,
+    });
+
+    const parent = result.messages.find((m) => m.toolId === missingParentToolId);
+    assert.ok(parent, 'parent Agent tool_use should still be present');
+    const children = result.messages.filter((m) => m.parentToolUseId === missingParentToolId);
+    assert.equal(children.length, 0, 'no children should be stamped when the agent file is missing');
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('fetchHistory stamps each of two subagents with its own correct parentToolUseId', async () => {
+  const dualSessionId = '33333333-3333-3333-3333-333333333333';
+  const agentIdOne = 'dual-agent-one';
+  const agentIdTwo = 'dual-agent-two';
+  const parentToolIdOne = 'toolu_parent_one';
+  const parentToolIdTwo = 'toolu_parent_two';
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'claude-proj-'));
+  try {
+    const mainJsonl = path.join(projectDir, `${dualSessionId}.jsonl`);
+    await writeFile(mainJsonl, [
+      jsonlLine({
+        sessionId: dualSessionId, timestamp: '2026-07-22T10:00:00Z', type: 'assistant',
+        message: { role: 'assistant', content: [
+          { type: 'tool_use', id: parentToolIdOne, name: 'Agent',
+            input: { description: 'First task', subagent_type: 'general-purpose', prompt: 'Do first task' } },
+        ] },
+      }),
+      jsonlLine({
+        sessionId: dualSessionId, timestamp: '2026-07-22T10:01:00Z', type: 'user',
+        toolUseResult: { agentId: agentIdOne },
+        message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: parentToolIdOne, content: 'First done' },
+        ] },
+      }),
+      jsonlLine({
+        sessionId: dualSessionId, timestamp: '2026-07-22T10:02:00Z', type: 'assistant',
+        message: { role: 'assistant', content: [
+          { type: 'tool_use', id: parentToolIdTwo, name: 'Agent',
+            input: { description: 'Second task', subagent_type: 'general-purpose', prompt: 'Do second task' } },
+        ] },
+      }),
+      jsonlLine({
+        sessionId: dualSessionId, timestamp: '2026-07-22T10:03:00Z', type: 'user',
+        toolUseResult: { agentId: agentIdTwo },
+        message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: parentToolIdTwo, content: 'Second done' },
+        ] },
+      }),
+    ].join(''));
+
+    const subagentsDir = path.join(projectDir, dualSessionId, 'subagents');
+    await mkdir(subagentsDir, { recursive: true });
+    await writeFile(path.join(subagentsDir, `agent-${agentIdOne}.jsonl`), [
+      jsonlLine({
+        timestamp: '2026-07-22T10:00:10Z', type: 'assistant',
+        message: { role: 'assistant', content: [
+          { type: 'tool_use', id: 'toolu_child_one', name: 'Read', input: { file_path: '/tmp/one.md' } },
+        ] },
+      }),
+    ].join(''));
+    await writeFile(path.join(subagentsDir, `agent-${agentIdTwo}.jsonl`), [
+      jsonlLine({
+        timestamp: '2026-07-22T10:02:10Z', type: 'assistant',
+        message: { role: 'assistant', content: [
+          { type: 'tool_use', id: 'toolu_child_two', name: 'Read', input: { file_path: '/tmp/two.md' } },
+        ] },
+      }),
+    ].join(''));
+
+    const appSessionId = sessionsDb.createSession(
+      dualSessionId, 'claude', projectDir, undefined, undefined, undefined, mainJsonl,
+    );
+
+    const provider = new ClaudeSessionsProvider();
+    const result = await provider.fetchHistory(appSessionId, {
+      providerSessionId: dualSessionId, limit: null, offset: 0,
+    });
+
+    const childOne = result.messages.find((m) => m.toolId === 'toolu_child_one');
+    const childTwo = result.messages.find((m) => m.toolId === 'toolu_child_two');
+    assert.ok(childOne, 'first agent child should be present');
+    assert.ok(childTwo, 'second agent child should be present');
+    assert.equal(childOne?.parentToolUseId, parentToolIdOne);
+    assert.equal(childTwo?.parentToolUseId, parentToolIdTwo);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});

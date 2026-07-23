@@ -157,6 +157,22 @@ export function parseSubtaskCommand(content: string): { task: string } | null {
 }
 
 /**
+ * Rewrites a `/subtask <task>` payload into the explicit fork-subagent prompt
+ * sent to the runtime. There is no SDK API to force this — explicit prompting
+ * is the documented technique and CLAUDE_CODE_FORK_SUBAGENT=1 is always set.
+ * Best-effort: the model usually complies but may act directly instead.
+ */
+export function buildSubtaskPrompt(task: string): string {
+  return [
+    `Use the Agent tool with subagent_type "fork" to work on the following task in the background`,
+    `(a fork inherits this conversation's full context, so do not re-explain the situation to it).`,
+    `Report its result back here when it finishes. Task:`,
+    '',
+    task,
+  ].join('\n');
+}
+
+/**
  * Handles `chat.send`: resolves the session row (provider, project path, and
  * provider-native id all come from the database — never from the client),
  * registers the run, and dispatches to the provider runtime.
@@ -314,16 +330,7 @@ async function handleChatSend(
   const subtaskCommand = provider === 'claude' ? parseSubtaskCommand(command) : null;
   if (subtaskCommand) {
     // /subtask maps to the fork subagent (inherits full conversation context).
-    // There is no SDK API to force this — explicit prompting is the documented
-    // technique and CLAUDE_CODE_FORK_SUBAGENT=1 is always set. Best-effort:
-    // the model usually complies but may act directly instead.
-    command = [
-      `Use the Agent tool with subagent_type "fork" to work on the following task in the background`,
-      `(a fork inherits this conversation's full context, so do not re-explain the situation to it).`,
-      `Report its result back here when it finishes. Task:`,
-      '',
-      subtaskCommand.task,
-    ].join('\n');
+    command = buildSubtaskPrompt(subtaskCommand.task);
   }
 
   // The provider runtimes receive the provider-native session id (that is the

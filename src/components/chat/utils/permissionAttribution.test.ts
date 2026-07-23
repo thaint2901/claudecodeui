@@ -45,3 +45,45 @@ test('picks the most recent matching subagent when several run', () => {
   ];
   assert.deepEqual(attributePermissionToSubagent(messages, 'Bash'), { description: 'Second' });
 });
+
+test('falls back to subagent_type when toolInput has no description', () => {
+  const message: ChatMessage = {
+    type: 'assistant',
+    content: '',
+    timestamp: new Date(),
+    isToolUse: true,
+    toolName: 'Agent',
+    toolId: 'p1',
+    toolResult: null,
+    isSubagentContainer: true,
+    toolInput: JSON.stringify({ subagent_type: 'general-purpose' }),
+    subagentState: {
+      childMessages: [],
+      currentToolIndex: 0,
+      isComplete: false,
+      childTools: [{ toolId: 'c0', toolName: 'Bash', toolInput: '{}', toolResult: null, timestamp: new Date() }],
+    },
+  } as ChatMessage;
+  assert.deepEqual(attributePermissionToSubagent([message], 'Bash'), { description: 'general-purpose' });
+});
+
+test('falls back to literal "subagent" when toolInput is invalid JSON', () => {
+  const message: ChatMessage = {
+    type: 'assistant',
+    content: '',
+    timestamp: new Date(),
+    isToolUse: true,
+    toolName: 'Agent',
+    toolId: 'p1',
+    toolResult: null,
+    isSubagentContainer: true,
+    toolInput: '{not valid json',
+    subagentState: {
+      childMessages: [],
+      currentToolIndex: 0,
+      isComplete: false,
+      childTools: [{ toolId: 'c0', toolName: 'Bash', toolInput: '{}', toolResult: null, timestamp: new Date() }],
+    },
+  } as ChatMessage;
+  assert.deepEqual(attributePermissionToSubagent([message], 'Bash'), { description: 'subagent' });
+});

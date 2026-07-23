@@ -1,18 +1,13 @@
 import React, { useState } from 'react';
 
-import type { SubagentChildTool, ChatMessage } from '../../types/types';
+import type { SubagentState } from '../../types/types';
 
 import { SubagentTranscriptPanel } from './SubagentTranscriptPanel';
 
 interface SubagentContainerProps {
   toolInput: unknown;
   toolResult?: { content?: unknown; isError?: boolean } | null;
-  subagentState: {
-    childTools: SubagentChildTool[];
-    childMessages: ChatMessage[];
-    currentToolIndex: number;
-    isComplete: boolean;
-  };
+  subagentState: SubagentState;
 }
 
 const getCompactToolDisplay = (toolName: string, toolInput: unknown): string => {
