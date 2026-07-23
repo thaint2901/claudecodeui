@@ -812,6 +812,8 @@ export function useChatComposerState({
         }
         // selectedProject is guaranteed by the guard at the top of handleSubmit.
         safeLocalStorage.removeItem(`draft_input_${selectedProject.projectId}`);
+        // A queued draft must never carry the fork intent of the message it displaced.
+        setEditingSentPrompt(null);
         return;
       }
 
@@ -846,6 +848,8 @@ export function useChatComposerState({
           if (textareaRef.current) {
             textareaRef.current.style.height = 'auto';
           }
+          // A slash command is not a reply to the edited prompt — clear the fork intent.
+          setEditingSentPrompt(null);
           return;
         }
       }

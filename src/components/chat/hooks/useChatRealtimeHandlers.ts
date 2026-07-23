@@ -269,6 +269,14 @@ export function useChatRealtimeHandlers({
             setPendingPermissionRequests([]);
           }
 
+          // Consume the pending fork entry exactly once per complete, so an
+          // aborted run never leaves a stale branch id for the NEXT complete
+          // to pick up.
+          const pendingBranchId = sid ? pendingBranchRef.current.get(sid) : undefined;
+          if (sid) {
+            pendingBranchRef.current.delete(sid);
+          }
+
           if (msg.aborted) {
             // Abort was requested — the complete event confirms it. No
             // further UI action is needed beyond clearing the entry above.
@@ -288,11 +296,9 @@ export function useChatRealtimeHandlers({
             void sessionStore.refreshFromServer(sid);
           }
 
-          const branchId = sid ? pendingBranchRef.current.get(sid) : undefined;
-          if (sid && branchId) {
-            pendingBranchRef.current.delete(sid);
-            void sessionStore.refreshFromServer(branchId);
-            onBranchCreated?.(sid, branchId);
+          if (sid && pendingBranchId) {
+            void sessionStore.refreshFromServer(pendingBranchId);
+            onBranchCreated?.(sid, pendingBranchId);
           }
 
           break;
