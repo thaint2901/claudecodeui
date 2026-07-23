@@ -96,3 +96,36 @@ test('getClusterBranches returns [] for never-forked sessions', async () => {
     assert.deepEqual(sessionsDb.getClusterBranches('plain'), []);
   });
 });
+
+test('activateBranch on a never-forked session returns null and leaves active_leaf untouched', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createSession('plain', 'claude', '/workspace/p');
+    assert.equal(sessionsDb.activateBranch('plain'), null);
+    assert.equal(sessionsDb.getSessionById('plain')?.active_leaf, 1);
+  });
+});
+
+test('activateBranch on a nonexistent session id returns null', async () => {
+  await withIsolatedDatabase(() => {
+    assert.equal(sessionsDb.activateBranch('does-not-exist'), null);
+  });
+});
+
+test('createForkedSession with a nonexistent parent throws and leaves no partial state', async () => {
+  await withIsolatedDatabase(() => {
+    assert.throws(
+      () => {
+        sessionsDb.createForkedSession({
+          providerSessionId: 'orphan-branch',
+          parentSessionId: 'no-such-parent',
+          forkedAtMessageUuid: 'uuid-msg-x',
+          provider: 'claude',
+          projectPath: '/workspace/p',
+          jsonlPath: null,
+        });
+      },
+      /not found/,
+    );
+    assert.equal(sessionsDb.getSessionById('orphan-branch'), null);
+  });
+});
