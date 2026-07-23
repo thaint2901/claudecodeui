@@ -40,17 +40,30 @@ Creates, resumes, archives, renames, and deletes chat sessions. The two-id desig
 3. The sessions service updates the row.
 4. The sidebar re-renders.
 
+## Flow (Fork via `/fork`)
+
+The `/fork` command (see the Slash Commands capability) is the one case where the provider announces a *brand-new* native session id mid-run rather than filling in the id of the session the user is already looking at:
+
+1. cloudcli allocates a new app session row up front — before the SDK run even starts — named `"<parent> (fork)"`, and resumes the parent's provider-native session id with `forkSession: true`.
+2. The SDK starts the fork and, mid-stream, announces the fork's own new provider-native session id (a fork never keeps the parent's native id).
+3. `recaptureForkSession` (in `server/claude-sdk.js`) re-keys the run's internal tracking onto the newly announced id, and the chat run registry maps that id onto the app session row allocated in step 1 — the only path in the app where a provider id changes after a run has already begun.
+4. At the moment the fork's id is announced, cloudcli writes the fork's name back into the fork's own transcript as a `custom-title` event via `renameSessionById` (highest-precedence title source), so a later watcher sync doesn't overwrite the `" (fork)"` suffix with something derived from the copied history.
+5. An acknowledgment is written into the *original* session's transcript telling the user where the fork went; if the write-back at step 4 fails, or the run itself fails, the failure surfaces as a `task_notification` rather than failing silently.
+
 ## Output
 
 - A stable app session id.
 - A mapped provider session id.
 - A consistent sidebar that survives across providers and resumes.
+- For `/fork`: a new sidebar entry named `"<parent> (fork)"` whose provider-native id was captured mid-run.
 
 ## Technical Mapping
 
 - **Backend service:** `server/modules/providers/services/sessions.service.ts`
 - **Backend writer:** `server/modules/websocket/services/chat-session-writer.service.ts`
 - **Backend repo:** `server/modules/database/repositories/sessions.db.ts`
+- **Backend fork capture:** `server/claude-sdk.js` (`recaptureForkSession`)
+- **Backend fork interception:** `server/modules/websocket/services/chat-websocket.service.ts` (`parseForkCommand`, `handleChatSend`)
 - **Frontend sidebar:** `src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx`, `SidebarSessionItem.tsx`
 
 ## Dependencies
