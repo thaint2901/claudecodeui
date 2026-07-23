@@ -1,10 +1,11 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 
 import type { ChatMessage } from '../../types/types';
 import { Button } from '../../../../shared/view/ui/Button';
 import { ToolRenderer } from '../ToolRenderer';
+import { createCachedDiffCalculator, type DiffCalculator } from '../../utils/messageTransforms';
 
 import { MarkdownContent } from './ContentRenderers';
 
@@ -59,6 +60,11 @@ export const SubagentTranscriptPanel: React.FC<SubagentTranscriptPanelProps> = (
   if (panelIdRef.current === undefined) {
     panelIdRef.current = ++panelIdCounter;
   }
+
+  // This panel renders inside a portal, out of reach of the main pane's
+  // single diff-calculator instance (created in useChatSessionState.ts), so
+  // it caches its own rather than sharing one.
+  const createDiff = useMemo<DiffCalculator>(() => createCachedDiffCalculator(), []);
 
   useEffect(() => {
     if (!open) return;
@@ -155,9 +161,19 @@ export const SubagentTranscriptPanel: React.FC<SubagentTranscriptPanelProps> = (
                     toolResult={message.toolResult}
                     toolId={message.toolId}
                     mode="input"
+                    createDiff={createDiff}
                     isSubagentContainer={message.isSubagentContainer}
                     subagentState={message.subagentState}
                   />
+                  {/* Bash already shows failures inline in its command row above. */}
+                  {message.toolResult?.isError && message.toolName !== 'Bash' && (
+                    <div className="mt-2 rounded border border-red-500/30 bg-red-500/5 p-2 text-xs">
+                      <div className="mb-1 font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">Error</div>
+                      <div className="whitespace-pre-wrap break-words text-red-900 dark:text-red-100">
+                        {String(message.toolResult.content || '')}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             }
