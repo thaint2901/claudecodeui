@@ -305,8 +305,13 @@ export const sessionsService = {
    * its own errors for the (only) Claude implementation, so this catch is
    * primarily defense-in-depth for a future provider whose implementation
    * doesn't.
+   *
+   * The returned `writeBack` flag reports whether the write-back actually
+   * landed (`false` for an unresolvable provider, a provider with no
+   * implementation, or an implementation that itself reported failure) —
+   * additive only, existing callers that ignore it keep working unchanged.
    */
-  async renameSessionById(sessionId: string, summary: string): Promise<{ sessionId: string; summary: string }> {
+  async renameSessionById(sessionId: string, summary: string): Promise<{ sessionId: string; summary: string; writeBack: boolean }> {
     const session = sessionsDb.getSessionById(sessionId);
     if (!session) {
       throw new AppError(`Session "${sessionId}" was not found.`, {
@@ -317,15 +322,16 @@ export const sessionsService = {
 
     sessionsDb.updateSessionCustomName(sessionId, summary);
 
+    let writeBack = false;
     try {
       const providerSessionId = (session.provider_session_id ?? session.session_id) as ProviderSessionId;
       const synchronizer = providerRegistry.resolveProvider(session.provider).sessionSynchronizer;
-      await synchronizer.writeBackCustomName?.(providerSessionId, summary, session.project_path ?? undefined);
+      writeBack = (await synchronizer.writeBackCustomName?.(providerSessionId, summary, session.project_path ?? undefined)) ?? false;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`Failed to write back session name for "${sessionId}"`, { error: message });
     }
 
-    return { sessionId, summary };
+    return { sessionId, summary, writeBack };
   },
 };

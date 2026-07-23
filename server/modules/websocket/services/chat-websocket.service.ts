@@ -222,6 +222,13 @@ async function handleChatSend(
     let forked: ReturnType<typeof sessionsService.createAppSession>;
     let forkRun: ReturnType<typeof chatRunRegistry.startRun>;
     const forkedName = `${session.custom_name || 'Session'} (fork)`;
+    const parentProviderSessionId = session.provider_session_id;
+    // Resolves to whether the write-back attempted at announcement time (see
+    // `onProviderSessionId` below) landed. `null` means it never got a chance
+    // to run at all (e.g. the SDK never announced a distinct id before the
+    // run ended) — treated the same as "failed" below, since either way the
+    // post-spawn retry is the only thing that can still make it land.
+    let earlyRenameWriteBack: Promise<boolean> | null = null;
     try {
       // Allocate the fork its own app session row; the SDK announces the fork's
       // provider id mid-run and the session writer maps it onto this row.
@@ -234,6 +241,34 @@ async function handleChatSend(
         providerSessionId: session.provider_session_id,
         connection: ws,
         userId,
+        // The fork's transcript is a copy of the parent's history, so the
+        // sessions-watcher sync would otherwise pick up the parent's inherited
+        // title event and clobber the " (fork)" suffix set above. Write the
+        // fork's own name back into its transcript as a `custom-title` event
+        // (highest sync precedence) as soon as the SDK announces the fork's
+        // OWN provider session id (distinct from the parent's, which this run
+        // was seeded with to resume) — not after the whole run finishes,
+        // which could be minutes away and leaves the wrong name visible in
+        // the sidebar until then. A run that ends without ever announcing a
+        // distinct id (e.g. spawn fails immediately) leaves
+        // `earlyRenameWriteBack` `null`; the post-spawn check below covers
+        // the retry either way.
+        onProviderSessionId: (announcedProviderSessionId) => {
+          if (earlyRenameWriteBack || announcedProviderSessionId === parentProviderSessionId) {
+            return;
+          }
+          earlyRenameWriteBack = sessionsService
+            .renameSessionById(forked.sessionId, forkedName)
+            .then((result) => result.writeBack)
+            .catch((renameError) => {
+              const message = renameError instanceof Error ? renameError.message : String(renameError);
+              console.warn('[Chat] Failed to write back forked session name at announcement', {
+                sessionId: forked.sessionId,
+                error: message,
+              });
+              return false;
+            });
+        },
       });
       if (!forkRun) {
         sendProtocolError(ws, 'RUN_IN_PROGRESS', `Forked session "${forked.sessionId}" already has a run in progress.`, sessionId);
@@ -284,18 +319,35 @@ async function handleChatSend(
         forkRun.writer,
       );
 
-      // The fork's transcript is a copy of the parent's history, so the
-      // sessions-watcher sync would otherwise pick up the parent's inherited
-      // title event and clobber the " (fork)" suffix set above. Write the
-      // fork's own name back into its transcript as a `custom-title` event
-      // (highest sync precedence) once the runtime has announced the fork's
-      // provider session id, so every later sync keeps this name instead.
-      // Best-effort: naming must never fail the fork run.
-      try {
-        await sessionsService.renameSessionById(forked.sessionId, forkedName);
-      } catch (renameError) {
-        const renameMessage = renameError instanceof Error ? renameError.message : String(renameError);
-        console.warn('[Chat] Failed to write back forked session name', { sessionId: forked.sessionId, error: renameMessage });
+      // The early write-back above (fired from `onProviderSessionId`) is the
+      // common case; this retries only when that either never got a chance
+      // to run or itself reported failure. Best-effort: naming must never
+      // fail the fork run.
+      let writeBackOk = earlyRenameWriteBack ? await earlyRenameWriteBack : false;
+      if (!writeBackOk) {
+        try {
+          const retryResult = await sessionsService.renameSessionById(forked.sessionId, forkedName);
+          writeBackOk = retryResult.writeBack;
+        } catch (renameError) {
+          const renameMessage = renameError instanceof Error ? renameError.message : String(renameError);
+          console.warn('[Chat] Failed to write back forked session name', { sessionId: forked.sessionId, error: renameMessage });
+        }
+      }
+
+      if (!writeBackOk) {
+        // Both the announcement-time attempt and the post-spawn retry failed
+        // (or the announcement never happened) — the fork's " (fork)" suffix
+        // may be overwritten by the next sessions-watcher sync. Surface this
+        // into the ORIGINAL session so the user knows to double-check/rename
+        // manually, mirroring the shape of the other task_notification sends
+        // in this function.
+        sendIfOpen(ws, JSON.stringify(createNormalizedMessage({
+          kind: 'task_notification',
+          sessionId,
+          provider,
+          status: 'completed',
+          summary: `Forked conversation completed, but its name may not persist as "${forkedName}" — a background sync could revert it. Rename it manually if needed.`,
+        })));
       }
     } catch (error) {
       // The success ack above already told the user the fork was created, so
