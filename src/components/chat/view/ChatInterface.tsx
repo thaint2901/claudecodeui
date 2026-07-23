@@ -161,9 +161,17 @@ function ChatInterface({
   // Sibling branches for the viewed session, refetched whenever the viewed
   // session changes (including the swap `onBranchCreated` performs below).
   const [branches, setBranches] = useState<SessionBranch[]>([]);
-  const fetchBranches = useCallback(async (sessionId: string) => {
+  // Guards a fetch's result against being applied after the session it was
+  // fetched for has stopped being the one in view (stale in-flight response).
+  const currentSessionIdRef = useRef(currentSessionId);
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
+  const fetchBranches = useCallback(async (sessionId: string, isCurrent: () => boolean) => {
     try {
       const response = await api.sessionBranches(sessionId);
+      if (!isCurrent()) return;
       if (!response.ok) {
         setBranches([]);
         return;
@@ -171,6 +179,7 @@ function ChatInterface({
       const json = await response.json();
       setBranches(json?.data?.branches ?? []);
     } catch (error) {
+      if (!isCurrent()) return;
       console.error('[ChatInterface] Failed to fetch session branches', error);
       setBranches([]);
     }
@@ -181,7 +190,11 @@ function ChatInterface({
       setBranches([]);
       return;
     }
-    void fetchBranches(currentSessionId);
+    let cancelled = false;
+    void fetchBranches(currentSessionId, () => !cancelled);
+    return () => {
+      cancelled = true;
+    };
   }, [currentSessionId, fetchBranches]);
 
   // Alternatives at a fork point `uuid`: every branch forked at that message,
@@ -196,7 +209,11 @@ function ChatInterface({
 
   const switchBranch = useCallback(async (branchSessionId?: string) => {
     if (!branchSessionId) return;
-    await api.activateBranch(branchSessionId);
+    const response = await api.activateBranch(branchSessionId);
+    if (!response.ok) {
+      console.error('Branch activation failed', { branchSessionId, status: response.status });
+      return;
+    }
     await sessionStore.refreshFromServer(branchSessionId);
     sessionStore.setActiveSession(branchSessionId);
     setCurrentSessionId(branchSessionId);
@@ -209,6 +226,7 @@ function ChatInterface({
     const sibs = siblingsAt(message.uuid);
     if (sibs.length < 2) return null;
     const idx = sibs.findIndex((b) => b.sessionId === currentSessionId || b.activeLeaf);
+    if (idx < 0) return null;
     return (
       <BranchSwitcher
         current={idx + 1}
@@ -344,7 +362,7 @@ function ChatInterface({
       sessionStore.setActiveSession(branchId);
       setCurrentSessionId(branchId);
       onNavigateToSession?.(branchId, { replace: true });
-      void fetchBranches(branchId);
+      void fetchBranches(branchId, () => currentSessionIdRef.current === branchId);
     },
     onForkFailed: (_sid, error) => {
       clearForkView();
