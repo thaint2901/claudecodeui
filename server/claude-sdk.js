@@ -232,6 +232,12 @@ function mapCliOptionsToSDK(options = {}) {
 
   if (sessionId) {
     sdkOptions.resume = sessionId;
+    if (options.forkSession) {
+      sdkOptions.forkSession = true;
+      if (options.resumeSessionAt) {
+        sdkOptions.resumeSessionAt = options.resumeSessionAt;
+      }
+    }
   }
 
   return sdkOptions;
