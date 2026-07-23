@@ -207,11 +207,13 @@ function mapCliOptionsToSDK(options = {}) {
     }
   }
 
-  // Auto-approve subagent DISPATCH only (the act of starting a subagent).
-  // Tools the subagent itself calls still go through the normal approval
-  // flow — this does not widen the tools-disabled-by-default policy.
+  // Auto-approve subagent DISPATCH only (the act of starting a subagent),
+  // so dispatch isn't silently denied — unless the user explicitly
+  // disallowed the tool, in which case that opt-out wins. Tools the
+  // subagent itself calls still go through the normal approval flow.
+  const disallowedTools = Array.isArray(settings.disallowedTools) ? settings.disallowedTools : [];
   for (const dispatchTool of ['Agent', 'Task']) {
-    if (!allowedTools.includes(dispatchTool)) {
+    if (!allowedTools.includes(dispatchTool) && !disallowedTools.includes(dispatchTool)) {
       allowedTools.push(dispatchTool);
     }
   }

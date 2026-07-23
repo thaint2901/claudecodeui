@@ -22,6 +22,15 @@ test('does not duplicate Agent when user already allowlisted it', () => {
   assert.ok(sdkOptions.allowedTools.includes('Bash'));
 });
 
+test('honors an explicit user disallow of Agent by not force-allowing it', () => {
+  const sdkOptions = mapCliOptionsToSDK({
+    toolsSettings: { disallowedTools: ['Agent'] },
+  });
+  assert.equal(sdkOptions.allowedTools.includes('Agent'), false);
+  assert.ok(sdkOptions.disallowedTools.includes('Agent'));
+  assert.ok(sdkOptions.allowedTools.includes('Task'));
+});
+
 test('passes forkSession through when requested', () => {
   assert.equal(mapCliOptionsToSDK({ forkSession: true }).forkSession, true);
   assert.equal('forkSession' in mapCliOptionsToSDK({}), false);
