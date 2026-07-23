@@ -12,10 +12,14 @@ type SessionRow = {
   isArchived: number;
   created_at: string;
   updated_at: string;
+  fork_root_session_id: string | null;
+  forked_from_session_id: string | null;
+  forked_at_message_uuid: string | null;
+  active_leaf: number;
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, isArchived, created_at, updated_at, fork_root_session_id, forked_from_session_id, forked_at_message_uuid, active_leaf';
 
 const SQLITE_UTC_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
