@@ -164,6 +164,13 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     run.status = 'completed';
     run.completedAt = Date.now();
     evictRunLater(run.appSessionId);
+
+    if (run.forkMeta && !run.branchSessionId) {
+      console.warn('[ChatRunRegistry] Fork requested but no branch session was created during the run', {
+        appSessionId: run.appSessionId,
+        forkedAtMessageUuid: run.forkMeta.forkedAtMessageUuid,
+      });
+    }
   }
 
   run.events.push(outbound);
@@ -227,14 +234,6 @@ function recordProviderSessionId(run: ChatRun, providerSessionId: string): void 
       });
     }
     return;
-  }
-
-  if (run.forkMeta && providerSessionId === run.forkMeta.parentProviderSessionId) {
-    console.warn('[ChatRunRegistry] Fork requested but runtime announced the parent session id — no branch created', {
-      appSessionId: run.appSessionId,
-      providerSessionId,
-      forkedAtMessageUuid: run.forkMeta.forkedAtMessageUuid,
-    });
   }
 
   try {
