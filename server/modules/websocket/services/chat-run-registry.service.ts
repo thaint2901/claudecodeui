@@ -229,6 +229,14 @@ function recordProviderSessionId(run: ChatRun, providerSessionId: string): void 
     return;
   }
 
+  if (run.forkMeta && providerSessionId === run.forkMeta.parentProviderSessionId) {
+    console.warn('[ChatRunRegistry] Fork requested but runtime announced the parent session id — no branch created', {
+      appSessionId: run.appSessionId,
+      providerSessionId,
+      forkedAtMessageUuid: run.forkMeta.forkedAtMessageUuid,
+    });
+  }
+
   try {
     sessionsDb.assignProviderSessionId(run.appSessionId, providerSessionId);
     void broadcastCanonicalSessionUpsert(run.appSessionId).catch((error) => {
