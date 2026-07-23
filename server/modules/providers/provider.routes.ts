@@ -1,5 +1,8 @@
+import { existsSync } from 'node:fs';
+
 import express, { type Request, type Response } from 'express';
 
+import { sessionsDb } from '@/modules/database/index.js';
 import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
 import { providerCapabilitiesService } from '@/modules/providers/services/provider-capabilities.service.js';
 import { providerMcpService } from '@/modules/providers/services/mcp.service.js';
@@ -625,6 +628,39 @@ router.get(
       offset,
     });
     res.json(createApiSuccessResponse(result));
+  }),
+);
+
+router.get(
+  '/sessions/:sessionId/branches',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    const branches = sessionsDb
+      .getClusterBranches(sessionId)
+      .filter((row) => !row.jsonl_path || existsSync(row.jsonl_path))
+      .map((row) => ({
+        sessionId: row.session_id,
+        forkedFromSessionId: row.forked_from_session_id,
+        forkedAtMessageUuid: row.forked_at_message_uuid,
+        createdAt: row.created_at,
+        activeLeaf: row.active_leaf === 1,
+      }));
+    res.json(createApiSuccessResponse({ branches }));
+  }),
+);
+
+router.post(
+  '/sessions/:sessionId/activate-branch',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    const session = sessionsDb.activateBranch(sessionId);
+    if (!session) {
+      throw new AppError(`Session "${sessionId}" is not part of a fork cluster.`, {
+        code: 'NOT_A_BRANCH',
+        statusCode: 404,
+      });
+    }
+    res.json(createApiSuccessResponse({ session }));
   }),
 );
 
