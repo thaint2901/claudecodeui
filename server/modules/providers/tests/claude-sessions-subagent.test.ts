@@ -87,6 +87,84 @@ test('fetchHistory stamps parentToolUseId onto subagent child messages', async (
   }
 });
 
+test('fetchHistory drops an inherited copy of the parent Agent dispatch from a fork transcript', async () => {
+  // A `fork` subagent inherits the parent conversation, so its own transcript
+  // can contain a verbatim copy of the main session's Agent tool_use/tool_result
+  // that spawned it (same ids as in the main JSONL). Stamping that copy with
+  // __parentToolUseId would make its own toolId equal its own parentToolUseId —
+  // a self-cycle that crashes the client's recursive grouping.
+  const forkSessionId = '44444444-4444-4444-4444-444444444444';
+  const forkAgentId = 'fork-agent-id';
+  const forkParentToolId = 'toolu_fork_parent';
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'claude-proj-'));
+  try {
+    const mainJsonl = path.join(projectDir, `${forkSessionId}.jsonl`);
+    await writeFile(mainJsonl, [
+      jsonlLine({
+        sessionId: forkSessionId, timestamp: '2026-07-23T10:00:00Z', type: 'assistant',
+        message: { role: 'assistant', content: [
+          { type: 'tool_use', id: forkParentToolId, name: 'Agent',
+            input: { description: 'Say pineapple', prompt: 'Say pineapple', subagent_type: 'fork' } },
+        ] },
+      }),
+      jsonlLine({
+        sessionId: forkSessionId, timestamp: '2026-07-23T10:01:00Z', type: 'user',
+        toolUseResult: { agentId: forkAgentId },
+        message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: forkParentToolId, content: 'Fork started — processing in background' },
+        ] },
+      }),
+    ].join(''));
+
+    const subagentsDir = path.join(projectDir, forkSessionId, 'subagents');
+    await mkdir(subagentsDir, { recursive: true });
+    await writeFile(path.join(subagentsDir, `agent-${forkAgentId}.jsonl`), [
+      // Inherited copy of the main session's Agent dispatch — same id as forkParentToolId.
+      jsonlLine({
+        timestamp: '2026-07-23T10:00:10Z', type: 'assistant',
+        message: { role: 'assistant', content: [
+          { type: 'tool_use', id: forkParentToolId, name: 'Agent',
+            input: { description: 'Say pineapple', prompt: 'Say pineapple', subagent_type: 'fork' } },
+        ] },
+      }),
+      // Inherited copy of the main session's tool_result for that same dispatch.
+      jsonlLine({
+        timestamp: '2026-07-23T10:00:20Z', type: 'user',
+        message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: forkParentToolId, content: 'Fork started — processing in background' },
+        ] },
+      }),
+      // Genuinely new child content from the fork's own run.
+      jsonlLine({
+        timestamp: '2026-07-23T10:00:30Z', type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'pineapple' }] },
+      }),
+    ].join(''));
+
+    const appSessionId = sessionsDb.createSession(
+      forkSessionId, 'claude', projectDir, undefined, undefined, undefined, mainJsonl,
+    );
+
+    const provider = new ClaudeSessionsProvider();
+    const result = await provider.fetchHistory(appSessionId, {
+      providerSessionId: forkSessionId, limit: null, offset: 0,
+    });
+
+    // No message stamped as a child should carry the same toolId as its own
+    // parentToolUseId — that would be a self-cycle.
+    const selfCycles = result.messages.filter(
+      (m) => m.parentToolUseId && m.toolId && m.parentToolUseId === m.toolId,
+    );
+    assert.equal(selfCycles.length, 0, 'no stamped child should be its own parent');
+
+    // The genuinely new child text should still come through.
+    const childText = result.messages.find((m) => m.parentToolUseId === forkParentToolId && m.kind === 'text');
+    assert.equal(childText?.content, 'pineapple');
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
 test('fetchHistory resolves with parent messages intact when the subagent transcript file is missing', async () => {
   const missingSessionId = '22222222-2222-2222-2222-222222222222';
   const missingAgentId = 'missing-agent-id';

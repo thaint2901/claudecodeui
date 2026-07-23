@@ -79,6 +79,38 @@ function nestedSubagentFixture(): NormalizedMessage[] {
   ] as NormalizedMessage[];
 }
 
+function forkSelfCycleFixture(): NormalizedMessage[] {
+  return [
+    // Outer Agent dispatch (fork subagent).
+    { ...base, id: 'f1', kind: 'tool_use', toolName: 'Agent', toolId: 'toolu_fork',
+      toolInput: JSON.stringify({ description: 'Say pineapple', prompt: 'Say pineapple', subagent_type: 'fork' }) },
+    // Inherited copy of the SAME dispatch, stamped as a child of itself —
+    // this is the actual cycle shape found in a real fork transcript: a
+    // message whose own toolId equals its own parentToolUseId.
+    { ...base, id: 'f2', kind: 'tool_use', toolName: 'Agent', toolId: 'toolu_fork',
+      toolInput: JSON.stringify({ description: 'Say pineapple', prompt: 'Say pineapple', subagent_type: 'fork' }),
+      parentToolUseId: 'toolu_fork' },
+    { ...base, id: 'f3', kind: 'tool_result', toolId: 'toolu_fork', content: 'Fork started', parentToolUseId: 'toolu_fork' },
+    { ...base, id: 'f4', kind: 'text', role: 'assistant', content: 'pineapple', parentToolUseId: 'toolu_fork' },
+  ] as NormalizedMessage[];
+}
+
+test('self-referential parentToolUseId (inherited fork copy) does not stack overflow', () => {
+  // Without the ancestor-guard this recurses forever: convertMessages sees a
+  // child whose own toolId equals its own parentToolUseId key, so recursing
+  // into its children re-fetches the identical array and recurses again.
+  const out = normalizedToChatMessages(forkSelfCycleFixture());
+  const outer = out.find((m) => m.isSubagentContainer);
+  assert.ok(outer);
+  const childMessages = outer?.subagentState?.childMessages ?? [];
+  // The inherited self-copy renders as a plain tool row (not a re-entered
+  // container), and the genuinely new child text still comes through.
+  const selfCopy = childMessages.find((m) => m.toolId === 'toolu_fork');
+  assert.ok(selfCopy);
+  assert.equal(selfCopy?.isSubagentContainer, false);
+  assert.equal(childMessages.some((m) => m.type === 'assistant' && m.content === 'pineapple'), true);
+});
+
 test('2-level nesting: nested Agent keeps its own children (grandchildren)', () => {
   const out = normalizedToChatMessages(nestedSubagentFixture());
 

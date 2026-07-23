@@ -101,6 +101,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
 function convertMessages(
   topLevel: NormalizedMessage[],
   childrenByParent: Map<string, NormalizedMessage[]>,
+  ancestorToolIds: ReadonlySet<string> = new Set(),
 ): ChatMessage[] {
   const converted: ChatMessage[] = [];
 
@@ -181,7 +182,14 @@ function convertMessages(
 
       case 'tool_use': {
         const tr = msg.toolResult || (msg.toolId ? toolResultMap.get(msg.toolId) : null);
-        const isSubagentContainer = isSubagentToolName(msg.toolName);
+        // Inherited fork/subtask transcripts can contain a copy of an
+        // ancestor's own Agent dispatch, whose toolId collides with a
+        // parentToolUseId already on the current recursion path. Treating
+        // that as a fresh container would re-enter childrenByParent.get()
+        // with the same key forever (RangeError: Maximum call stack size
+        // exceeded) — render it as a plain, non-recursing tool row instead.
+        const isCyclicSelfReference = Boolean(msg.toolId) && ancestorToolIds.has(msg.toolId as string);
+        const isSubagentContainer = isSubagentToolName(msg.toolName) && !isCyclicSelfReference;
 
         const children = (msg.toolId && childrenByParent.get(msg.toolId)) || [];
         const childTools: SubagentChildTool[] = [];
@@ -208,7 +216,7 @@ function convertMessages(
         // childrenByParent map so a nested Agent's own children (grandchildren
         // of this call, keyed under the nested Agent's toolId) resolve too.
         const childMessages = isSubagentContainer && children.length > 0
-          ? convertMessages(children, childrenByParent)
+          ? convertMessages(children, childrenByParent, new Set([...ancestorToolIds, msg.toolId as string]))
           : [];
 
         const toolResult = tr

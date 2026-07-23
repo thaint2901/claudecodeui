@@ -65,6 +65,25 @@ type ClaudeHistoryMessagesResult =
     limit?: number | null;
   };
 
+/**
+ * Collects every tool_use id and tool_result target id (`tool_use_id`)
+ * referenced by a single transcript entry's message content blocks.
+ */
+function collectEntryToolIds(entry: AnyRecord): string[] {
+  const content = entry.message?.content;
+  if (!Array.isArray(content)) return [];
+  const ids: string[] = [];
+  for (const part of content as AnyRecord[]) {
+    if (!part || typeof part !== 'object') continue;
+    if (part.type === 'tool_use' && typeof part.id === 'string') {
+      ids.push(part.id);
+    } else if (part.type === 'tool_result' && typeof part.tool_use_id === 'string') {
+      ids.push(part.tool_use_id);
+    }
+  }
+  return ids;
+}
+
 async function parseAgentEntries(filePath: string): Promise<AnyRecord[]> {
   const entries: AnyRecord[] = [];
   try {
@@ -141,12 +160,31 @@ async function getSessionMessages(
       }
     }
 
+    // Ids of every tool_use/tool_result already present in the main-session
+    // stream, used below to drop inherited copies from fork transcripts.
+    const mainSessionToolIds = new Set<string>();
+    for (const message of messages) {
+      for (const id of collectEntryToolIds(message)) mainSessionToolIds.add(id);
+    }
+
     // Agent transcripts live at <projectDir>/<provider-session-id>/subagents/.
     const subagentsDir = path.join(projectDir, providerSessionId, 'subagents');
     for (const [agentId, parentToolUseId] of agentParentToolIds) {
       const agentFilePath = path.join(subagentsDir, `agent-${agentId}.jsonl`);
       const entries = await parseAgentEntries(agentFilePath);
       for (const entry of entries) {
+        // A `fork` subagent inherits the parent conversation, so its
+        // transcript can contain verbatim copies of main-session records
+        // (including the Agent dispatch tool_use/tool_result that spawned
+        // it). Stamping those copies with __parentToolUseId would make a
+        // tool_use's own id equal to its own parentToolUseId, a self-cycle
+        // in the client's childrenByParent grouping. Skip entries whose
+        // tool ids are entirely already in the main session — they carry
+        // no genuinely new child content.
+        const entryToolIds = collectEntryToolIds(entry);
+        if (entryToolIds.length > 0 && entryToolIds.every((id) => mainSessionToolIds.has(id))) {
+          continue;
+        }
         // Non-enumerable-safe internal marker; consumed by fetchHistory below.
         entry.__parentToolUseId = parentToolUseId;
         messages.push(entry);
