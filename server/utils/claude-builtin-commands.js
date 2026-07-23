@@ -27,6 +27,14 @@ const KNOWN_DESCRIPTIONS = {
 
 const FALLBACK_DESCRIPTION = 'Claude Code built-in command';
 
+/**
+ * The SDK's captured `system/init.slash_commands` never reports these two —
+ * they're interactive-only in the CLI, but ccui implements them itself (WS
+ * interception, Claude provider), so they must always be offered once we
+ * have any captured list to append to.
+ */
+const ALWAYS_INCLUDED_NAMES = ['fork', 'subtask'];
+
 let cachedNames = [];
 
 export function setClaudeBuiltinCommands(names) {
@@ -37,8 +45,12 @@ export function setClaudeBuiltinCommands(names) {
 }
 
 export function getClaudeBuiltinCommandEntries(excludeNames = []) {
+  if (cachedNames.length === 0) {
+    return [];
+  }
   const excluded = new Set(excludeNames);
-  return cachedNames
+  const names = [...new Set([...cachedNames, ...ALWAYS_INCLUDED_NAMES])];
+  return names
     .map((name) => `/${name}`)
     .filter((slashName) => !excluded.has(slashName))
     .map((slashName) => ({

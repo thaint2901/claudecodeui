@@ -208,14 +208,18 @@ export function useSlashCommands({
         // bundled/user/project skill. A name belongs in the claude-builtin
         // group only when no richer source (ccui, skills scan, custom .md
         // commands) already knows it, so each command appears exactly once,
-        // in its most informative group.
+        // in its most informative group. Additionally, any name containing
+        // ":" is plugin-namespaced by construction (/plugin:skill) and is
+        // definitionally not a Claude Code built-in, so it's dropped even
+        // though our skills inventory doesn't yet know about it (issue #4 —
+        // bare-named unknown skills can still leak until that's fixed).
         const knownCommandNames = new Set<string>([
           ...((data.builtIn || []) as SlashCommand[]).map((command) => command.name),
           ...skillCommands.map((command) => command.name),
           ...((data.custom || []) as SlashCommand[]).map((command) => command.name),
         ]);
         const claudeBuiltInCommands = ((data.claudeBuiltIn || []) as SlashCommand[])
-          .filter((command) => !knownCommandNames.has(command.name));
+          .filter((command) => !knownCommandNames.has(command.name) && !command.name.includes(':'));
 
         const allCommands: SlashCommand[] = [
           // ccui pseudo-commands come first: for a colliding name, dispatch
