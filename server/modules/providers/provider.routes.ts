@@ -653,11 +653,18 @@ router.post(
   '/sessions/:sessionId/activate-branch',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
+    const existing = sessionsDb.getSessionById(sessionId);
+    if (!existing) {
+      throw new AppError(`Session "${sessionId}" was not found.`, {
+        code: 'SESSION_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
     const session = sessionsDb.activateBranch(sessionId);
     if (!session) {
       throw new AppError(`Session "${sessionId}" is not part of a fork cluster.`, {
         code: 'NOT_A_BRANCH',
-        statusCode: 404,
+        statusCode: 409,
       });
     }
     res.json(createApiSuccessResponse({ session }));

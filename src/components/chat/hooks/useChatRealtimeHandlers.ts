@@ -44,6 +44,8 @@ interface UseChatRealtimeHandlersArgs {
   onBranchCreated?: (parentSessionId: string, branchSessionId: string) => void;
   /** Called when the gateway rejects an edit-and-fork request (`protocol_error` with `code: 'FORK_FAILED'`). */
   onForkFailed?: (sessionId: string, error: string) => void;
+  /** Called on every non-aborted `complete` that did not carry a pending branch id (i.e. every normal complete, fork or not). */
+  onCompleteWithoutBranch?: (sessionId: string) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -77,6 +79,7 @@ export function useChatRealtimeHandlers({
   sessionStore,
   onBranchCreated,
   onForkFailed,
+  onCompleteWithoutBranch,
 }: UseChatRealtimeHandlersArgs) {
   // sessionId -> branchSessionId for runs that forked mid-stream; consumed on
   // this session's next `complete` event, then discarded.
@@ -277,6 +280,10 @@ export function useChatRealtimeHandlers({
             pendingBranchRef.current.delete(sid);
           }
 
+          if (sid && !pendingBranchId && !msg.aborted) {
+            onCompleteWithoutBranch?.(sid);
+          }
+
           if (msg.aborted) {
             // Abort was requested — the complete event confirms it. No
             // further UI action is needed beyond clearing the entry above.
@@ -386,5 +393,6 @@ export function useChatRealtimeHandlers({
     sessionStore,
     onBranchCreated,
     onForkFailed,
+    onCompleteWithoutBranch,
   ]);
 }

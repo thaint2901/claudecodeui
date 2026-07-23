@@ -13,6 +13,7 @@ import { useChatSessionState } from '../hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '../hooks/useChatComposerState';
 import { useSessionStore } from '../../../stores/useSessionStore';
+import type { NormalizedMessage } from '../../../stores/useSessionStore';
 import { postStopSession } from '../../../contexts/sessionLockApi';
 import { api } from '../../../utils/api';
 
@@ -134,6 +135,7 @@ function ChatInterface({
     handleScroll,
     beginForkView,
     clearForkView,
+    isForkViewActive,
   } = useChatSessionState({
     selectedProject,
     selectedSession,
@@ -212,6 +214,9 @@ function ChatInterface({
     const response = await api.activateBranch(branchSessionId);
     if (!response.ok) {
       console.error('Branch activation failed', { branchSessionId, status: response.status });
+      if (currentSessionId) {
+        void fetchBranches(currentSessionId, () => currentSessionIdRef.current === currentSessionId);
+      }
       return;
     }
     await sessionStore.refreshFromServer(branchSessionId);
@@ -219,7 +224,7 @@ function ChatInterface({
     setCurrentSessionId(branchSessionId);
     onNavigateToSession?.(branchSessionId, { replace: true });
     clearForkView();
-  }, [sessionStore, setCurrentSessionId, onNavigateToSession, clearForkView]);
+  }, [sessionStore, setCurrentSessionId, onNavigateToSession, clearForkView, currentSessionId, fetchBranches]);
 
   const renderBranchSwitcher = useCallback((message: ChatMessage) => {
     if (!message.uuid) return null;
@@ -367,6 +372,20 @@ function ChatInterface({
     onForkFailed: (_sid, error) => {
       clearForkView();
       console.error('Fork failed:', error);
+    },
+    onCompleteWithoutBranch: (sid) => {
+      if (!isForkViewActive) return;
+      clearForkView();
+      console.error('Fork was not honored by the runtime — restored the original view');
+      // Reuse the same in-conversation error surfacing as a protocol_error.
+      sessionStore.appendRealtime(sid, {
+        id: `fork_not_honored_${Date.now()}`,
+        sessionId: sid,
+        timestamp: new Date().toISOString(),
+        provider,
+        kind: 'error',
+        content: 'Fork was not honored by the runtime — restored the original view.',
+      } as NormalizedMessage);
     },
   });
 

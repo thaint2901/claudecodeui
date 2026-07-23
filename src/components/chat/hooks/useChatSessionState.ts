@@ -328,6 +328,8 @@ export function useChatSessionState({
 
   const clearForkView = useCallback(() => setForkHiddenIds(null), []);
 
+  const isForkViewActive = forkHiddenIds !== null;
+
   const scrollToBottom = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -859,6 +861,7 @@ export function useChatSessionState({
     rewindMessages,
     beginForkView,
     clearForkView,
+    isForkViewActive,
     sessionActivity,
     isProcessing,
     canAbortSession,
