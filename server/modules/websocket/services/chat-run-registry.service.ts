@@ -36,6 +36,20 @@ type ChatRun = {
   writer: ChatSessionWriter;
   startedAt: number;
   completedAt: number | null;
+  /**
+   * Present only for edit-prompt-fork runs: the parent session this run
+   * branches from. When set, `recordProviderSessionId` must not remap the
+   * parent's app-id → provider-id mapping (see below) — it creates a new
+   * branch session row instead.
+   */
+  forkMeta?: {
+    parentSessionId: string;
+    parentProviderSessionId: string;
+    forkedAtMessageUuid: string;
+    projectPath: string;
+  };
+  /** The new session id created for a fork branch, once known. */
+  branchSessionId?: string;
 };
 
 /**
@@ -176,6 +190,45 @@ function recordProviderSessionId(run: ChatRun, providerSessionId: string): void 
 
   run.providerSessionId = providerSessionId;
 
+  // Edit-prompt fork: the announced id belongs to a NEW branch session.
+  // The parent's app-id → provider-id mapping must stay intact (it still
+  // addresses the original transcript), so instead of remapping we insert
+  // the branch row and flip the cluster's active leaf.
+  if (run.forkMeta && providerSessionId !== run.forkMeta.parentProviderSessionId) {
+    try {
+      const branchSessionId = sessionsDb.createForkedSession({
+        providerSessionId,
+        parentSessionId: run.forkMeta.parentSessionId,
+        forkedAtMessageUuid: run.forkMeta.forkedAtMessageUuid,
+        provider: run.provider,
+        projectPath: run.forkMeta.projectPath,
+      });
+      run.branchSessionId = branchSessionId;
+
+      const event = decorateAndRecordEvent(run, {
+        kind: 'branch_created',
+        sessionId: run.appSessionId,
+        branchSessionId,
+        forkedAtMessageUuid: run.forkMeta.forkedAtMessageUuid,
+        timestamp: new Date().toISOString(),
+      } as unknown as NormalizedMessage);
+      if (event && run.writer.ws && run.writer.ws.readyState === WS_OPEN_STATE) {
+        run.writer.ws.send(JSON.stringify(event));
+      }
+
+      void broadcastCanonicalSessionUpsert(branchSessionId).catch(() => undefined);
+      void broadcastCanonicalSessionUpsert(run.forkMeta.parentSessionId).catch(() => undefined);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[ChatRunRegistry] Failed to persist fork branch', {
+        appSessionId: run.appSessionId,
+        providerSessionId,
+        error: message,
+      });
+    }
+    return;
+  }
+
   try {
     sessionsDb.assignProviderSessionId(run.appSessionId, providerSessionId);
     void broadcastCanonicalSessionUpsert(run.appSessionId).catch((error) => {
@@ -215,6 +268,12 @@ export const chatRunRegistry = {
     providerSessionId: string | null;
     connection: RealtimeClientConnection;
     userId: string | number | null;
+    forkMeta?: {
+      parentSessionId: string;
+      parentProviderSessionId: string;
+      forkedAtMessageUuid: string;
+      projectPath: string;
+    };
   }): ChatRun | null {
     const existing = runs.get(input.appSessionId);
     if (existing && existing.status === 'running') {
@@ -231,6 +290,7 @@ export const chatRunRegistry = {
       writer: null as unknown as ChatSessionWriter,
       startedAt: Date.now(),
       completedAt: null,
+      forkMeta: input.forkMeta,
     };
 
     run.writer = new ChatSessionWriter({

@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { WebSocket } from 'ws';
 
 import { sessionsDb } from '@/modules/database/index.js';
+import { findForkResumePoint } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import { getGlobalImageAssetsDir, normalizeImageDescriptors } from '@/shared/image-attachments.js';
@@ -133,6 +134,15 @@ function readRequiredSessionId(data: AnyRecord): string | null {
   return sessionId.length > 0 ? sessionId : null;
 }
 
+/** Exported for tests: shapes the fork-specific runtime options. */
+export function buildForkRuntimeOptions(
+  editAtMessageUuid: string | null,
+  forkResumeSessionAt: string | null,
+): AnyRecord {
+  if (!editAtMessageUuid) return {};
+  return { forkSession: true, ...(forkResumeSessionAt ? { resumeSessionAt: forkResumeSessionAt } : {}) };
+}
+
 /**
  * Handles `chat.send`: resolves the session row (provider, project path, and
  * provider-native id all come from the database — never from the client),
@@ -168,12 +178,46 @@ async function handleChatSend(
     return;
   }
 
+  const clientOptions = (data.options ?? {}) as AnyRecord;
+  const editAtMessageUuid =
+    typeof clientOptions.editAtMessageUuid === 'string' && clientOptions.editAtMessageUuid.trim().length > 0
+      ? clientOptions.editAtMessageUuid.trim()
+      : null;
+
+  let forkResumeSessionAt: string | null = null;
+  if (editAtMessageUuid) {
+    if (provider !== 'claude') {
+      sendProtocolError(ws, 'FORK_FAILED', 'Editing a sent prompt is only supported for Claude sessions.', sessionId);
+      return;
+    }
+    if (!session.provider_session_id || !session.jsonl_path) {
+      sendProtocolError(ws, 'FORK_FAILED', 'This session has no transcript to fork yet.', sessionId);
+      return;
+    }
+    try {
+      const point = await findForkResumePoint(session.jsonl_path, session.provider_session_id, editAtMessageUuid);
+      forkResumeSessionAt = point.resumeSessionAt;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      sendProtocolError(ws, 'FORK_FAILED', `Cannot fork: ${message}`, sessionId);
+      return;
+    }
+  }
+
   const run = chatRunRegistry.startRun({
     appSessionId: sessionId,
     provider,
     providerSessionId: session.provider_session_id,
     connection: ws,
     userId,
+    forkMeta: editAtMessageUuid
+      ? {
+          parentSessionId: sessionId,
+          parentProviderSessionId: session.provider_session_id as string,
+          forkedAtMessageUuid: editAtMessageUuid,
+          projectPath: session.project_path ?? '',
+        }
+      : undefined,
   });
 
   if (!run) {
@@ -186,7 +230,6 @@ async function handleChatSend(
     return;
   }
 
-  const clientOptions = (data.options ?? {}) as AnyRecord;
   const command = typeof data.content === 'string' ? data.content : '';
 
   // The provider runtimes receive the provider-native session id (that is the
@@ -202,7 +245,9 @@ async function handleChatSend(
     resume: Boolean(session.provider_session_id),
     cwd: clientOptions.cwd ?? session.project_path ?? undefined,
     projectPath: session.project_path ?? clientOptions.projectPath,
+    ...buildForkRuntimeOptions(editAtMessageUuid, forkResumeSessionAt),
   };
+  delete runtimeOptions.editAtMessageUuid;
 
   try {
     await spawnFn(command, runtimeOptions, run.writer);
