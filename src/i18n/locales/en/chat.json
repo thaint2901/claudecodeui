@@ -136,6 +136,10 @@
       "willSend": "Will send when this finishes",
       "edit": "Edit queued message",
       "delete": "Delete queued message"
+    },
+    "editSentPrompt": {
+      "banner": "Editing a sent prompt — the new branch only rewinds the conversation. Code changes after this point are kept (see the Git tab).",
+      "cancel": "Cancel"
     }
   },
   "sessionLock": {

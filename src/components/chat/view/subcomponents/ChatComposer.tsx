@@ -29,6 +29,7 @@ import {
   PromptInputButton,
   PromptInputSubmit,
 } from '../../../../shared/view/ui';
+import { Alert, AlertDescription } from '../../../../shared/view/ui/Alert';
 
 import CommandMenu from './CommandMenu';
 import ActivityIndicator from './ActivityIndicator';
@@ -123,6 +124,10 @@ interface ChatComposerProps {
   onStopAndResume?: () => void;
   /** While the stop request is in flight, the action button shows a spinner. */
   isStopping?: boolean;
+  /** Non-null while the composer is drafting a reply to a previously-sent prompt. */
+  editingSentPrompt?: { uuid: string; content: string } | null;
+  /** Invoked when the user cancels an in-progress edit-and-fork draft. */
+  onCancelEditSentPrompt?: () => void;
 }
 
 export default function ChatComposer({
@@ -184,6 +189,8 @@ export default function ChatComposer({
   isLocked = false,
   onStopAndResume,
   isStopping = false,
+  editingSentPrompt = null,
+  onCancelEditSentPrompt,
 }: ChatComposerProps) {
   const { t } = useTranslation('chat');
   const commandMenuPosition = useMemo(() => {
@@ -337,6 +344,19 @@ export default function ChatComposer({
           onEdit={onEditQueuedDraft}
           onDelete={onDeleteQueuedDraft}
         />
+      )}
+
+      {editingSentPrompt && (
+        <div className="mx-auto mb-3 max-w-[54.25rem]">
+          <Alert>
+            <AlertDescription className="flex items-center justify-between gap-2">
+              <span>{t('input.editSentPrompt.banner')}</span>
+              <button type="button" onClick={onCancelEditSentPrompt} className="underline">
+                {t('input.editSentPrompt.cancel')}
+              </button>
+            </AlertDescription>
+          </Alert>
+        </div>
       )}
 
       {!hasQuestionPanel && <div className="relative mx-auto max-w-[54.25rem]">

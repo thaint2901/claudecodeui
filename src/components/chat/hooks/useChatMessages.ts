@@ -124,6 +124,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
               content: unescapeWithMathProtection(decodeHtmlEntities(content)),
               timestamp: msg.timestamp,
               images,
+              uuid: msg.id,
               ...sharedMetadata,
             });
           }
@@ -135,6 +136,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
             type: 'assistant',
             content: text,
             timestamp: msg.timestamp,
+            uuid: msg.id,
             ...sharedMetadata,
           });
         }

@@ -121,6 +121,8 @@ function ChatInterface({
     scrollToBottom,
     scrollToBottomAndReset,
     handleScroll,
+    beginForkView,
+    clearForkView,
   } = useChatSessionState({
     selectedProject,
     selectedSession,
@@ -193,6 +195,9 @@ function ChatInterface({
     commandModalPayload,
     closeCommandModal,
     showCostModal,
+    editingSentPrompt,
+    startEditSentPrompt,
+    cancelEditSentPrompt,
   } = useChatComposerState({
     selectedProject,
     selectedSession,
@@ -220,6 +225,7 @@ function ChatInterface({
     setIsUserScrolledUp,
     setPendingPermissionRequests,
     resolvePermissionModeForProvider,
+    onForkSubmitted: beginForkView,
   });
 
   // On WebSocket reconnect, re-fetch the current session's messages from the
@@ -255,6 +261,22 @@ function ChatInterface({
     onSessionIdle,
     onWebSocketReconnect: handleWebSocketReconnect,
     sessionStore,
+    onBranchCreated: (_parentId, branchId) => {
+      // In-place swap: the branch transcript already contains the copied
+      // history, so pointing the view at it is the whole "switch". The view
+      // is ultimately keyed off `selectedSession` (the router-derived prop),
+      // so `setCurrentSessionId` alone isn't enough — route to the branch
+      // the same way a brand-new session is adopted (`replace: true` avoids
+      // adding a history entry for a switch the user didn't explicitly ask for).
+      clearForkView();
+      sessionStore.setActiveSession(branchId);
+      setCurrentSessionId(branchId);
+      onNavigateToSession?.(branchId, { replace: true });
+    },
+    onForkFailed: (_sid, error) => {
+      clearForkView();
+      console.error('Fork failed:', error);
+    },
   });
 
   // Session lock (daemon-holds-the-roster) state for the active session.
@@ -420,6 +442,8 @@ function ChatInterface({
           showRawParameters={showRawParameters}
           showThinking={showThinking}
           selectedProject={selectedProject}
+          canEditPrompt={provider === 'claude' && !isProcessing}
+          onEditPrompt={(m) => m.uuid && startEditSentPrompt(m.uuid, typeof m.content === 'string' ? m.content : '')}
         />
 
         <div className="relative flex-shrink-0">
@@ -460,6 +484,8 @@ function ChatInterface({
           queuedDraft={queuedDraft}
           onEditQueuedDraft={editQueuedDraft}
           onDeleteQueuedDraft={deleteQueuedDraft}
+          editingSentPrompt={editingSentPrompt}
+          onCancelEditSentPrompt={cancelEditSentPrompt}
           attachedImages={attachedImages}
           onRemoveImage={(index) =>
             setAttachedImages((previous) =>

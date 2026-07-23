@@ -65,6 +65,9 @@ interface ChatMessagesPaneProps {
   showRawParameters?: boolean;
   showThinking?: boolean;
   selectedProject: Project;
+  /** Whether the active provider/session supports edit-and-fork (Claude only, not while streaming). */
+  canEditPrompt?: boolean;
+  onEditPrompt?: (message: ChatMessage) => void;
 }
 
 function ChatMessagesPane({
@@ -113,6 +116,8 @@ function ChatMessagesPane({
   showRawParameters,
   showThinking,
   selectedProject,
+  canEditPrompt,
+  onEditPrompt,
 }: ChatMessagesPaneProps) {
   const { t } = useTranslation('chat');
   const groupedVisibleMessages = useMemo(
@@ -285,6 +290,8 @@ function ChatMessagesPane({
                   showThinking={showThinking}
                   selectedProject={selectedProject}
                   provider={provider}
+                  canEditPrompt={canEditPrompt}
+                  onEditPrompt={onEditPrompt}
                 />
               );
             });

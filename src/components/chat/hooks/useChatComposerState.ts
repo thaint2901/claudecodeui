@@ -67,6 +67,8 @@ interface UseChatComposerStateArgs {
   addMessage: (msg: ChatMessage) => void;
   setIsUserScrolledUp: (isScrolledUp: boolean) => void;
   setPendingPermissionRequests: Dispatch<SetStateAction<PendingPermissionRequest[]>>;
+  /** Called right after an edit-and-fork request is sent, with the edited message's uuid. */
+  onForkSubmitted?: (uuid: string) => void;
 }
 
 interface MentionableFile {
@@ -217,6 +219,7 @@ export function useChatComposerState({
   addMessage,
   setIsUserScrolledUp,
   setPendingPermissionRequests,
+  onForkSubmitted,
 }: UseChatComposerStateArgs) {
   const [input, setInput] = useState(() => {
     if (typeof window !== 'undefined' && selectedProject) {
@@ -231,6 +234,8 @@ export function useChatComposerState({
   const [imageErrors, setImageErrors] = useState<Map<string, string>>(new Map());
   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
   const [commandModalPayload, setCommandModalPayload] = useState<CommandModalPayload | null>(null);
+  /** Set while composing a reply to an edited (previously sent) prompt; drives `editAtMessageUuid`. */
+  const [editingSentPrompt, setEditingSentPrompt] = useState<{ uuid: string; content: string } | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputHighlightRef = useRef<HTMLDivElement>(null);
@@ -957,8 +962,14 @@ export function useChatComposerState({
         options: {
           ...buildSendOptions(messageContent),
           images: uploadedImages,
+          ...(editingSentPrompt ? { editAtMessageUuid: editingSentPrompt.uuid } : {}),
         },
       });
+
+      if (editingSentPrompt) {
+        onForkSubmitted?.(editingSentPrompt.uuid);
+        setEditingSentPrompt(null);
+      }
 
       setInput('');
       inputValueRef.current = '';
@@ -992,6 +1003,8 @@ export function useChatComposerState({
       addMessage,
       setIsUserScrolledUp,
       slashCommands,
+      editingSentPrompt,
+      onForkSubmitted,
     ],
   );
 
@@ -1057,6 +1070,19 @@ export function useChatComposerState({
 
   const deleteQueuedDraft = useCallback(() => {
     setQueuedDraft(null);
+  }, []);
+
+  const startEditSentPrompt = useCallback((uuid: string, content: string) => {
+    setEditingSentPrompt({ uuid, content });
+    setInput(content);
+    inputValueRef.current = content;
+    textareaRef.current?.focus();
+  }, []);
+
+  const cancelEditSentPrompt = useCallback(() => {
+    setEditingSentPrompt(null);
+    setInput('');
+    inputValueRef.current = '';
   }, []);
 
   // A voice transcript either fills the input (to edit before sending) or, when the
@@ -1334,6 +1360,9 @@ export function useChatComposerState({
     queuedDraft,
     editQueuedDraft,
     deleteQueuedDraft,
+    editingSentPrompt,
+    startEditSentPrompt,
+    cancelEditSentPrompt,
     handleVoiceTranscript,
     handleInputChange,
     handleKeyDown,
