@@ -107,6 +107,13 @@ function sendJson(ws: WebSocket, payload: unknown): void {
   }
 }
 
+/** Guarded send for pre-built (already-stringified) frames, e.g. `createNormalizedMessage` output. */
+function sendIfOpen(ws: WebSocket, payload: string): void {
+  if (ws.readyState === WS_OPEN_STATE) {
+    ws.send(payload);
+  }
+}
+
 /**
  * Reports a protocol-level failure to the requesting client.
  *
@@ -191,6 +198,11 @@ async function handleChatSend(
       return;
     }
 
+    if (chatRunRegistry.isProcessing(sessionId)) {
+      sendProtocolError(ws, 'RUN_IN_PROGRESS', `Session "${sessionId}" already has a run in progress.`, sessionId);
+      return;
+    }
+
     let forked: ReturnType<typeof sessionsService.createAppSession>;
     let forkRun: ReturnType<typeof chatRunRegistry.startRun>;
     try {
@@ -215,7 +227,7 @@ async function handleChatSend(
       }
 
       // Ack into the ORIGINAL session's transcript so the user sees where the fork went.
-      ws.send(JSON.stringify(createNormalizedMessage({
+      sendIfOpen(ws, JSON.stringify(createNormalizedMessage({
         kind: 'task_notification',
         sessionId,
         provider,
@@ -229,7 +241,7 @@ async function handleChatSend(
       // sessionId-less protocol error would only reach the console.
       const message = error instanceof Error ? error.message : String(error);
       console.error('[Chat] /fork setup failed', { sessionId, error: message });
-      ws.send(JSON.stringify(createNormalizedMessage({
+      sendIfOpen(ws, JSON.stringify(createNormalizedMessage({
         kind: 'task_notification',
         sessionId,
         provider,
@@ -258,8 +270,20 @@ async function handleChatSend(
         forkRun.writer,
       );
     } catch (error) {
+      // The success ack above already told the user the fork was created, so
+      // a spawn failure here must be surfaced too — otherwise the user is
+      // left believing the fork is running when it silently died. Report
+      // into the ORIGINAL session's transcript, mirroring the setup-failure
+      // block above (same shape/fields).
       const message = error instanceof Error ? error.message : String(error);
       console.error('[Chat] /fork run failed', { sessionId: forked.sessionId, error: message });
+      sendIfOpen(ws, JSON.stringify(createNormalizedMessage({
+        kind: 'task_notification',
+        sessionId,
+        provider,
+        status: 'failed',
+        summary: `Forked conversation failed to start: ${message}`,
+      })));
     } finally {
       chatRunRegistry.completeRunIfCurrent(forkRun, { exitCode: 1 });
     }
