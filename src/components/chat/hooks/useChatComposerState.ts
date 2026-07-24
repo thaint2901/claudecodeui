@@ -1158,6 +1158,15 @@ export function useChatComposerState({
     setQueuedDraft(restoreQueuedDraft(sessionKey));
   }, [sessionKey]);
 
+  // Edit-sent-prompt state is anchored to a specific message uuid in the
+  // session being viewed; ChatInterface never remounts on a session switch,
+  // so without this it would survive into the new session and reuse a stale
+  // anchor. Composer input text is intentionally left alone here — it has
+  // its own per-project persistence (see the `draft_input_` effects above).
+  useEffect(() => {
+    setEditingSentPrompt(null);
+  }, [sessionKey]);
+
   useEffect(() => {
     if (!textareaRef.current) {
       return;

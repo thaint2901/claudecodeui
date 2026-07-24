@@ -220,19 +220,26 @@ function ChatInterface({
 
   const switchBranch = useCallback(async (branchSessionId?: string) => {
     if (!branchSessionId) return;
-    const response = await api.activateBranch(branchSessionId);
-    if (!response.ok) {
-      console.error('Branch activation failed', { branchSessionId, status: response.status });
+    try {
+      const response = await api.activateBranch(branchSessionId);
+      if (!response.ok) {
+        console.error('Branch activation failed', { branchSessionId, status: response.status });
+        if (currentSessionId) {
+          void fetchBranches(currentSessionId, () => currentSessionIdRef.current === currentSessionId);
+        }
+        return;
+      }
+      await sessionStore.refreshFromServer(branchSessionId);
+      sessionStore.setActiveSession(branchSessionId);
+      setCurrentSessionId(branchSessionId);
+      onNavigateToSession?.(branchSessionId, { replace: true });
+      clearForkView();
+    } catch (error) {
+      console.error('[ChatInterface] Branch switch failed', error);
       if (currentSessionId) {
         void fetchBranches(currentSessionId, () => currentSessionIdRef.current === currentSessionId);
       }
-      return;
     }
-    await sessionStore.refreshFromServer(branchSessionId);
-    sessionStore.setActiveSession(branchSessionId);
-    setCurrentSessionId(branchSessionId);
-    onNavigateToSession?.(branchSessionId, { replace: true });
-    clearForkView();
   }, [sessionStore, setCurrentSessionId, onNavigateToSession, clearForkView, currentSessionId, fetchBranches]);
 
   // Anchors are BARE transcript uuids, but array-content assistant messages
