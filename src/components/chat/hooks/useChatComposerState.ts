@@ -1161,10 +1161,21 @@ export function useChatComposerState({
   // Edit-sent-prompt state is anchored to a specific message uuid in the
   // session being viewed; ChatInterface never remounts on a session switch,
   // so without this it would survive into the new session and reuse a stale
-  // anchor. Composer input text is intentionally left alone here — it has
-  // its own per-project persistence (see the `draft_input_` effects above).
+  // anchor. Switching away mid-edit is treated as CANCEL: the composer text
+  // is the edit prefill (written by startEditSentPrompt into the per-project
+  // draft), so it is cleared along with the anchor — but only when an edit
+  // was actually active, so ordinary per-project drafts are left alone.
+  const editingSentPromptRef = useRef(editingSentPrompt);
   useEffect(() => {
+    editingSentPromptRef.current = editingSentPrompt;
+  }, [editingSentPrompt]);
+  useEffect(() => {
+    if (!editingSentPromptRef.current) {
+      return;
+    }
     setEditingSentPrompt(null);
+    setInput('');
+    inputValueRef.current = '';
   }, [sessionKey]);
 
   useEffect(() => {
