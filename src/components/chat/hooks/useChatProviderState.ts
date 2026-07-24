@@ -63,6 +63,17 @@ type ProviderCapabilitiesApiResponse = {
   };
 };
 
+type ProviderAuthStatusInfo = {
+  provider: LLMProvider;
+  installed: boolean;
+  authenticated: boolean;
+};
+
+type ProviderAuthStatusApiResponse = {
+  success?: boolean;
+  data?: ProviderAuthStatusInfo;
+};
+
 interface UseChatProviderStateArgs {
   selectedSession: ProjectSession | null;
   selectedProject: Project | null;
@@ -123,6 +134,18 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
 
   const [providerModelCatalog, setProviderModelCatalog] = useState<
     Partial<Record<LLMProvider, ProviderModelsDefinition>>
+  >({});
+
+  /**
+   * Auth status per provider, fetched once alongside the model catalog. Lets
+   * the picker hide/disable providers that aren't logged in instead of
+   * offering models for a CLI the user never authenticated (mirrors the
+   * `providerCapabilities` fetch-once-and-map pattern above). Absent entries
+   * (not yet loaded) are treated as authenticated so the picker doesn't flash
+   * everything as unavailable on first paint.
+   */
+  const [providerAuthStatus, setProviderAuthStatus] = useState<
+    Partial<Record<LLMProvider, ProviderAuthStatusInfo>>
   >({});
   const [providerModelCacheCatalog, setProviderModelCacheCatalog] = useState<
     Partial<Record<LLMProvider, ProviderModelsCacheInfo>>
@@ -253,6 +276,50 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadAuthStatus = async () => {
+      try {
+        const results = await Promise.all(
+          PROVIDERS.map(async (p) => {
+            const response = await authenticatedFetch(`/api/providers/${p}/auth/status`);
+            const body = (await response.json()) as ProviderAuthStatusApiResponse;
+            if (!body.success || !body.data) {
+              return null;
+            }
+            return body.data;
+          }),
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        const byProvider: Partial<Record<LLMProvider, ProviderAuthStatusInfo>> = {};
+        PROVIDERS.forEach((p, i) => {
+          const entry = results[i];
+          if (entry) {
+            byProvider[p] = entry;
+          }
+        });
+        setProviderAuthStatus(byProvider);
+      } catch (error) {
+        console.error('Error loading provider auth status:', error);
+      }
+    };
+
+    void loadAuthStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const isProviderAuthenticated = useCallback((targetProvider: LLMProvider): boolean => {
+    const status = providerAuthStatus[targetProvider];
+    return status ? status.authenticated : true;
+  }, [providerAuthStatus]);
 
   const getPermissionModesForProvider = useCallback((targetProvider: LLMProvider): PermissionMode[] => {
     const capabilityModes = providerCapabilities?.[targetProvider]?.permissionModes;
@@ -578,6 +645,8 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     cyclePermissionMode,
     providerModelCatalog,
     providerModelCacheCatalog,
+    providerAuthStatus,
+    isProviderAuthenticated,
     providerModelsLoading,
     providerModelsRefreshing,
     hardRefreshProviderModels: () => loadProviderModels({ bypassCache: true }),

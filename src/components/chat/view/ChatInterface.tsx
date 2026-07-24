@@ -83,6 +83,7 @@ function ChatInterface({
     cyclePermissionMode,
     providerModelCatalog,
     providerModelCacheCatalog,
+    isProviderAuthenticated,
     providerModelsLoading,
     providerModelsRefreshing,
     hardRefreshProviderModels,
@@ -399,6 +400,7 @@ function ChatInterface({
           setOpenCodeModel={setOpenCodeModel}
           providerModelCatalog={providerModelCatalog}
           providerModelsLoading={providerModelsLoading}
+          isProviderAuthenticated={isProviderAuthenticated}
           tasksEnabled={tasksEnabled}
           isTaskMasterInstalled={isTaskMasterInstalled}
           onShowAllTasks={onShowAllTasks}
