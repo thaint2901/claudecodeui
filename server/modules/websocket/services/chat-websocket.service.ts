@@ -150,6 +150,24 @@ export function buildForkRuntimeOptions(
   return { forkSession: true, ...(forkResumeSessionAt ? { resumeSessionAt: forkResumeSessionAt } : {}) };
 }
 
+/**
+ * Exported for tests: reduces a client-sent edit anchor to the BARE transcript
+ * uuid that `findForkResumePoint` matches against.
+ *
+ * The frontend renders normalized message PARTS whose ids suffix the bare
+ * uuid (`<uuid>_text_<n>` / `<uuid>_text` / `<uuid>_tr_<toolUseId>` /
+ * `<uuid>_images` / `<uuid>_<n>` — see the Claude normalizer). The frontend
+ * already strips these (src/components/chat/utils/branchAnchors.ts,
+ * `baseMessageUuid` — keep the two regexes in sync), but the server must not
+ * trust the client's id format, so it normalizes again on receipt.
+ */
+export function normalizeEditAtMessageUuid(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  return trimmed.replace(/_(?:tr_.+|text(?:_\d+)?|images|\d+)$/, '');
+}
+
 /** Matches "/fork" or "/fork <prompt>" typed as the whole message. */
 export function parseForkCommand(content: string): { prompt: string } | null {
   const match = content.trim().match(/^\/fork(?:\s+([\s\S]*))?$/);
@@ -224,10 +242,7 @@ async function handleChatSend(
   // silently orphaning the original transcript.
   delete clientOptions.forkSession;
   delete clientOptions.resumeSessionAt;
-  const editAtMessageUuid =
-    typeof clientOptions.editAtMessageUuid === 'string' && clientOptions.editAtMessageUuid.trim().length > 0
-      ? clientOptions.editAtMessageUuid.trim()
-      : null;
+  const editAtMessageUuid = normalizeEditAtMessageUuid(clientOptions.editAtMessageUuid);
 
   let forkResumeSessionAt: string | null = null;
   if (editAtMessageUuid) {

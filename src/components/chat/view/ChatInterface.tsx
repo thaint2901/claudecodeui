@@ -606,7 +606,12 @@ function ChatInterface({
           showThinking={showThinking}
           selectedProject={selectedProject}
           canEditPrompt={provider === 'claude' && !isProcessing}
-          onEditPrompt={(m) => m.uuid && startEditSentPrompt(m.uuid, typeof m.content === 'string' ? m.content : '')}
+          onEditPrompt={(m) =>
+            // The rendered uuid is a part id (`<uuid>_text_<n>` for user text
+            // parts); the server resolves the resume point by BARE transcript
+            // uuid, so strip the part suffix before sending.
+            m.uuid && startEditSentPrompt(baseMessageUuid(m.uuid), typeof m.content === 'string' ? m.content : '')
+          }
           renderBranchSwitcher={renderBranchSwitcher}
         />
 

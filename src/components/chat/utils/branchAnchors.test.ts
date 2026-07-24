@@ -5,14 +5,25 @@ import { baseMessageUuid, pickBranchAnchorMessageIds } from './branchAnchors.js'
 
 const UUID = '0b8a9d7e-1c2f-4a5b-8d3e-6f7a8b9c0d1e';
 
-test('baseMessageUuid strips only a trailing _<digits> part suffix', () => {
+test('baseMessageUuid strips every normalizer part suffix, nothing else', () => {
+  // assistant parts
   assert.equal(baseMessageUuid(`${UUID}_0`), UUID);
   assert.equal(baseMessageUuid(`${UUID}_12`), UUID);
+  // user text parts (array content / joined fallback)
+  assert.equal(baseMessageUuid(`${UUID}_text_0`), UUID);
+  assert.equal(baseMessageUuid(`${UUID}_text_12`), UUID);
+  assert.equal(baseMessageUuid(`${UUID}_text`), UUID);
+  // user tool-result and image-only parts
+  assert.equal(baseMessageUuid(`${UUID}_tr_toolu_01AbCdEf`), UUID);
+  assert.equal(baseMessageUuid(`${UUID}_images`), UUID);
+  // bare ids pass through
   assert.equal(baseMessageUuid(UUID), UUID);
   // Generated ids may contain underscores mid-string — only a trailing
-  // numeric suffix is a part index.
+  // part suffix is stripped; `_text_` mid-string is untouched.
   assert.equal(baseMessageUuid('claude_abc_x'), 'claude_abc_x');
   assert.equal(baseMessageUuid('claude_abc_7'), 'claude_abc');
+  assert.equal(baseMessageUuid('x_text_middle'), 'x_text_middle');
+  assert.equal(baseMessageUuid('x_text_5_more'), 'x_text_5_more');
 });
 
 test('picks the LAST assistant part whose base uuid matches the anchor', () => {

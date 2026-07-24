@@ -1,18 +1,27 @@
 /**
- * Fork-anchor matching helpers for the branch switcher.
+ * Fork-anchor matching helpers for the branch switcher and edit-prompt flow.
  *
  * The server stores a fork's anchor (`forkedAtMessageUuid`) as the BARE
- * transcript uuid of the resume-point assistant entry. The Claude normalizer,
- * however, splits an array-content assistant entry into one NormalizedMessage
- * per content part, with ids of the form `<uuid>_<partIndex>` — only
- * string-content messages keep the bare uuid as their id. Matching the
- * switcher against `message.uuid` therefore has to compare base uuids, and
- * has to pick exactly ONE part per turn to hang the switcher on.
+ * transcript uuid, and `findForkResumePoint` matches the edited prompt by
+ * bare uuid too. The Claude normalizer, however, splits an array-content
+ * entry into one NormalizedMessage per content part, suffixing the bare uuid
+ * (claude-sessions.provider.ts):
+ *   - assistant parts:        `<uuid>_<partIndex>`
+ *   - user text parts:        `<uuid>_text_<partIndex>` or `<uuid>_text`
+ *   - user tool results:      `<uuid>_tr_<toolUseId>`
+ *   - image-only user turns:  `<uuid>_images`
+ * Only string-content messages keep the bare uuid. Anything comparing a
+ * rendered `message.uuid` against a transcript uuid must strip these first.
+ * (Bare uuids are hex+hyphens, so none of the suffix patterns can false-match
+ * inside one; the `claude_<uuid>` fallback ids are equally safe.)
+ *
+ * The server mirrors this strip in chat-websocket.service.ts
+ * (`normalizeEditAtMessageUuid`) — keep the two in sync.
  */
 
-/** Strips the normalizer's `_<partIndex>` suffix; bare ids pass through. */
+/** Strips the normalizer's part suffix; bare ids pass through. */
 export function baseMessageUuid(id: string): string {
-  return id.replace(/_\d+$/, '');
+  return id.replace(/_(?:tr_.+|text(?:_\d+)?|images|\d+)$/, '');
 }
 
 type AnchorCandidate = {
