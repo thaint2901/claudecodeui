@@ -56,19 +56,9 @@ function ChatInterface({
   // server replays only the events this client actually missed.
   const lastSeqRef = useRef(new Map<string, number>());
 
-  // With no sessionId, clears every session's buffer (used on full unmount).
-  // With a sessionId, clears only that session's entries so an unrelated
-  // session's in-progress stream isn't wiped by a view switch elsewhere.
-  const resetStreamingState = useCallback((sessionId?: string | null) => {
-    if (sessionId) {
-      const timer = streamTimerRef.current.get(sessionId);
-      if (timer) {
-        clearTimeout(timer);
-        streamTimerRef.current.delete(sessionId);
-      }
-      accumulatedStreamRef.current.delete(sessionId);
-      return;
-    }
+  // Per-session entries are otherwise only ever cleared by that session's own
+  // stream_end/complete — this is just the full-teardown path for unmount.
+  const resetStreamingState = useCallback(() => {
     streamTimerRef.current.forEach((timer) => clearTimeout(timer));
     streamTimerRef.current.clear();
     accumulatedStreamRef.current.clear();
@@ -142,7 +132,6 @@ function ChatInterface({
     newSessionTrigger,
     processingSessions,
     onSessionIdle,
-    resetStreamingState,
     statusCheckSentAtRef,
     lastSeqRef,
     sessionStore,
