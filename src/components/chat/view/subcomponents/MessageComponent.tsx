@@ -112,8 +112,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                       type="button"
                       onClick={() => onEditPrompt(message)}
                       className="opacity-0 transition-opacity focus:opacity-100 group-hover:opacity-100"
-                      title="Edit & fork from here"
-                      aria-label="Edit this prompt and fork the conversation"
+                      title={t('branch.editTitle')}
+                      aria-label={t('branch.editAria')}
                     >
                       <Pencil className="h-3 w-3" />
                     </button>

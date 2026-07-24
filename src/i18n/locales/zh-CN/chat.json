@@ -215,5 +215,11 @@
   },
   "tasks": {
     "nextTaskPrompt": "开始下一个任务"
+  },
+  "branch": {
+    "editTitle": "Edit & fork from here",
+    "editAria": "Edit this prompt and fork the conversation",
+    "previous": "Previous branch",
+    "next": "Next branch"
   }
 }

@@ -16,6 +16,7 @@ import { useSessionStore } from '../../../stores/useSessionStore';
 import type { NormalizedMessage } from '../../../stores/useSessionStore';
 import { postStopSession } from '../../../contexts/sessionLockApi';
 import { api } from '../../../utils/api';
+import { baseMessageUuid, pickBranchAnchorMessageIds } from '../utils/branchAnchors';
 
 import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatComposer from './subcomponents/ChatComposer';
@@ -201,12 +202,20 @@ function ChatInterface({
 
   // Alternatives at a fork point `uuid`: every branch forked at that message,
   // plus the common parent they split from, parent-first then by createdAt.
+  // Deduped by sessionId: a branch can be BOTH a fork at this anchor and the
+  // parent of a later fork at the same anchor (fork-of-fork), and must count
+  // once or the switcher's total/index drift onto duplicates.
   const siblingsAt = useCallback((uuid: string) => {
     const forks = branches.filter((b) => b.forkedAtMessageUuid === uuid);
     if (forks.length === 0) return [];
     const parentIds = [...new Set(forks.map((b) => b.forkedFromSessionId).filter(Boolean))] as string[];
     const parents = branches.filter((b) => parentIds.includes(b.sessionId));
-    return [...parents, ...forks];
+    const seen = new Set<string>();
+    return [...parents, ...forks].filter((b) => {
+      if (seen.has(b.sessionId)) return false;
+      seen.add(b.sessionId);
+      return true;
+    });
   }, [branches]);
 
   const switchBranch = useCallback(async (branchSessionId?: string) => {
@@ -226,9 +235,19 @@ function ChatInterface({
     clearForkView();
   }, [sessionStore, setCurrentSessionId, onNavigateToSession, clearForkView, currentSessionId, fetchBranches]);
 
+  // Anchors are BARE transcript uuids, but array-content assistant messages
+  // render as parts with `<uuid>_<partIndex>` ids — match on base uuid and
+  // hang the switcher on exactly one part per turn (the last assistant part).
+  const anchorMessageIds = useMemo(
+    () => pickBranchAnchorMessageIds(visibleMessages, branches.map((b) => b.forkedAtMessageUuid)),
+    [visibleMessages, branches],
+  );
+
   const renderBranchSwitcher = useCallback((message: ChatMessage) => {
     if (!message.uuid) return null;
-    const sibs = siblingsAt(message.uuid);
+    const anchor = baseMessageUuid(message.uuid);
+    if (anchorMessageIds.get(anchor) !== message.uuid) return null;
+    const sibs = siblingsAt(anchor);
     if (sibs.length < 2) return null;
     const idx = sibs.findIndex((b) => b.sessionId === currentSessionId || b.activeLeaf);
     if (idx < 0) return null;
@@ -240,7 +259,7 @@ function ChatInterface({
         onNext={() => void switchBranch(sibs[idx + 1]?.sessionId)}
       />
     );
-  }, [siblingsAt, currentSessionId, switchBranch]);
+  }, [anchorMessageIds, siblingsAt, currentSessionId, switchBranch]);
 
   const {
     input,
@@ -341,6 +360,55 @@ function ChatInterface({
     });
   }, [selectedProject, selectedSession, sendMessage, sessionStore]);
 
+  const onBranchCreated = useCallback((parentId: string, branchId: string) => {
+    // Adopt in place only when the fork's parent is the session being viewed.
+    // A backgrounded fork (user switched to another session before the run
+    // finished — including an aborted run whose branch was already created)
+    // must never yank the user out of the session they are looking at.
+    if (currentSessionIdRef.current !== parentId) {
+      return;
+    }
+    clearForkView();
+    // The fork run streamed its live events under the PARENT's session id
+    // (the run is registered against the parent for its whole lifetime), so
+    // the parent's realtime slot now holds turns that only exist in the
+    // branch's transcript. Drop them, or returning to the parent later would
+    // interleave the branch's content into its view.
+    sessionStore.clearRealtime(parentId);
+    // In-place swap: the branch transcript already contains the copied
+    // history, so pointing the view at it is the whole "switch". The view
+    // is ultimately keyed off `selectedSession` (the router-derived prop),
+    // so `setCurrentSessionId` alone isn't enough — route to the branch the
+    // same way a brand-new session is adopted. Deliberately a PUSH (no
+    // `replace`): the parent leaves the sidebar once its `active_leaf`
+    // flips, so browser Back is the guaranteed way home to it.
+    sessionStore.setActiveSession(branchId);
+    setCurrentSessionId(branchId);
+    onNavigateToSession?.(branchId);
+    void fetchBranches(branchId, () => currentSessionIdRef.current === branchId);
+  }, [clearForkView, sessionStore, setCurrentSessionId, onNavigateToSession, fetchBranches]);
+
+  const onForkFailed = useCallback((_sid: string, error: string) => {
+    clearForkView();
+    console.error('Fork failed:', error);
+  }, [clearForkView]);
+
+  const onCompleteWithoutBranch = useCallback((sid: string) => {
+    if (!isForkViewActive) return;
+    clearForkView();
+    console.error('Fork did not complete — restored the original view');
+    // Reuse the same in-conversation error surfacing as a protocol_error.
+    // Covers both an unhonored fork and an abort before the fork resolved.
+    sessionStore.appendRealtime(sid, {
+      id: `fork_not_honored_${Date.now()}`,
+      sessionId: sid,
+      timestamp: new Date().toISOString(),
+      provider,
+      kind: 'error',
+      content: 'Fork did not complete — restored the original view.',
+    } as NormalizedMessage);
+  }, [isForkViewActive, clearForkView, sessionStore, provider]);
+
   useChatRealtimeHandlers({
     subscribe,
     provider,
@@ -357,39 +425,9 @@ function ChatInterface({
     onSessionIdle,
     onWebSocketReconnect: handleWebSocketReconnect,
     sessionStore,
-    onBranchCreated: (_parentId, branchId) => {
-      // In-place swap: the branch transcript already contains the copied
-      // history, so pointing the view at it is the whole "switch". The view
-      // is ultimately keyed off `selectedSession` (the router-derived prop),
-      // so `setCurrentSessionId` alone isn't enough — route to the branch the
-      // same way a brand-new session is adopted. Deliberately a PUSH (no
-      // `replace`): the parent leaves the sidebar once its `active_leaf`
-      // flips, so browser Back is the guaranteed way home to it.
-      clearForkView();
-      sessionStore.setActiveSession(branchId);
-      setCurrentSessionId(branchId);
-      onNavigateToSession?.(branchId);
-      void fetchBranches(branchId, () => currentSessionIdRef.current === branchId);
-    },
-    onForkFailed: (_sid, error) => {
-      clearForkView();
-      console.error('Fork failed:', error);
-    },
-    onCompleteWithoutBranch: (sid) => {
-      if (!isForkViewActive) return;
-      clearForkView();
-      console.error('Fork did not complete — restored the original view');
-      // Reuse the same in-conversation error surfacing as a protocol_error.
-      // Covers both an unhonored fork and an abort before the fork resolved.
-      sessionStore.appendRealtime(sid, {
-        id: `fork_not_honored_${Date.now()}`,
-        sessionId: sid,
-        timestamp: new Date().toISOString(),
-        provider,
-        kind: 'error',
-        content: 'Fork did not complete — restored the original view.',
-      } as NormalizedMessage);
-    },
+    onBranchCreated,
+    onForkFailed,
+    onCompleteWithoutBranch,
   });
 
   // Session lock (daemon-holds-the-roster) state for the active session.

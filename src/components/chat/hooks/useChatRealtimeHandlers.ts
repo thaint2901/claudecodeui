@@ -165,8 +165,8 @@ export function useChatRealtimeHandlers({
 
         case 'protocol_error': {
           console.error('[Chat] Protocol error:', msg.code, msg.error);
-          if ((msg as unknown as { code?: string }).code === 'FORK_FAILED') {
-            onForkFailed?.(sid ?? '', (msg as unknown as { error?: string }).error ?? 'Fork failed');
+          if (msg.code === 'FORK_FAILED') {
+            onForkFailed?.(sid ?? '', typeof msg.error === 'string' ? msg.error : 'Fork failed');
           }
           if (sid) {
             // Surface the failure in the conversation and stop the spinner —

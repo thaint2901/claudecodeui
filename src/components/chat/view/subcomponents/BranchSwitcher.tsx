@@ -1,4 +1,5 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 type BranchSwitcherProps = {
   /** 1-based index of the branch currently displayed at this fork point. */
@@ -9,6 +10,7 @@ type BranchSwitcherProps = {
 };
 
 export function BranchSwitcher({ current, total, onPrev, onNext }: BranchSwitcherProps) {
+  const { t } = useTranslation('chat');
   if (total < 2) return null;
   return (
     <div className="mt-1 flex items-center justify-end gap-1 text-xs text-muted-foreground">
@@ -16,7 +18,7 @@ export function BranchSwitcher({ current, total, onPrev, onNext }: BranchSwitche
         type="button"
         onClick={onPrev}
         disabled={current <= 1}
-        aria-label="Previous branch"
+        aria-label={t('branch.previous')}
         className="disabled:opacity-40"
       >
         <ChevronLeft className="h-3 w-3" />
@@ -26,7 +28,7 @@ export function BranchSwitcher({ current, total, onPrev, onNext }: BranchSwitche
         type="button"
         onClick={onNext}
         disabled={current >= total}
-        aria-label="Next branch"
+        aria-label={t('branch.next')}
         className="disabled:opacity-40"
       >
         <ChevronRight className="h-3 w-3" />
