@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { authenticatedFetch } from '../../../utils/api';
+import { useProviderAuthStatus } from '../../provider-auth/hooks/useProviderAuthStatus';
 import type { PendingPermissionRequest, PermissionMode } from '../types/types';
 import type {
   ProjectSession,
@@ -61,17 +62,6 @@ type ProviderCapabilitiesApiResponse = {
   data?: {
     providers?: ProviderCapabilities[];
   };
-};
-
-type ProviderAuthStatusInfo = {
-  provider: LLMProvider;
-  installed: boolean;
-  authenticated: boolean;
-};
-
-type ProviderAuthStatusApiResponse = {
-  success?: boolean;
-  data?: ProviderAuthStatusInfo;
 };
 
 interface UseChatProviderStateArgs {
@@ -136,17 +126,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     Partial<Record<LLMProvider, ProviderModelsDefinition>>
   >({});
 
-  /**
-   * Auth status per provider, fetched once alongside the model catalog. Lets
-   * the picker hide/disable providers that aren't logged in instead of
-   * offering models for a CLI the user never authenticated (mirrors the
-   * `providerCapabilities` fetch-once-and-map pattern above). Absent entries
-   * (not yet loaded) are treated as authenticated so the picker doesn't flash
-   * everything as unavailable on first paint.
-   */
-  const [providerAuthStatus, setProviderAuthStatus] = useState<
-    Partial<Record<LLMProvider, ProviderAuthStatusInfo>>
-  >({});
+  const { providerAuthStatus, refreshProviderAuthStatuses } = useProviderAuthStatus();
   const [providerModelCacheCatalog, setProviderModelCacheCatalog] = useState<
     Partial<Record<LLMProvider, ProviderModelsCacheInfo>>
   >({});
@@ -278,48 +258,34 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const loadAuthStatus = async () => {
-      try {
-        const results = await Promise.all(
-          PROVIDERS.map(async (p) => {
-            const response = await authenticatedFetch(`/api/providers/${p}/auth/status`);
-            const body = (await response.json()) as ProviderAuthStatusApiResponse;
-            if (!body.success || !body.data) {
-              return null;
-            }
-            return body.data;
-          }),
-        );
-
-        if (cancelled) {
-          return;
-        }
-
-        const byProvider: Partial<Record<LLMProvider, ProviderAuthStatusInfo>> = {};
-        PROVIDERS.forEach((p, i) => {
-          const entry = results[i];
-          if (entry) {
-            byProvider[p] = entry;
-          }
-        });
-        setProviderAuthStatus(byProvider);
-      } catch (error) {
-        console.error('Error loading provider auth status:', error);
-      }
-    };
-
-    void loadAuthStatus();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void refreshProviderAuthStatuses();
+  }, [refreshProviderAuthStatuses]);
 
   const isProviderAuthenticated = useCallback((targetProvider: LLMProvider): boolean => {
     const status = providerAuthStatus[targetProvider];
-    return status ? status.authenticated : true;
+    // Treat "still loading" as authenticated so the picker doesn't flash
+    // everything as unavailable on first paint.
+    return status.loading || status.authenticated;
   }, [providerAuthStatus]);
+
+  // A session pins its own provider (synced below); only reassign the
+  // free-standing selection made before any session exists.
+  useEffect(() => {
+    if (selectedSession?.__provider) {
+      return;
+    }
+
+    const currentStatus = providerAuthStatus[provider];
+    if (currentStatus.loading || currentStatus.authenticated) {
+      return;
+    }
+
+    const nextProvider = PROVIDERS.find((p) => providerAuthStatus[p].authenticated);
+    if (nextProvider && nextProvider !== provider) {
+      setProvider(nextProvider);
+      localStorage.setItem('selected-provider', nextProvider);
+    }
+  }, [provider, providerAuthStatus, selectedSession?.__provider]);
 
   const getPermissionModesForProvider = useCallback((targetProvider: LLMProvider): PermissionMode[] => {
     const capabilityModes = providerCapabilities?.[targetProvider]?.permissionModes;
@@ -645,7 +611,6 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     cyclePermissionMode,
     providerModelCatalog,
     providerModelCacheCatalog,
-    providerAuthStatus,
     isProviderAuthenticated,
     providerModelsLoading,
     providerModelsRefreshing,
