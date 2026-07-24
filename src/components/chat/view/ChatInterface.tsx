@@ -44,8 +44,10 @@ function ChatInterface({
   const { t } = useTranslation('chat');
 
   const sessionStore = useSessionStore();
-  const streamTimerRef = useRef<number | null>(null);
-  const accumulatedStreamRef = useRef('');
+  // Keyed by session id: concurrent sessions can stream at the same time, so a
+  // single shared buffer/timer would cross-contaminate their accumulated text.
+  const streamTimerRef = useRef(new Map<string, number>());
+  const accumulatedStreamRef = useRef(new Map<string, string>());
   // When each session's `chat.subscribe` was last sent; idle acks older than
   // a later local request are discarded as stale.
   const statusCheckSentAtRef = useRef(new Map<string, number>());
@@ -54,12 +56,22 @@ function ChatInterface({
   // server replays only the events this client actually missed.
   const lastSeqRef = useRef(new Map<string, number>());
 
-  const resetStreamingState = useCallback(() => {
-    if (streamTimerRef.current) {
-      clearTimeout(streamTimerRef.current);
-      streamTimerRef.current = null;
+  // With no sessionId, clears every session's buffer (used on full unmount).
+  // With a sessionId, clears only that session's entries so an unrelated
+  // session's in-progress stream isn't wiped by a view switch elsewhere.
+  const resetStreamingState = useCallback((sessionId?: string | null) => {
+    if (sessionId) {
+      const timer = streamTimerRef.current.get(sessionId);
+      if (timer) {
+        clearTimeout(timer);
+        streamTimerRef.current.delete(sessionId);
+      }
+      accumulatedStreamRef.current.delete(sessionId);
+      return;
     }
-    accumulatedStreamRef.current = '';
+    streamTimerRef.current.forEach((timer) => clearTimeout(timer));
+    streamTimerRef.current.clear();
+    accumulatedStreamRef.current.clear();
   }, []);
 
   const {

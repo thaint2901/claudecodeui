@@ -22,7 +22,7 @@ interface UseChatSessionStateArgs {
   newSessionTrigger?: number;
   processingSessions?: SessionActivityMap;
   onSessionIdle?: MarkSessionIdle;
-  resetStreamingState: () => void;
+  resetStreamingState: (sessionId?: string | null) => void;
   /** When each session's `chat.subscribe` was last sent; guards stale idle acks. */
   statusCheckSentAtRef: MutableRefObject<Map<string, number>>;
   /** Highest live seq observed per session; sent as `lastSeq` on subscribe. */
@@ -108,6 +108,12 @@ export function useChatSessionState({
   sessionStore,
 }: UseChatSessionStateArgs) {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(selectedSession?.id || null);
+  // Read inside the New Session effect below, which intentionally only
+  // depends on `newSessionTrigger` — this avoids adding `currentSessionId` to
+  // that effect's deps (which would couple it to unrelated session changes)
+  // while still resetting the session that was actually active at click time.
+  const currentSessionIdRef = useRef(currentSessionId);
+  currentSessionIdRef.current = currentSessionId;
   const [isLoadingSessionMessages, setIsLoadingSessionMessages] = useState(false);
   const [isLoadingMoreMessages, setIsLoadingMoreMessages] = useState(false);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
@@ -171,7 +177,7 @@ export function useChatSessionState({
      * - No dependence on route/tab/session-object identity changes.
      * - No coupling to unrelated external update signals.
      */
-    resetStreamingState();
+    resetStreamingState(currentSessionIdRef.current);
     setCurrentSessionId(null);
     setPendingUserMessage(null);
     messagesOffsetRef.current = 0;
@@ -485,7 +491,7 @@ export function useChatSessionState({
         return;
       }
 
-      resetStreamingState();
+      resetStreamingState(currentSessionId);
       setCurrentSessionId(null);
       messagesOffsetRef.current = 0;
       setHasMoreMessages(false);
@@ -521,7 +527,7 @@ export function useChatSessionState({
 
     const sessionChanged = currentSessionId !== null && currentSessionId !== selectedSessionId;
     if (sessionChanged) {
-      resetStreamingState();
+      resetStreamingState(currentSessionId);
     }
 
     // Reset pagination/scroll state
