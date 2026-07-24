@@ -1,7 +1,9 @@
 /**
  * Centralized tool configuration registry
- * Defines display behavior for all tool types 
+ * Defines display behavior for all tool types
  */
+
+import { extractSubagentText } from '../../utils/subagentToolNames';
 
 export interface ToolDisplayConfig {
   input: {
@@ -446,11 +448,8 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
           }
           // If content is an array (typical for agent responses with multiple text blocks)
           if (Array.isArray(content)) {
-            const textContent = content
-              .filter((item: any) => item.type === 'text')
-              .map((item: any) => item.text)
-              .join('\n\n');
-            return { content: textContent || 'No response text' };
+            const extracted = extractSubagentText(content, '\n\n');
+            return { content: extracted ?? 'No response text' };
           }
           return { content: String(content) };
         }
@@ -553,6 +552,11 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
  * Get configuration for a tool, with fallback to default
  */
 export function getToolConfig(toolName: string): ToolDisplayConfig {
+  // 'Agent' is the current name of the subagent-dispatch tool; 'Task' is the
+  // legacy name still present in old transcripts. Same rendering config.
+  if (toolName === 'Agent') {
+    return TOOL_CONFIGS.Task;
+  }
   return TOOL_CONFIGS[toolName] || TOOL_CONFIGS.Default;
 }
 

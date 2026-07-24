@@ -130,11 +130,13 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
    * logged at `error` (likely a real regression) and still swallowed — in
    * both cases the rename API call itself never fails, since the DB name
    * remains the source of truth for the webui regardless of write-back
-   * outcome.
+   * outcome. Returns whether the write-back actually landed so callers that
+   * need to know (e.g. the `/fork` flow) can react to a swallowed failure.
    */
-  async writeBackCustomName(providerSessionId: ProviderSessionId, customName: string, projectPath?: string): Promise<void> {
+  async writeBackCustomName(providerSessionId: ProviderSessionId, customName: string, projectPath?: string): Promise<boolean> {
     try {
       await renameSession(providerSessionId, customName, projectPath ? { dir: projectPath } : undefined);
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/not found/i.test(message)) {
@@ -142,6 +144,7 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       } else {
         console.error(`Failed to write back Claude session name for "${providerSessionId}"`, { error: message });
       }
+      return false;
     }
   }
 

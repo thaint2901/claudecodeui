@@ -209,8 +209,12 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                   />
                 )}
 
-                {/* Tool Result Section — Bash renders its output inside the command row above. */}
-                {message.toolResult && message.toolName !== 'Bash' && !shouldHideToolResult(message.toolName || 'UnknownTool', message.toolResult) && (
+                {/* Tool Result Section — Bash renders its output inside the command row above.
+                    For subagent containers, the container above already presents the result
+                    (inline summary + transcript drawer), so a successful run's separate result
+                    section would duplicate it verbatim; errors still render (red box) because
+                    the container has no dedicated error surface. */}
+                {message.toolResult && message.toolName !== 'Bash' && !shouldHideToolResult(message.toolName || 'UnknownTool', message.toolResult) && (!message.isSubagentContainer || message.toolResult.isError) && (
                   message.toolResult.isError ? (
                     // Error results - red error box with content
                     <div

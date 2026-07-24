@@ -1,16 +1,14 @@
-import React from 'react';
-import type { SubagentChildTool } from '../../types/types';
-import { CollapsibleSection } from './CollapsibleSection';
-import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '../../../../shared/view/ui';
+import React, { useState } from 'react';
+
+import type { SubagentState } from '../../types/types';
+import { extractSubagentText } from '../../utils/subagentToolNames';
+
+import { SubagentTranscriptPanel } from './SubagentTranscriptPanel';
 
 interface SubagentContainerProps {
   toolInput: unknown;
   toolResult?: { content?: unknown; isError?: boolean } | null;
-  subagentState: {
-    childTools: SubagentChildTool[];
-    currentToolIndex: number;
-    isComplete: boolean;
-  };
+  subagentState: SubagentState;
 }
 
 const getCompactToolDisplay = (toolName: string, toolInput: unknown): string => {
@@ -40,11 +38,58 @@ const getCompactToolDisplay = (toolName: string, toolInput: unknown): string => 
   }
 };
 
+// Fork-mode subagents (see spec 2026-07-22-subagent-fork-subtask) always run
+// in the background, so their tool_result is this launch-ack boilerplate
+// rather than the subagent's actual output. Users who enable background mode
+// themselves can hit the same boilerplate, so guard defensively here too.
+const BACKGROUND_LAUNCH_ACK_PREFIX = 'Async agent launched successfully';
+export const isBackgroundLaunchAck = (text: string | null): boolean =>
+  typeof text === 'string' && text.trim().startsWith(BACKGROUND_LAUNCH_ACK_PREFIX);
+
+/**
+ * Parses a tool result's content into a plain-text string, handling both the
+ * raw string/array shapes and the JSON-stringified array-of-text-parts shape
+ * the SDK sometimes emits for subagent (Task tool) results. Suppresses the
+ * background-launch-ack boilerplate in favor of a neutral status line.
+ */
+export const extractResultText = (toolResult?: { content?: unknown; isError?: boolean } | null): string | null => {
+  if (!toolResult) return null;
+
+  let content = toolResult.content;
+
+  if (typeof content === 'string') {
+    try {
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) {
+        const extracted = extractSubagentText(parsed);
+        if (extracted !== null) {
+          content = extracted;
+        }
+      }
+    } catch {
+      // Not JSON, use as-is
+    }
+  } else if (Array.isArray(content)) {
+    const extracted = extractSubagentText(content);
+    if (extracted !== null) {
+      content = extracted;
+    }
+  }
+
+  if (typeof content === 'string') {
+    return isBackgroundLaunchAck(content) ? 'Running in background...' : content;
+  }
+  if (content) return JSON.stringify(content, null, 2);
+  return null;
+};
+
 export const SubagentContainer: React.FC<SubagentContainerProps> = ({
   toolInput,
   toolResult,
   subagentState,
 }) => {
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
+
   const parsedInput = typeof toolInput === 'string' ? (() => {
     try { return JSON.parse(toolInput); } catch { return {}; }
   })() : (toolInput || {});
@@ -52,132 +97,67 @@ export const SubagentContainer: React.FC<SubagentContainerProps> = ({
   const subagentType = parsedInput?.subagent_type || 'Agent';
   const description = parsedInput?.description || 'Running task';
   const prompt = parsedInput?.prompt || '';
-  const { childTools, currentToolIndex, isComplete } = subagentState;
+  const { childTools, childMessages, currentToolIndex, isComplete } = subagentState;
   const currentTool = currentToolIndex >= 0 ? childTools[currentToolIndex] : null;
 
   const title = `Subagent / ${subagentType}: ${description}`;
+  const finalResult = isComplete ? extractResultText(toolResult) : null;
+  const trimmedResult = finalResult
+    ? (finalResult.length > 80 ? `${finalResult.slice(0, 80)}...` : finalResult)
+    : null;
 
   return (
     <div className="my-1 border-l-2 border-l-purple-500 py-0.5 pl-3 dark:border-l-purple-400">
-      <CollapsibleSection
-        title={title}
-        toolName="Task"
-        open={false}
+      <button
+        type="button"
+        onClick={() => setTranscriptOpen(true)}
+        className="flex w-full select-none items-center gap-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
       >
-        {/* Prompt/request to the subagent */}
-        {prompt && (
-          <div className="mb-2 line-clamp-4 whitespace-pre-wrap break-words text-xs text-muted-foreground">
-            {prompt}
-          </div>
-        )}
+        <span className="flex-shrink-0 font-medium text-foreground">Task</span>
+        <span className="flex-shrink-0 text-[10px] text-muted-foreground/40">/</span>
+        <span className="flex-1 truncate text-left">{title}</span>
+        <span className="flex-shrink-0 text-[10px] text-muted-foreground/60">View transcript</span>
+      </button>
 
-        {/* Current tool indicator (while running) */}
-        {currentTool && !isComplete && (
-          <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className="h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-purple-500 dark:bg-purple-400" />
-            <span className="text-muted-foreground/60">Currently:</span>
-            <span className="font-medium text-foreground">{currentTool.toolName}</span>
-            {getCompactToolDisplay(currentTool.toolName, currentTool.toolInput) && (
-              <>
-                <span className="text-muted-foreground/40">/</span>
-                <span className="truncate font-mono text-muted-foreground">
-                  {getCompactToolDisplay(currentTool.toolName, currentTool.toolInput)}
-                </span>
-              </>
-            )}
-          </div>
-        )}
+      {/* Current tool indicator (while running) */}
+      {currentTool && !isComplete && (
+        <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span className="h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-purple-500 dark:bg-purple-400" />
+          <span className="text-muted-foreground/60">Currently:</span>
+          <span className="font-medium text-foreground">{currentTool.toolName}</span>
+          {getCompactToolDisplay(currentTool.toolName, currentTool.toolInput) && (
+            <>
+              <span className="text-muted-foreground/40">/</span>
+              <span className="truncate font-mono text-muted-foreground">
+                {getCompactToolDisplay(currentTool.toolName, currentTool.toolInput)}
+              </span>
+            </>
+          )}
+        </div>
+      )}
 
-        {/* Completion status */}
-        {isComplete && (
-          <div className="mt-1 flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
-            <svg className="h-3 w-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-            </svg>
-            <span>Completed ({childTools.length} {childTools.length === 1 ? 'tool' : 'tools'})</span>
-          </div>
-        )}
+      {/* Completion status */}
+      {isComplete && (
+        <div className="mt-1 flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
+          <svg className="h-3 w-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+          </svg>
+          <span className="flex-shrink-0">Completed ({childTools.length} {childTools.length === 1 ? 'tool' : 'tools'})</span>
+          {trimmedResult && (
+            <span className="truncate text-muted-foreground">{trimmedResult}</span>
+          )}
+        </div>
+      )}
 
-        {/* Tool history (collapsed) */}
-        {childTools.length > 0 && (
-          <Collapsible className="mt-2">
-            <CollapsibleTrigger className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground">
-              <svg
-                className="h-2.5 w-2.5 flex-shrink-0 transition-transform duration-150 data-[state=open]:rotate-90"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
-              <span>View tool history ({childTools.length})</span>
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <div className="mt-1 space-y-0.5 border-l border-border pl-3">
-                {childTools.map((child, index) => (
-                  <div key={child.toolId} className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                    <span className="w-4 flex-shrink-0 text-right text-muted-foreground/60">{index + 1}.</span>
-                    <span className="font-medium text-foreground">{child.toolName}</span>
-                    {getCompactToolDisplay(child.toolName, child.toolInput) && (
-                      <span className="truncate font-mono text-muted-foreground/70">
-                        {getCompactToolDisplay(child.toolName, child.toolInput)}
-                      </span>
-                    )}
-                    {child.toolResult?.isError && (
-                      <span className="flex-shrink-0 text-red-500">(error)</span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </CollapsibleContent>
-          </Collapsible>
-        )}
-
-        {/* Final result */}
-        {isComplete && toolResult && (
-          <div className="mt-2 text-xs text-muted-foreground">
-            {(() => {
-              let content = toolResult.content;
-
-              // Handle JSON string that needs parsing
-              if (typeof content === 'string') {
-                try {
-                  const parsed = JSON.parse(content);
-                  if (Array.isArray(parsed)) {
-                    // Extract text from array format like [{"type":"text","text":"..."}]
-                    const textParts = parsed
-                      .filter((p: any) => p.type === 'text' && p.text)
-                      .map((p: any) => p.text);
-                    if (textParts.length > 0) {
-                      content = textParts.join('\n');
-                    }
-                  }
-                } catch {
-                  // Not JSON, use as-is
-                }
-              } else if (Array.isArray(content)) {
-                // Direct array format
-                const textParts = content
-                  .filter((p: any) => p.type === 'text' && p.text)
-                  .map((p: any) => p.text);
-                if (textParts.length > 0) {
-                  content = textParts.join('\n');
-                }
-              }
-
-              return typeof content === 'string' ? (
-                <div className="line-clamp-6 whitespace-pre-wrap break-words">
-                  {content}
-                </div>
-              ) : content ? (
-                <pre className="line-clamp-6 whitespace-pre-wrap break-words font-mono text-[11px]">
-                  {JSON.stringify(content, null, 2)}
-                </pre>
-              ) : null;
-            })()}
-          </div>
-        )}
-      </CollapsibleSection>
+      <SubagentTranscriptPanel
+        open={transcriptOpen}
+        onClose={() => setTranscriptOpen(false)}
+        title={title}
+        prompt={prompt}
+        childMessages={childMessages}
+        isComplete={isComplete}
+        finalResult={finalResult}
+      />
     </div>
   );
 };

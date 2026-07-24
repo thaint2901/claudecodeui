@@ -6,6 +6,7 @@
 import type { NormalizedMessage } from '../../../stores/useSessionStore';
 import type { ChatMessage, SubagentChildTool } from '../types/types';
 import { decodeHtmlEntities, unescapeWithMathProtection, formatUsageLimitText } from '../utils/chatFormatting';
+import { isSubagentToolName } from '../utils/subagentToolNames';
 
 function formatToolResultContent(content: unknown): string {
   const text = typeof content === 'string' ? content : JSON.stringify(content);
@@ -64,12 +65,50 @@ function parseTaskNotification(content: string): ParsedTaskNotification | null {
  * intentionally preserved and annotated so they can render like normal chat.
  */
 export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMessage[] {
+  // Group subagent children under their parent. `parentToolUseId` is the one
+  // data contract both delivery paths honor: the live SDK stream sets it in
+  // claude-sdk.js, the persisted reader stamps it during JSONL reconstruction.
+  //
+  // Built ONCE from the full flat array and threaded through the recursive
+  // conversion below (rather than re-partitioned per nesting level) so a
+  // nested Agent's own children resolve correctly. Children whose parent
+  // tool_use is on an older, not-yet-loaded page are intentionally dropped
+  // from view and self-heal when that page loads — same policy as the
+  // orphaned tool_result skip further down.
+  const childrenByParent = new Map<string, NormalizedMessage[]>();
+  const topLevel: NormalizedMessage[] = [];
+  for (const msg of messages) {
+    if (typeof msg.parentToolUseId === 'string' && msg.parentToolUseId) {
+      const siblings = childrenByParent.get(msg.parentToolUseId) ?? [];
+      siblings.push(msg);
+      childrenByParent.set(msg.parentToolUseId, siblings);
+    } else {
+      topLevel.push(msg);
+    }
+  }
+
+  return convertMessages(topLevel, childrenByParent);
+}
+
+/**
+ * Converts one level of messages (top-level or a subagent's direct children)
+ * into ChatMessage[], using a single shared `childrenByParent` map (keyed by
+ * `parentToolUseId`, built once from the full flat array) for grouping at
+ * every nesting level. Recursing with this same map — rather than
+ * re-partitioning a slice — is what lets a nested Agent's own children
+ * (grandchildren of the outer call) resolve correctly.
+ */
+function convertMessages(
+  topLevel: NormalizedMessage[],
+  childrenByParent: Map<string, NormalizedMessage[]>,
+  ancestorToolIds: ReadonlySet<string> = new Set(),
+): ChatMessage[] {
   const converted: ChatMessage[] = [];
 
   // First pass: collect tool results for attachment
   const toolResultMap = new Map<string, NormalizedMessage>();
   const toolUseIds = new Set<string>();
-  for (const msg of messages) {
+  for (const msg of topLevel) {
     if (msg.kind === 'tool_use' && msg.toolId) {
       toolUseIds.add(msg.toolId);
     }
@@ -79,7 +118,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
     }
   }
 
-  for (const msg of messages) {
+  for (const msg of topLevel) {
     const sharedMetadata = {
       displayText: msg.displayText,
       commandName: msg.commandName,
@@ -145,21 +184,42 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
 
       case 'tool_use': {
         const tr = msg.toolResult || (msg.toolId ? toolResultMap.get(msg.toolId) : null);
-        const isSubagentContainer = msg.toolName === 'Task';
+        // Inherited fork/subtask transcripts can contain a copy of an
+        // ancestor's own Agent dispatch, whose toolId collides with a
+        // parentToolUseId already on the current recursion path. Treating
+        // that as a fresh container would re-enter childrenByParent.get()
+        // with the same key forever (RangeError: Maximum call stack size
+        // exceeded) — render it as a plain, non-recursing tool row instead.
+        const isCyclicSelfReference = Boolean(msg.toolId) && ancestorToolIds.has(msg.toolId as string);
+        const isSubagentContainer = isSubagentToolName(msg.toolName) && !isCyclicSelfReference;
 
-        // Build child tools from subagentTools
+        const children = (msg.toolId && childrenByParent.get(msg.toolId)) || [];
         const childTools: SubagentChildTool[] = [];
-        if (isSubagentContainer && msg.subagentTools && Array.isArray(msg.subagentTools)) {
-          for (const tool of msg.subagentTools as any[]) {
+        if (isSubagentContainer && children.length > 0) {
+          const childResults = new Map<string, NormalizedMessage>();
+          for (const child of children) {
+            if (child.kind === 'tool_result' && child.toolId) childResults.set(child.toolId, child);
+          }
+          for (const child of children) {
+            if (child.kind !== 'tool_use' || !child.toolId) continue;
+            const childResult = childResults.get(child.toolId);
             childTools.push({
-              toolId: tool.toolId,
-              toolName: tool.toolName,
-              toolInput: tool.toolInput,
-              toolResult: tool.toolResult || null,
-              timestamp: new Date(tool.timestamp || Date.now()),
+              toolId: child.toolId,
+              toolName: child.toolName || 'UnknownTool',
+              toolInput: child.toolInput,
+              toolResult: childResult
+                ? { content: formatToolResultContent(childResult.content), isError: Boolean(childResult.isError) }
+                : null,
+              timestamp: new Date(child.timestamp || Date.now()),
             });
           }
         }
+        // Full child transcript for the drawer: recurse with the SAME shared
+        // childrenByParent map so a nested Agent's own children (grandchildren
+        // of this call, keyed under the nested Agent's toolId) resolve too.
+        const childMessages = isSubagentContainer && children.length > 0
+          ? convertMessages(children, childrenByParent, new Set([...ancestorToolIds, msg.toolId as string]))
+          : [];
 
         const toolResult = tr
           ? {
@@ -182,6 +242,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
           subagentState: isSubagentContainer
             ? {
                 childTools,
+                childMessages,
                 currentToolIndex: childTools.length > 0 ? childTools.length - 1 : -1,
                 isComplete: Boolean(toolResult),
               }

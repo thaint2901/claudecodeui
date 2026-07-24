@@ -12,14 +12,14 @@ It is the single feature that every other subsystem exists to support: providers
 |------------|-------------|
 | **Multi-provider chat** | Send messages to Claude, Cursor, Codex, or OpenCode from a single composer. |
 | **Streaming events** | Receive token-by-token text, tool calls, reasoning blocks, and usage in real time. |
-| **Tool call rendering** | Display file reads, edits, bash, web searches, sub-agents, plans, and AskUserQuestion prompts. |
+| **Tool call rendering** | Display file reads, edits, bash, web searches, sub-agents, plans, and AskUserQuestion prompts. Sub-agent (Agent/Task) calls open a right-side transcript drawer showing the subagent's full run at main-session fidelity, including nested subagents. |
 | **Permission approvals** | Approve or deny tool calls inline; persist "remember this choice" rules. |
 | **Permission modes** | Cycle through default / accept-edits / plan / bypass-permissions per session. |
 | **Model selection** | Pick from the live per-provider model catalog. |
 | **Session resume** | Reopen past sessions with full history and continue from where the user left off. |
 | **Image attachments** | Attach images to messages (saved to `.tmp/images` in the project cwd). |
 | **Voice input** | Use speech-to-text to compose messages via the Voice Proxy. |
-| **Slash commands** | Invoke user-defined markdown commands and built-ins like `/models`. |
+| **Slash commands** | Invoke user-defined markdown commands and built-ins like `/models` via a four-group palette (ccui commands, Claude Code built-in, project, user); picking one inserts it into the composer rather than auto-executing. For Claude sessions, `/fork` branches the conversation into a new session and `/subtask` hands a task to a background fork subagent. |
 | **File autocomplete** | Mention files in the composer with autocomplete from the file tree. |
 | **Token-usage tracking** | See per-session token spend and context-window utilization. |
 | **Abort & control** | Abort a running session, auto-scroll, expand tools, raw parameters, Ctrl+Enter send. |

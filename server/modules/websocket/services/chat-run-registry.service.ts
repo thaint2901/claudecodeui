@@ -281,6 +281,15 @@ export const chatRunRegistry = {
       forkedAtMessageUuid: string;
       projectPath: string;
     };
+    /**
+     * Optional extra observer invoked (after the internal provider-id mapping
+     * is recorded) every time the writer captures a provider-native session
+     * id. The `/fork` flow uses this to write the fork's `" (fork)"` custom
+     * name back into the fork's own transcript the moment the SDK announces
+     * the fork's own id, instead of waiting for the whole run to finish.
+     * Guarded here so a hook failure can never break the stream.
+     */
+    onProviderSessionId?: (providerSessionId: string) => void;
   }): ChatRun | null {
     const existing = runs.get(input.appSessionId);
     if (existing && existing.status === 'running') {
@@ -307,6 +316,19 @@ export const chatRunRegistry = {
       providerSessionId: input.providerSessionId,
       onProviderSessionId: (providerSessionId) => {
         recordProviderSessionId(run, providerSessionId);
+
+        if (input.onProviderSessionId) {
+          try {
+            input.onProviderSessionId(providerSessionId);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.warn('[ChatRunRegistry] onProviderSessionId hook failed', {
+              appSessionId: run.appSessionId,
+              providerSessionId,
+              error: message,
+            });
+          }
+        }
       },
       decorateOutboundEvent: (message) => decorateAndRecordEvent(run, message),
     });

@@ -1,9 +1,10 @@
 import React from 'react';
 import { ShieldAlertIcon } from 'lucide-react';
 
-import type { PendingPermissionRequest } from '../../types/types';
+import type { ChatMessage, PendingPermissionRequest } from '../../types/types';
 import { buildClaudeToolPermissionEntry, formatToolInputForDisplay } from '../../utils/chatPermissions';
 import { getClaudeSettings } from '../../utils/chatStorage';
+import { attributePermissionToSubagent } from '../../utils/permissionAttribution';
 import { getPermissionPanel, registerPermissionPanel } from '../../tools/configs/permissionPanelRegistry';
 import { AskUserQuestionPanel } from '../../tools/components/InteractiveRenderers';
 import {
@@ -23,12 +24,15 @@ interface PermissionRequestsBannerProps {
     decision: { allow?: boolean; message?: string; rememberEntry?: string | null; updatedInput?: unknown },
   ) => void;
   handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
+  /** Current chat transcript, used to attribute a request to the subagent that issued it. */
+  chatMessages?: ChatMessage[];
 }
 
 export default function PermissionRequestsBanner({
   pendingPermissionRequests,
   handlePermissionDecision,
   handleGrantToolPermission,
+  chatMessages,
 }: PermissionRequestsBannerProps) {
   // Filter out plan tool requests — they are handled inline by PlanDisplay
   const filteredRequests = pendingPermissionRequests.filter(
@@ -66,6 +70,9 @@ export default function PermissionRequestsBanner({
               )
               .map((item) => item.requestId)
           : [request.requestId];
+        const subagentAttribution = chatMessages
+          ? attributePermissionToSubagent(chatMessages, request.toolName)
+          : null;
 
         return (
           <Confirmation key={request.requestId} approval="pending">
@@ -77,6 +84,11 @@ export default function PermissionRequestsBanner({
                   <span className="ml-2 text-muted-foreground">
                     Tool: <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{request.toolName}</code>
                   </span>
+                  {subagentAttribution && (
+                    <span className="ml-2 rounded border border-purple-400/40 bg-purple-400/10 px-1.5 py-0.5 text-[10px] font-medium text-purple-600 dark:text-purple-300">
+                      Subagent: {subagentAttribution.description}
+                    </span>
+                  )}
                 </div>
                 {permissionEntry && (
                   <div className="mt-1 text-xs text-muted-foreground">

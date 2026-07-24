@@ -15,9 +15,10 @@ import { ImageIcon, MessageSquareIcon, XIcon, Loader2, ChevronDown, Check, Arrow
 
 import { useVoiceInput } from '../../hooks/useVoiceInput';
 import { useVoiceAvailable } from '../../hooks/useVoiceAvailable';
+import { matchLeadingCommand } from '../../utils/commandToken';
 import type { QueuedDraft } from '../../hooks/useChatComposerState';
 import type { SessionActivity } from '../../../../hooks/useSessionProtection';
-import type { PendingPermissionRequest, PermissionMode } from '../../types/types';
+import type { ChatMessage, PendingPermissionRequest, PermissionMode } from '../../types/types';
 import type { ProviderModelOption } from '../../../../types/app';
 import {
   PromptInput,
@@ -62,6 +63,8 @@ interface ChatComposerProps {
     decision: { allow?: boolean; message?: string; rememberEntry?: string | null; updatedInput?: unknown },
   ) => void;
   handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
+  /** Current chat transcript, forwarded to PermissionRequestsBanner for subagent attribution. */
+  chatMessages?: ChatMessage[];
   activity: SessionActivity | null;
   isLoading: boolean;
   onAbortSession: () => void;
@@ -100,6 +103,7 @@ interface ChatComposerProps {
   openImagePicker: () => void;
   inputHighlightRef: RefObject<HTMLDivElement>;
   renderInputWithMentions: (text: string) => ReactNode;
+  slashCommandNames: ReadonlySet<string>;
   textareaRef: RefObject<HTMLTextAreaElement>;
   input: string;
   onVoiceTranscript?: (text: string, send?: boolean) => void;
@@ -134,6 +138,7 @@ export default function ChatComposer({
   pendingPermissionRequests,
   handlePermissionDecision,
   handleGrantToolPermission,
+  chatMessages,
   activity,
   isLoading,
   onAbortSession,
@@ -172,6 +177,7 @@ export default function ChatComposer({
   openImagePicker,
   inputHighlightRef,
   renderInputWithMentions,
+  slashCommandNames,
   textareaRef,
   input,
   onVoiceTranscript,
@@ -327,6 +333,7 @@ export default function ChatComposer({
             pendingPermissionRequests={pendingPermissionRequests}
             handlePermissionDecision={handlePermissionDecision}
             handleGrantToolPermission={handleGrantToolPermission}
+            chatMessages={chatMessages}
           />
         </div>
       )}
@@ -445,7 +452,20 @@ export default function ChatComposer({
           <PromptInputBody>
             <div ref={inputHighlightRef} aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-xl">
               <div className="chat-input-placeholder block w-full whitespace-pre-wrap break-words px-4 py-2 text-sm leading-6 text-transparent">
-                {renderInputWithMentions(input)}
+                {(() => {
+                  const leadingCommand = matchLeadingCommand(input, slashCommandNames);
+                  if (!leadingCommand) {
+                    return renderInputWithMentions(input);
+                  }
+                  return (
+                    <>
+                      <span className="-ml-0.5 rounded-md bg-indigo-200/70 box-decoration-clone px-0.5 text-transparent dark:bg-indigo-400/30">
+                        {leadingCommand.command}
+                      </span>
+                      {renderInputWithMentions(leadingCommand.rest)}
+                    </>
+                  );
+                })()}
               </div>
             </div>
 

@@ -34,6 +34,13 @@ export interface SubagentChildTool {
   timestamp: Date;
 }
 
+export interface SubagentState {
+  childTools: SubagentChildTool[];
+  childMessages: ChatMessage[];
+  currentToolIndex: number;
+  isComplete: boolean;
+}
+
 export interface ChatMessage {
   type: string;
   /** Transcript message uuid (from the store's `NormalizedMessage.id`); used to target edit/fork operations. */
@@ -59,11 +66,7 @@ export interface ChatMessage {
   isLocalCommandStdout?: boolean;
   isCompactSummary?: boolean;
   isSubagentContainer?: boolean;
-  subagentState?: {
-    childTools: SubagentChildTool[];
-    currentToolIndex: number;
-    isComplete: boolean;
-  };
+  subagentState?: SubagentState;
   [key: string]: unknown;
 }
 
