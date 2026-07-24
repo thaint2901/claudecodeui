@@ -238,10 +238,20 @@ function ChatInterface({
   // Anchors are BARE transcript uuids, but array-content assistant messages
   // render as parts with `<uuid>_<partIndex>` ids — match on base uuid and
   // hang the switcher on exactly one part per turn (the last assistant part).
-  const anchorMessageIds = useMemo(
-    () => pickBranchAnchorMessageIds(visibleMessages, branches.map((b) => b.forkedAtMessageUuid)),
-    [visibleMessages, branches],
-  );
+  // `visibleMessages` gets a new reference on every stream flush (~100ms), so
+  // the recomputed Map is swapped in only when its CONTENT changed — a stable
+  // reference keeps `renderBranchSwitcher`'s identity, which is what lets
+  // `React.memo` on the message rows keep working during streaming.
+  const anchorMessageIdsRef = useRef<Map<string, string>>(new Map());
+  const anchorMessageIds = useMemo(() => {
+    const next = pickBranchAnchorMessageIds(visibleMessages, branches.map((b) => b.forkedAtMessageUuid));
+    const prev = anchorMessageIdsRef.current;
+    if (prev.size === next.size && [...next].every(([anchor, id]) => prev.get(anchor) === id)) {
+      return prev;
+    }
+    anchorMessageIdsRef.current = next;
+    return next;
+  }, [visibleMessages, branches]);
 
   const renderBranchSwitcher = useCallback((message: ChatMessage) => {
     if (!message.uuid) return null;
@@ -361,6 +371,14 @@ function ChatInterface({
   }, [selectedProject, selectedSession, sendMessage, sessionStore]);
 
   const onBranchCreated = useCallback((parentId: string, branchId: string) => {
+    // The fork run streamed its live events under the PARENT's session id
+    // (the run is registered against the parent for its whole lifetime), so
+    // the parent's realtime slot now holds turns that only exist in the
+    // branch's transcript. Drop them — unconditionally, BEFORE the viewed-
+    // session guard below: the pollution exists whether or not the user is
+    // still looking at the parent, and a backgrounded fork would otherwise
+    // leave it behind for the next visit to the parent.
+    sessionStore.clearRealtime(parentId);
     // Adopt in place only when the fork's parent is the session being viewed.
     // A backgrounded fork (user switched to another session before the run
     // finished — including an aborted run whose branch was already created)
@@ -369,12 +387,6 @@ function ChatInterface({
       return;
     }
     clearForkView();
-    // The fork run streamed its live events under the PARENT's session id
-    // (the run is registered against the parent for its whole lifetime), so
-    // the parent's realtime slot now holds turns that only exist in the
-    // branch's transcript. Drop them, or returning to the parent later would
-    // interleave the branch's content into its view.
-    sessionStore.clearRealtime(parentId);
     // In-place swap: the branch transcript already contains the copied
     // history, so pointing the view at it is the whole "switch". The view
     // is ultimately keyed off `selectedSession` (the router-derived prop),
