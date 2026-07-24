@@ -26,3 +26,10 @@ test('plain resume is untouched (regression)', () => {
   assert.equal('forkSession' in sdk, false);
   assert.equal('resumeSessionAt' in sdk, false);
 });
+
+test('resumeSessionAt without forkSession is dropped (history-rewrite guard)', () => {
+  const sdk = mapCliOptionsToSDK({ sessionId: 'prov-1', resumeSessionAt: 'a1' });
+  assert.equal(sdk.resume, 'prov-1');
+  assert.equal('resumeSessionAt' in sdk, false);
+  assert.equal('forkSession' in sdk, false);
+});

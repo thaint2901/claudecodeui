@@ -111,7 +111,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                     <button
                       type="button"
                       onClick={() => onEditPrompt(message)}
-                      className="opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+                      className="opacity-0 transition-opacity focus:opacity-100 group-hover:opacity-100"
                       title="Edit & fork from here"
                       aria-label="Edit this prompt and fork the conversation"
                     >
@@ -130,7 +130,6 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                 <span>{formattedTime}</span>
               </div>
             )}
-            {renderBranchSwitcher?.(message)}
           </div>
           {!isGrouped && (
             <div className="hidden h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm text-white sm:flex">
@@ -416,6 +415,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                 {!isGrouped && <span>{formattedTime}</span>}
               </div>
             )}
+            {/* Fork anchors are assistant uuids (the shared resume point copied
+                into every sibling transcript), so the switcher hangs here. */}
+            {renderBranchSwitcher?.(message)}
           </div>
         </div>
       )}

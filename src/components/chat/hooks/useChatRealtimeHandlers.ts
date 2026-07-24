@@ -280,13 +280,22 @@ export function useChatRealtimeHandlers({
             pendingBranchRef.current.delete(sid);
           }
 
-          if (sid && !pendingBranchId && !msg.aborted) {
+          if (sid && pendingBranchId) {
+            // A branch was created — even when the run was aborted the fork
+            // row and transcript already exist, so navigate to it instead of
+            // stranding the user on the parent view with its tail hidden.
+            void sessionStore.refreshFromServer(pendingBranchId);
+            onBranchCreated?.(sid, pendingBranchId);
+          } else if (sid) {
+            // No branch materialized (normal run, unhonored fork, or abort
+            // before the fork resolved) — let the view restore any optimistic
+            // fork hiding. No-op unless a fork view is active.
             onCompleteWithoutBranch?.(sid);
           }
 
           if (msg.aborted) {
             // Abort was requested — the complete event confirms it. No
-            // further UI action is needed beyond clearing the entry above.
+            // further UI action is needed beyond the fork handling above.
             break;
           }
 
@@ -301,11 +310,6 @@ export function useChatRealtimeHandlers({
           // viewed conversation with the now-persisted transcript.
           if (sid && sid === activeViewSessionId) {
             void sessionStore.refreshFromServer(sid);
-          }
-
-          if (sid && pendingBranchId) {
-            void sessionStore.refreshFromServer(pendingBranchId);
-            onBranchCreated?.(sid, pendingBranchId);
           }
 
           break;

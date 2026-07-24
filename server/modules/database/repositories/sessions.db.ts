@@ -443,7 +443,8 @@ export const sessionsDb = {
   createForkedSession(args: {
     providerSessionId: string;
     parentSessionId: string;
-    forkedAtMessageUuid: string;
+    /** Shared fork anchor (assistant uuid); null for first-prompt forks. */
+    forkedAtMessageUuid: string | null;
     provider: string;
     projectPath: string;
     jsonlPath?: string | null;

@@ -217,6 +217,13 @@ async function handleChatSend(
   }
 
   const clientOptions = (data.options ?? {}) as AnyRecord;
+  // Fork options are server-derived only (buildForkRuntimeOptions / the /fork
+  // block below). A client-supplied forkSession/resumeSessionAt would skip the
+  // edit-prompt validation entirely and — because forkMeta stays unset — make
+  // recordProviderSessionId remap THIS session's provider id onto the fork's,
+  // silently orphaning the original transcript.
+  delete clientOptions.forkSession;
+  delete clientOptions.resumeSessionAt;
   const editAtMessageUuid =
     typeof clientOptions.editAtMessageUuid === 'string' && clientOptions.editAtMessageUuid.trim().length > 0
       ? clientOptions.editAtMessageUuid.trim()
@@ -414,7 +421,11 @@ async function handleChatSend(
       ? {
           parentSessionId: sessionId,
           parentProviderSessionId: session.provider_session_id as string,
-          forkedAtMessageUuid: editAtMessageUuid,
+          // The fork ANCHOR: the resume-point assistant uuid, which — unlike
+          // the edited user uuid — is copied into every sibling transcript,
+          // so the branch switcher can render in any branch. Null for
+          // first-prompt edits (no shared history ⇒ no switcher).
+          forkedAtMessageUuid: forkResumeSessionAt,
           projectPath: session.project_path ?? '',
         }
       : undefined,

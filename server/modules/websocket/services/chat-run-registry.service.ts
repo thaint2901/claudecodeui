@@ -45,7 +45,7 @@ type ChatRun = {
   forkMeta?: {
     parentSessionId: string;
     parentProviderSessionId: string;
-    forkedAtMessageUuid: string;
+    forkedAtMessageUuid: string | null;
     projectPath: string;
   };
   /** The new session id created for a fork branch, once known. */
@@ -278,7 +278,7 @@ export const chatRunRegistry = {
     forkMeta?: {
       parentSessionId: string;
       parentProviderSessionId: string;
-      forkedAtMessageUuid: string;
+      forkedAtMessageUuid: string | null;
       projectPath: string;
     };
     /**

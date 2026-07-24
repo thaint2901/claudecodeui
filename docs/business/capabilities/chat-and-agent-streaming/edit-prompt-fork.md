@@ -48,7 +48,7 @@ Code changes made by the tool calls in the original branch are **never reverted*
 - Stored entirely in cloudcli's own SQLite `sessions` table (`server/modules/database/schema.ts`), not derived from transcripts at read time:
   - `fork_root_session_id TEXT` — the original, never-forked ancestor of the cluster.
   - `forked_from_session_id TEXT` — the immediate parent branch.
-  - `forked_at_message_uuid TEXT` — the edited message's uuid (the fork point).
+  - `forked_at_message_uuid TEXT` — the fork anchor: the uuid of the assistant message the branch resumed from. Unlike the edited user message's uuid (which exists only in the parent transcript), the anchor is copied into every sibling transcript, so the branch switcher can render in any branch. NULL for first-prompt forks (no shared history, no switcher).
   - `active_leaf BOOLEAN DEFAULT 1` — which sibling is currently displayed for the cluster; exactly one leaf per cluster is active.
 - `GET /sessions/:sessionId/branches` returns all branches in a cluster (filtered to those whose transcript file still exists on disk).
 - `POST /sessions/:sessionId/activate-branch` flips `active_leaf` to the given session and demotes its siblings.

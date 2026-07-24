@@ -361,13 +361,14 @@ function ChatInterface({
       // In-place swap: the branch transcript already contains the copied
       // history, so pointing the view at it is the whole "switch". The view
       // is ultimately keyed off `selectedSession` (the router-derived prop),
-      // so `setCurrentSessionId` alone isn't enough — route to the branch
-      // the same way a brand-new session is adopted (`replace: true` avoids
-      // adding a history entry for a switch the user didn't explicitly ask for).
+      // so `setCurrentSessionId` alone isn't enough — route to the branch the
+      // same way a brand-new session is adopted. Deliberately a PUSH (no
+      // `replace`): the parent leaves the sidebar once its `active_leaf`
+      // flips, so browser Back is the guaranteed way home to it.
       clearForkView();
       sessionStore.setActiveSession(branchId);
       setCurrentSessionId(branchId);
-      onNavigateToSession?.(branchId, { replace: true });
+      onNavigateToSession?.(branchId);
       void fetchBranches(branchId, () => currentSessionIdRef.current === branchId);
     },
     onForkFailed: (_sid, error) => {
@@ -377,15 +378,16 @@ function ChatInterface({
     onCompleteWithoutBranch: (sid) => {
       if (!isForkViewActive) return;
       clearForkView();
-      console.error('Fork was not honored by the runtime — restored the original view');
+      console.error('Fork did not complete — restored the original view');
       // Reuse the same in-conversation error surfacing as a protocol_error.
+      // Covers both an unhonored fork and an abort before the fork resolved.
       sessionStore.appendRealtime(sid, {
         id: `fork_not_honored_${Date.now()}`,
         sessionId: sid,
         timestamp: new Date().toISOString(),
         provider,
         kind: 'error',
-        content: 'Fork was not honored by the runtime — restored the original view.',
+        content: 'Fork did not complete — restored the original view.',
       } as NormalizedMessage);
     },
   });
