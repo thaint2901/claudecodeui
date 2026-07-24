@@ -76,7 +76,7 @@ const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
  */
 const runs = new Map<string, ChatRun>();
 
-async function broadcastCanonicalSessionUpsert(appSessionId: string): Promise<void> {
+export async function broadcastCanonicalSessionUpsert(appSessionId: string): Promise<void> {
   const row = sessionsDb.getSessionById(appSessionId);
   if (!row || row.isArchived) {
     return;
@@ -98,6 +98,8 @@ async function broadcastCanonicalSessionUpsert(appSessionId: string): Promise<vo
       summary: row.custom_name || '',
       messageCount: 0,
       lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
+      activeLeaf: row.active_leaf === 1,
+      branchCount: row.fork_root_session_id ? sessionsDb.getClusterBranches(row.session_id).length : 0,
     },
     project: project
       ? {

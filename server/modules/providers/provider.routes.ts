@@ -10,6 +10,7 @@ import { providerModelsService } from '@/modules/providers/services/provider-mod
 import { providerSkillsService } from '@/modules/providers/services/skills.service.js';
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { broadcastCanonicalSessionUpsert } from '@/modules/websocket/index.js';
 import type {
   LLMProvider,
   McpScope,
@@ -667,6 +668,22 @@ router.post(
         statusCode: 409,
       });
     }
+
+    // Every row in the cluster changed which leaf is active — broadcast each
+    // so connected clients drop the just-deactivated leaf and show the newly
+    // activated one without waiting for a reload.
+    await Promise.all(
+      sessionsDb.getClusterBranches(sessionId).map((row) =>
+        broadcastCanonicalSessionUpsert(row.session_id).catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error('[ProviderRoutes] Failed to broadcast branch activation', {
+            sessionId: row.session_id,
+            error: message,
+          });
+        }),
+      ),
+    );
+
     res.json(createApiSuccessResponse({ session }));
   }),
 );
