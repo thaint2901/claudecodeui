@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { baseMessageUuid, pickBranchAnchorMessageIds } from './branchAnchors.js';
+import { baseMessageUuid, firstUserMessageUuid, pickBranchAnchorMessageIds } from './branchAnchors.js';
 
 const UUID = '0b8a9d7e-1c2f-4a5b-8d3e-6f7a8b9c0d1e';
 
@@ -50,6 +50,26 @@ test('tool-only turns and missing anchors produce no entry', () => {
   ];
   const chosen = pickBranchAnchorMessageIds(messages, [UUID, null, undefined]);
   assert.equal(chosen.size, 0);
+});
+
+test('firstUserMessageUuid finds the first user message when history is fully loaded', () => {
+  const messages = [
+    { uuid: `${UUID}_0`, type: 'assistant' },
+    { type: 'user' }, // optimistic/pending row without a uuid is skipped
+    { uuid: `${UUID}_text_0`, type: 'user' },
+    { uuid: 'later-user', type: 'user' },
+  ];
+  assert.equal(firstUserMessageUuid(messages, false), `${UUID}_text_0`);
+});
+
+test('firstUserMessageUuid returns null while earlier history is unloaded', () => {
+  const messages = [{ uuid: `${UUID}_text_0`, type: 'user' }];
+  assert.equal(firstUserMessageUuid(messages, true), null);
+});
+
+test('firstUserMessageUuid returns null with no user messages', () => {
+  assert.equal(firstUserMessageUuid([{ uuid: `${UUID}_0`, type: 'assistant' }], false), null);
+  assert.equal(firstUserMessageUuid([], false), null);
 });
 
 test('multiple anchors resolve independently', () => {

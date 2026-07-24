@@ -37,6 +37,32 @@ type AnchorCandidate = {
  * switcher slot), and the last part puts the switcher at the visual end of
  * the turn.
  */
+/**
+ * The uuid of the conversation's FIRST user message, for hiding the
+ * edit-prompt affordance on it: editing the first prompt has no preceding
+ * assistant turn to anchor `resumeSessionAt` on, so the SDK would copy the
+ * FULL history into the branch (spike-verified) — wrong semantics for "edit".
+ * The server rejects such forks too; hiding the button prevents the dead end.
+ *
+ * Pagination-aware: while earlier history is still unloaded
+ * (`hasMoreMessages`), NONE of the loaded messages can be the first one, so
+ * this returns null (everything stays editable). Returns the rendered
+ * (possibly part-suffixed) uuid so callers can compare it to `message.uuid`
+ * directly.
+ */
+export function firstUserMessageUuid(
+  messages: readonly AnchorCandidate[],
+  hasMoreMessages: boolean,
+): string | null {
+  if (hasMoreMessages) return null;
+  for (const message of messages) {
+    if (message.type === 'user' && message.uuid) {
+      return message.uuid;
+    }
+  }
+  return null;
+}
+
 export function pickBranchAnchorMessageIds(
   messages: readonly AnchorCandidate[],
   anchorUuids: Iterable<string | null | undefined>,

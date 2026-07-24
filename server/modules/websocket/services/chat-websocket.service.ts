@@ -262,6 +262,21 @@ async function handleChatSend(
       sendProtocolError(ws, 'FORK_FAILED', `Cannot fork: ${message}`, sessionId);
       return;
     }
+    // No preceding assistant turn means this is the conversation's FIRST
+    // prompt. Omitting resumeSessionAt would make the SDK copy the FULL
+    // history into the branch (spike-verified), so the "edited" prompt would
+    // just append after the old conversation — wrong semantics. The UI hides
+    // the edit affordance for the first prompt; this guard covers stale or
+    // non-UI clients.
+    if (!forkResumeSessionAt) {
+      sendProtocolError(
+        ws,
+        'FORK_FAILED',
+        'Editing the first prompt of a conversation is not supported — start a new session instead.',
+        sessionId
+      );
+      return;
+    }
   }
 
   const forkCommand = provider === 'claude' ? parseForkCommand(typeof data.content === 'string' ? data.content : '') : null;

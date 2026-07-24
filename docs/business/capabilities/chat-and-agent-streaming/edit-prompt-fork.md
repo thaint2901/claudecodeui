@@ -24,11 +24,11 @@ Code changes made by the tool calls in the original branch are **never reverted*
 
 ## Flow
 
-1. The user hovers a previous prompt. `canEditPrompt` (`provider === 'claude' && !isProcessing`) gates whether the pencil icon renders — disabled while a run is in progress.
+1. The user hovers a previous prompt. `canEditPrompt` (`provider === 'claude' && !isProcessing`) gates whether the pencil icon renders — disabled while a run is in progress. The conversation's FIRST user message never shows the icon (`firstUserMessageUuid` in `branchAnchors.ts`, pagination-aware): with no assistant turn before it there is no resume anchor, and the SDK would copy the full history instead of truncating.
 2. Clicking the icon loads that message's text into the composer, along with the banner: *"Editing a sent prompt — the new branch only rewinds the conversation. Code changes after this point are kept (see the Git tab)."*
 3. The user edits the text and sends. The composer includes `options.editAtMessageUuid` (the uuid of the message being edited) in the `chat.send` WS envelope, alongside the edited prompt text.
 4. `chat-websocket.service.ts` rejects the request with a `protocol_error` (`code: 'FORK_FAILED'`) if the session isn't Claude, or has no transcript yet.
-5. `findForkResumePoint` streams the transcript JSONL looking for the edited message's uuid, tracking the last-seen assistant uuid (`RESUME_POINT_RULE = 'preceding-assistant-uuid'`). It returns that assistant uuid (or `null` if the edited message was the first prompt) as `resumeSessionAt`. Any other transcript problem also surfaces as `FORK_FAILED`.
+5. `findForkResumePoint` streams the transcript JSONL looking for the edited message's uuid, tracking the last-seen assistant uuid (`RESUME_POINT_RULE = 'preceding-assistant-uuid'`). It returns that assistant uuid as `resumeSessionAt`; a `null` result (edited message was the first prompt) is rejected with `FORK_FAILED` ("start a new session instead"), since omitting `resumeSessionAt` would copy the full history rather than truncate. Any other transcript problem also surfaces as `FORK_FAILED`.
 6. The hub invokes `queryClaudeSDK` with `resume` (the original provider session id), `resumeSessionAt` (the resume point), and `forkSession: true`, plus the new prompt text.
 7. The SDK creates a new provider session and transcript file that shares history up to the resume point, then continues with the edited prompt. During the new run, the old message tail is hidden client-side and the new prompt streams in its place.
 8. On completion, the server records the fork edge in SQLite (`forked_from_session_id`, `forked_at_message_uuid`, `fork_root_session_id` propagated from the root) and marks the new session `active_leaf = 1`, demoting the sibling. A `branch_created` event is broadcast on `complete`.
@@ -48,7 +48,7 @@ Code changes made by the tool calls in the original branch are **never reverted*
 - Stored entirely in cloudcli's own SQLite `sessions` table (`server/modules/database/schema.ts`), not derived from transcripts at read time:
   - `fork_root_session_id TEXT` — the original, never-forked ancestor of the cluster.
   - `forked_from_session_id TEXT` — the immediate parent branch.
-  - `forked_at_message_uuid TEXT` — the fork anchor: the uuid of the assistant message the branch resumed from. Unlike the edited user message's uuid (which exists only in the parent transcript), the anchor is copied into every sibling transcript, so the branch switcher can render in any branch. NULL for first-prompt forks (no shared history, no switcher).
+  - `forked_at_message_uuid TEXT` — the fork anchor: the uuid of the assistant message the branch resumed from. Unlike the edited user message's uuid (which exists only in the parent transcript), the anchor is copied into every sibling transcript, so the branch switcher can render in any branch. Always set for rows created by this flow (first-prompt edits, which would have no anchor, are rejected up front); the column stays nullable for schema simplicity.
   - `active_leaf BOOLEAN DEFAULT 1` — which sibling is currently displayed for the cluster; exactly one leaf per cluster is active.
 - `GET /sessions/:sessionId/branches` returns all branches in a cluster (filtered to those whose transcript file still exists on disk).
 - `POST /sessions/:sessionId/activate-branch` flips `active_leaf` to the given session and demotes its siblings.

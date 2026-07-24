@@ -16,7 +16,7 @@ import { useSessionStore } from '../../../stores/useSessionStore';
 import type { NormalizedMessage } from '../../../stores/useSessionStore';
 import { postStopSession } from '../../../contexts/sessionLockApi';
 import { api } from '../../../utils/api';
-import { baseMessageUuid, pickBranchAnchorMessageIds } from '../utils/branchAnchors';
+import { baseMessageUuid, firstUserMessageUuid, pickBranchAnchorMessageIds } from '../utils/branchAnchors';
 
 import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatComposer from './subcomponents/ChatComposer';
@@ -252,6 +252,16 @@ function ChatInterface({
     anchorMessageIdsRef.current = next;
     return next;
   }, [visibleMessages, branches]);
+
+  // The first prompt of a conversation cannot be edit-forked (no preceding
+  // assistant turn to anchor the resume point on) — hide its ✏️ button.
+  // Computed over the full loaded list (not the visible tail slice); while
+  // older history is still unloaded, nothing on screen can be the first
+  // message and everything stays editable.
+  const editBlockedUuid = useMemo(
+    () => firstUserMessageUuid(chatMessages, hasMoreMessages),
+    [chatMessages, hasMoreMessages],
+  );
 
   const renderBranchSwitcher = useCallback((message: ChatMessage) => {
     if (!message.uuid) return null;
@@ -606,6 +616,7 @@ function ChatInterface({
           showThinking={showThinking}
           selectedProject={selectedProject}
           canEditPrompt={provider === 'claude' && !isProcessing}
+          editBlockedUuid={editBlockedUuid}
           onEditPrompt={(m) =>
             // The rendered uuid is a part id (`<uuid>_text_<n>` for user text
             // parts); the server resolves the resume point by BARE transcript

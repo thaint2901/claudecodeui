@@ -101,9 +101,13 @@ Semantics:
    `server/modules/websocket/services/chat-websocket.service.ts:196-205`):
    when `editAtMessageUuid` is present, scan the current session's JSONL for
    the message **immediately preceding** the edited message; pass its uuid as
-   the resume point. Edge case: editing the **first** prompt sends no
-   `resumeSessionAt` (fork from the beginning). Preceding-message rule per
-   the spike (§7): the immediately preceding **assistant** message's uuid.
+   the resume point. Preceding-message rule per the spike (§7): the
+   immediately preceding **assistant** message's uuid. Edge case: editing the
+   **first** prompt is **rejected** (`FORK_FAILED`) — there is no preceding
+   assistant turn to anchor on, and omitting `resumeSessionAt` makes the SDK
+   copy the FULL history into the branch (spike-verified), which is wrong
+   "edit" semantics. The UI additionally hides the ✏️ button on the first
+   user message; the server guard covers stale/non-UI clients.
 3. **`mapCliOptionsToSDK()`** (`server/claude-sdk.js:160-237`) additions:
    `resumeSessionAt` passthrough and `forkSession: true` when forking.
 4. **Branch row creation:** when the SDK announces the new `session_id`
@@ -155,6 +159,7 @@ Semantics:
 | Case | Behavior |
 |---|---|
 | Fork fails (SDK error, dead CLI, unknown uuid) | Restore `viewHiddenCount = 0` (old view reappears intact), keep edited text in the composer, show error toast. No DB row was created. |
+| Edit the FIRST prompt | Not supported: ✏️ hidden on the first user message (pagination-aware — only once the full history is loaded); server rejects with `FORK_FAILED` ("start a new session instead") for stale/non-UI clients. |
 | ✏️ while streaming | Button disabled; user aborts first (existing control). |
 | Edit on a non-active branch | Works identically — fork from the viewed session; new branch becomes active leaf. |
 | Root transcript deleted / cleaned up (30-day retention) | Resume fails → generic fork-failure path with explicit message; `GET /branches` filters branches with missing `jsonl_path`. |
