@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection } from '@/modules/database/connection.js';
+import { closeConnection, getConnection } from '@/modules/database/connection.js';
 import { initializeDatabase } from '@/modules/database/init-db.js';
 import { sessionsDb } from '@/modules/database/repositories/sessions.db.js';
 
@@ -146,5 +146,49 @@ test('createForkedSession with a nonexistent parent throws and leaves no partial
       /not found/,
     );
     assert.equal(sessionsDb.getSessionById('orphan-branch'), null);
+  });
+});
+
+test('getClusterBranches returns rows in created_at order regardless of insertion order', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createSession('root-s', 'claude', '/workspace/p');
+    // Inserted out of the chronological order we'll assign below.
+    sessionsDb.createForkedSession({
+      providerSessionId: 'branch-b', parentSessionId: 'root-s',
+      forkedAtMessageUuid: 'u1', provider: 'claude', projectPath: '/workspace/p',
+    });
+    sessionsDb.createForkedSession({
+      providerSessionId: 'branch-a', parentSessionId: 'branch-b',
+      forkedAtMessageUuid: 'u2', provider: 'claude', projectPath: '/workspace/p',
+    });
+
+    const db = getConnection();
+    const setCreatedAt = db.prepare('UPDATE sessions SET created_at = ? WHERE session_id = ?');
+    setCreatedAt.run('2024-01-01 00:00:01', 'root-s');
+    setCreatedAt.run('2024-01-01 00:00:03', 'branch-b');
+    setCreatedAt.run('2024-01-01 00:00:02', 'branch-a');
+
+    // Insertion order was root-s, branch-b, branch-a — the query must honor
+    // created_at order (root-s, branch-a, branch-b), not insertion order.
+    const cluster = sessionsDb.getClusterBranches('root-s');
+    assert.deepEqual(cluster.map((row) => row.session_id), ['root-s', 'branch-a', 'branch-b']);
+  });
+});
+
+test('getSessionsByProjectPathIncludingArchived returns every cluster row while getSessionsByProjectPathPage hides non-active leaves', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createSession('root-s', 'claude', '/workspace/p');
+    sessionsDb.createForkedSession({
+      providerSessionId: 'branch-1', parentSessionId: 'root-s',
+      forkedAtMessageUuid: 'u1', provider: 'claude', projectPath: '/workspace/p',
+    });
+
+    // Intentional asymmetry: the archive view surfaces the whole cluster...
+    const allRows = sessionsDb.getSessionsByProjectPathIncludingArchived('/workspace/p');
+    assert.deepEqual(allRows.map((row) => row.session_id).sort(), ['branch-1', 'root-s']);
+
+    // ...while the sidebar page only ever shows the active leaf.
+    const pageRows = sessionsDb.getSessionsByProjectPathPage('/workspace/p', 10, 0);
+    assert.deepEqual(pageRows.map((row) => row.session_id), ['branch-1']);
   });
 });
