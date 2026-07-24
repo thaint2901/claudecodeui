@@ -62,7 +62,7 @@ export const CLAUDE_FALLBACK_MODELS: ProviderModelsDefinition = {
     {
       value: 'sonnet[1m]',
       label: 'Sonnet (1M context)',
-      description: 'No-op on Max/Team/Enterprise — Sonnet 5 already runs native 1M context. Uses extra usage credits on Pro or pay-as-you-go.',
+      description: 'No-op on the Anthropic API — Sonnet 5 already runs native 1M context on every plan, no extra credits needed. Only relevant behind an LLM gateway.',
       effort: {
         default: 'high',
         values: [
