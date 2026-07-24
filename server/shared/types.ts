@@ -205,6 +205,7 @@ export type MessageKind =
 export type GatewayEventKind =
   | 'chat_subscribed'
   | 'session_upserted'
+  | 'branch_created'
   | 'loading_progress'
   | 'protocol_error';
 

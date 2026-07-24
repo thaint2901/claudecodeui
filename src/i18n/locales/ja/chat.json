@@ -202,5 +202,11 @@
     "providers": {
       "assistant": "Assistant"
     }
+  },
+  "branch": {
+    "editTitle": "Edit & fork from here",
+    "editAria": "Edit this prompt and fork the conversation",
+    "previous": "Previous branch",
+    "next": "Next branch"
   }
 }

@@ -42,6 +42,12 @@ interface UseChatRealtimeHandlersArgs {
   onSessionIdle?: MarkSessionIdle;
   onWebSocketReconnect?: () => void;
   sessionStore: SessionStore;
+  /** Called on `complete` of a run that emitted `branch_created` for this session. */
+  onBranchCreated?: (parentSessionId: string, branchSessionId: string) => void;
+  /** Called when the gateway rejects an edit-and-fork request (`protocol_error` with `code: 'FORK_FAILED'`). */
+  onForkFailed?: (sessionId: string, error: string) => void;
+  /** Called on every non-aborted `complete` that did not carry a pending branch id (i.e. every normal complete, fork or not). */
+  onCompleteWithoutBranch?: (sessionId: string) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -73,7 +79,14 @@ export function useChatRealtimeHandlers({
   onSessionIdle,
   onWebSocketReconnect,
   sessionStore,
+  onBranchCreated,
+  onForkFailed,
+  onCompleteWithoutBranch,
 }: UseChatRealtimeHandlersArgs) {
+  // sessionId -> branchSessionId for runs that forked mid-stream; consumed on
+  // this session's next `complete` event, then discarded.
+  const pendingBranchRef = useRef<Map<string, string>>(new Map());
+
   // Session switches can send `chat.subscribe` before this effect has a chance
   // to rebind the websocket listener. Read the visible session id from a ref
   // so a fast `chat_subscribed` ack is matched against the current view, not
@@ -143,8 +156,20 @@ export function useChatRealtimeHandlers({
           return;
         }
 
+        case 'branch_created': {
+          // Gateway-only event: never enters the message store.
+          const branchId = (msg as unknown as { branchSessionId?: string }).branchSessionId;
+          if (sid && branchId) {
+            pendingBranchRef.current.set(sid, branchId);
+          }
+          return;
+        }
+
         case 'protocol_error': {
           console.error('[Chat] Protocol error:', msg.code, msg.error);
+          if (msg.code === 'FORK_FAILED') {
+            onForkFailed?.(sid ?? '', typeof msg.error === 'string' ? msg.error : 'Fork failed');
+          }
           if (sid) {
             // Surface the failure in the conversation and stop the spinner —
             // the run never started (or was rejected), so no `complete` follows.
@@ -251,9 +276,30 @@ export function useChatRealtimeHandlers({
             setPendingPermissionRequests([]);
           }
 
+          // Consume the pending fork entry exactly once per complete, so an
+          // aborted run never leaves a stale branch id for the NEXT complete
+          // to pick up.
+          const pendingBranchId = sid ? pendingBranchRef.current.get(sid) : undefined;
+          if (sid) {
+            pendingBranchRef.current.delete(sid);
+          }
+
+          if (sid && pendingBranchId) {
+            // A branch was created — even when the run was aborted the fork
+            // row and transcript already exist, so navigate to it instead of
+            // stranding the user on the parent view with its tail hidden.
+            void sessionStore.refreshFromServer(pendingBranchId);
+            onBranchCreated?.(sid, pendingBranchId);
+          } else if (sid) {
+            // No branch materialized (normal run, unhonored fork, or abort
+            // before the fork resolved) — let the view restore any optimistic
+            // fork hiding. No-op unless a fork view is active.
+            onCompleteWithoutBranch?.(sid);
+          }
+
           if (msg.aborted) {
             // Abort was requested — the complete event confirms it. No
-            // further UI action is needed beyond clearing the entry above.
+            // further UI action is needed beyond the fork handling above.
             break;
           }
 
@@ -353,5 +399,8 @@ export function useChatRealtimeHandlers({
     onSessionIdle,
     onWebSocketReconnect,
     sessionStore,
+    onBranchCreated,
+    onForkFailed,
+    onCompleteWithoutBranch,
   ]);
 }

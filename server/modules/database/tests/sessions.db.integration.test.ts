@@ -82,3 +82,14 @@ test('repository reads normalize SQLite UTC timestamps to ISO strings', async ()
     assert.match(row?.updated_at ?? '', /^\d{4}-\d{2}-\d{2}T/);
   });
 });
+
+test('migration adds fork columns with safe defaults', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createSession('plain-session', 'claude', '/workspace/demo-project');
+    const row = sessionsDb.getSessionById('plain-session');
+    assert.equal(row?.fork_root_session_id, null);
+    assert.equal(row?.forked_from_session_id, null);
+    assert.equal(row?.forked_at_message_uuid, null);
+    assert.equal(row?.active_leaf, 1);
+  });
+});

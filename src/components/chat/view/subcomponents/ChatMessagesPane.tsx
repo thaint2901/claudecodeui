@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import { memo, useCallback, useMemo } from 'react';
-import type { Dispatch, RefObject, SetStateAction } from 'react';
+import type { Dispatch, ReactNode, RefObject, SetStateAction } from 'react';
 
 import type { ChatMessage } from '../../types/types';
 import type {
@@ -66,6 +66,13 @@ interface ChatMessagesPaneProps {
   showRawParameters?: boolean;
   showThinking?: boolean;
   selectedProject: Project;
+  /** Whether the active provider/session supports edit-and-fork (Claude only, not while streaming). */
+  canEditPrompt?: boolean;
+  /** Rendered uuid of the conversation's first user message — its ✏️ is hidden (no resume anchor before it). */
+  editBlockedUuid?: string | null;
+  onEditPrompt?: (message: ChatMessage) => void;
+  /** Renders the `< n/total >` branch switcher under a user message forked at that point, or null. */
+  renderBranchSwitcher?: (message: ChatMessage) => ReactNode;
 }
 
 function ChatMessagesPane({
@@ -115,6 +122,10 @@ function ChatMessagesPane({
   showRawParameters,
   showThinking,
   selectedProject,
+  canEditPrompt,
+  editBlockedUuid,
+  onEditPrompt,
+  renderBranchSwitcher,
 }: ChatMessagesPaneProps) {
   const { t } = useTranslation('chat');
   const groupedVisibleMessages = useMemo(
@@ -288,6 +299,9 @@ function ChatMessagesPane({
                   showThinking={showThinking}
                   selectedProject={selectedProject}
                   provider={provider}
+                  canEditPrompt={canEditPrompt && (!editBlockedUuid || item.uuid !== editBlockedUuid)}
+                  onEditPrompt={onEditPrompt}
+                  renderBranchSwitcher={renderBranchSwitcher}
                 />
               );
             });

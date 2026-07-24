@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { Check, Edit2, Loader2, Trash2, X } from 'lucide-react';
+import { Check, Edit2, GitBranch, Loader2, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Badge, Tooltip, buttonVariants } from '../../../../shared/view/ui';
@@ -183,10 +183,16 @@ export default function SidebarSessionItem({
                   <span className="ml-auto flex-shrink-0 text-[11px] text-muted-foreground">{compactSessionAge}</span>
                 )}
               </div>
-              <div className="mt-0.5 flex items-center">
+              <div className="mt-0.5 flex items-center gap-1">
                 {sessionView.messageCount > 0 && (
                   <Badge variant="secondary" className="px-1 py-0 text-xs">
                     {sessionView.messageCount}
+                  </Badge>
+                )}
+                {sessionView.branchCount > 1 && (
+                  <Badge variant="outline" className="gap-0.5 px-1 py-0 text-xs" title="Forked conversation">
+                    <GitBranch className="h-2.5 w-2.5" />
+                    {sessionView.branchCount}
                   </Badge>
                 )}
               </div>
@@ -264,8 +270,14 @@ export default function SidebarSessionItem({
                   </span>
                 )}
               </div>
-              <div className="mt-0.5 flex items-center">
+              <div className="mt-0.5 flex items-center gap-1">
                 {sessionView.messageCount > 0 && <Badge variant="secondary" className="px-1 py-0 text-xs">{sessionView.messageCount}</Badge>}
+                {sessionView.branchCount > 1 && (
+                  <Badge variant="outline" className="gap-0.5 px-1 py-0 text-xs" title="Forked conversation">
+                    <GitBranch className="h-2.5 w-2.5" />
+                    {sessionView.branchCount}
+                  </Badge>
+                )}
               </div>
             </div>
           </div>

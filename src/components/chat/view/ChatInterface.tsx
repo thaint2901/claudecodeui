@@ -7,17 +7,30 @@ import { useWebSocket } from '../../../contexts/WebSocketContext';
 import { useSessionLock } from '../../../contexts/SessionLockContext';
 import PermissionContext from '../../../contexts/PermissionContext';
 import { QuickSettingsPanel } from '../../quick-settings-panel';
-import type { ChatInterfaceProps, Provider  } from '../types/types';
+import type { ChatInterfaceProps, ChatMessage, Provider  } from '../types/types';
 import { useChatProviderState } from '../hooks/useChatProviderState';
 import { useChatSessionState } from '../hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '../hooks/useChatComposerState';
 import { useSessionStore } from '../../../stores/useSessionStore';
+import type { NormalizedMessage } from '../../../stores/useSessionStore';
 import { postStopSession } from '../../../contexts/sessionLockApi';
+import { api } from '../../../utils/api';
+import { baseMessageUuid, firstUserMessageUuid, pickBranchAnchorMessageIds } from '../utils/branchAnchors';
 
 import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatComposer from './subcomponents/ChatComposer';
 import CommandResultModal from './subcomponents/CommandResultModal';
+import { BranchSwitcher } from './subcomponents/BranchSwitcher';
+
+/** A row from `GET /api/providers/sessions/:id/branches`. */
+type SessionBranch = {
+  sessionId: string;
+  forkedFromSessionId: string | null;
+  forkedAtMessageUuid: string | null;
+  createdAt: string;
+  activeLeaf: boolean;
+};
 
 function ChatInterface({
   selectedProject,
@@ -124,6 +137,9 @@ function ChatInterface({
     scrollToBottom,
     scrollToBottomAndReset,
     handleScroll,
+    beginForkView,
+    clearForkView,
+    isForkViewActive,
   } = useChatSessionState({
     selectedProject,
     selectedSession,
@@ -146,6 +162,133 @@ function ChatInterface({
     onSessionEstablished?.(sessionId, context);
     onNavigateToSession?.(sessionId);
   }, [setCurrentSessionId, onSessionEstablished, onNavigateToSession]);
+
+  // Sibling branches for the viewed session, refetched whenever the viewed
+  // session changes (including the swap `onBranchCreated` performs below).
+  const [branches, setBranches] = useState<SessionBranch[]>([]);
+  // Guards a fetch's result against being applied after the session it was
+  // fetched for has stopped being the one in view (stale in-flight response).
+  const currentSessionIdRef = useRef(currentSessionId);
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
+  const fetchBranches = useCallback(async (sessionId: string, isCurrent: () => boolean) => {
+    try {
+      const response = await api.sessionBranches(sessionId);
+      if (!isCurrent()) return;
+      if (!response.ok) {
+        setBranches([]);
+        return;
+      }
+      const json = await response.json();
+      setBranches(json?.data?.branches ?? []);
+    } catch (error) {
+      if (!isCurrent()) return;
+      console.error('[ChatInterface] Failed to fetch session branches', error);
+      setBranches([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!currentSessionId) {
+      setBranches([]);
+      return;
+    }
+    let cancelled = false;
+    void fetchBranches(currentSessionId, () => !cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSessionId, fetchBranches]);
+
+  // Alternatives at a fork point `uuid`: every branch forked at that message,
+  // plus the common parent they split from, parent-first then by createdAt.
+  // Deduped by sessionId: a branch can be BOTH a fork at this anchor and the
+  // parent of a later fork at the same anchor (fork-of-fork), and must count
+  // once or the switcher's total/index drift onto duplicates.
+  const siblingsAt = useCallback((uuid: string) => {
+    const forks = branches.filter((b) => b.forkedAtMessageUuid === uuid);
+    if (forks.length === 0) return [];
+    const parentIds = [...new Set(forks.map((b) => b.forkedFromSessionId).filter(Boolean))] as string[];
+    const parents = branches.filter((b) => parentIds.includes(b.sessionId));
+    const seen = new Set<string>();
+    return [...parents, ...forks].filter((b) => {
+      if (seen.has(b.sessionId)) return false;
+      seen.add(b.sessionId);
+      return true;
+    });
+  }, [branches]);
+
+  const switchBranch = useCallback(async (branchSessionId?: string) => {
+    if (!branchSessionId) return;
+    try {
+      const response = await api.activateBranch(branchSessionId);
+      if (!response.ok) {
+        console.error('Branch activation failed', { branchSessionId, status: response.status });
+        if (currentSessionId) {
+          void fetchBranches(currentSessionId, () => currentSessionIdRef.current === currentSessionId);
+        }
+        return;
+      }
+      await sessionStore.refreshFromServer(branchSessionId);
+      sessionStore.setActiveSession(branchSessionId);
+      setCurrentSessionId(branchSessionId);
+      onNavigateToSession?.(branchSessionId, { replace: true });
+      clearForkView();
+    } catch (error) {
+      console.error('[ChatInterface] Branch switch failed', error);
+      if (currentSessionId) {
+        void fetchBranches(currentSessionId, () => currentSessionIdRef.current === currentSessionId);
+      }
+    }
+  }, [sessionStore, setCurrentSessionId, onNavigateToSession, clearForkView, currentSessionId, fetchBranches]);
+
+  // Anchors are BARE transcript uuids, but array-content assistant messages
+  // render as parts with `<uuid>_<partIndex>` ids — match on base uuid and
+  // hang the switcher on exactly one part per turn (the last assistant part).
+  // `visibleMessages` gets a new reference on every stream flush (~100ms), so
+  // the recomputed Map is swapped in only when its CONTENT changed — a stable
+  // reference keeps `renderBranchSwitcher`'s identity, which is what lets
+  // `React.memo` on the message rows keep working during streaming.
+  const anchorMessageIdsRef = useRef<Map<string, string>>(new Map());
+  const anchorMessageIds = useMemo(() => {
+    const next = pickBranchAnchorMessageIds(visibleMessages, branches.map((b) => b.forkedAtMessageUuid));
+    const prev = anchorMessageIdsRef.current;
+    if (prev.size === next.size && [...next].every(([anchor, id]) => prev.get(anchor) === id)) {
+      return prev;
+    }
+    anchorMessageIdsRef.current = next;
+    return next;
+  }, [visibleMessages, branches]);
+
+  // The first prompt of a conversation cannot be edit-forked (no preceding
+  // assistant turn to anchor the resume point on) — hide its ✏️ button.
+  // Computed over the full loaded list (not the visible tail slice); while
+  // older history is still unloaded, nothing on screen can be the first
+  // message and everything stays editable.
+  const editBlockedUuid = useMemo(
+    () => firstUserMessageUuid(chatMessages, hasMoreMessages),
+    [chatMessages, hasMoreMessages],
+  );
+
+  const renderBranchSwitcher = useCallback((message: ChatMessage) => {
+    if (!message.uuid) return null;
+    const anchor = baseMessageUuid(message.uuid);
+    if (anchorMessageIds.get(anchor) !== message.uuid) return null;
+    const sibs = siblingsAt(anchor);
+    if (sibs.length < 2) return null;
+    const idx = sibs.findIndex((b) => b.sessionId === currentSessionId || b.activeLeaf);
+    if (idx < 0) return null;
+    return (
+      <BranchSwitcher
+        current={idx + 1}
+        total={sibs.length}
+        onPrev={() => void switchBranch(sibs[idx - 1]?.sessionId)}
+        onNext={() => void switchBranch(sibs[idx + 1]?.sessionId)}
+      />
+    );
+  }, [anchorMessageIds, siblingsAt, currentSessionId, switchBranch]);
 
   const {
     input,
@@ -196,6 +339,9 @@ function ChatInterface({
     commandModalPayload,
     closeCommandModal,
     showCostModal,
+    editingSentPrompt,
+    startEditSentPrompt,
+    cancelEditSentPrompt,
   } = useChatComposerState({
     selectedProject,
     selectedSession,
@@ -223,6 +369,7 @@ function ChatInterface({
     setIsUserScrolledUp,
     setPendingPermissionRequests,
     resolvePermissionModeForProvider,
+    onForkSubmitted: beginForkView,
   });
 
   // On WebSocket reconnect, re-fetch the current session's messages from the
@@ -242,6 +389,57 @@ function ChatInterface({
     });
   }, [selectedProject, selectedSession, sendMessage, sessionStore]);
 
+  const onBranchCreated = useCallback((parentId: string, branchId: string) => {
+    // The fork run streamed its live events under the PARENT's session id
+    // (the run is registered against the parent for its whole lifetime), so
+    // the parent's realtime slot now holds turns that only exist in the
+    // branch's transcript. Drop them — unconditionally, BEFORE the viewed-
+    // session guard below: the pollution exists whether or not the user is
+    // still looking at the parent, and a backgrounded fork would otherwise
+    // leave it behind for the next visit to the parent.
+    sessionStore.clearRealtime(parentId);
+    // Adopt in place only when the fork's parent is the session being viewed.
+    // A backgrounded fork (user switched to another session before the run
+    // finished — including an aborted run whose branch was already created)
+    // must never yank the user out of the session they are looking at.
+    if (currentSessionIdRef.current !== parentId) {
+      return;
+    }
+    clearForkView();
+    // In-place swap: the branch transcript already contains the copied
+    // history, so pointing the view at it is the whole "switch". The view
+    // is ultimately keyed off `selectedSession` (the router-derived prop),
+    // so `setCurrentSessionId` alone isn't enough — route to the branch the
+    // same way a brand-new session is adopted. Deliberately a PUSH (no
+    // `replace`): the parent leaves the sidebar once its `active_leaf`
+    // flips, so browser Back is the guaranteed way home to it.
+    sessionStore.setActiveSession(branchId);
+    setCurrentSessionId(branchId);
+    onNavigateToSession?.(branchId);
+    void fetchBranches(branchId, () => currentSessionIdRef.current === branchId);
+  }, [clearForkView, sessionStore, setCurrentSessionId, onNavigateToSession, fetchBranches]);
+
+  const onForkFailed = useCallback((_sid: string, error: string) => {
+    clearForkView();
+    console.error('Fork failed:', error);
+  }, [clearForkView]);
+
+  const onCompleteWithoutBranch = useCallback((sid: string) => {
+    if (!isForkViewActive) return;
+    clearForkView();
+    console.error('Fork did not complete — restored the original view');
+    // Reuse the same in-conversation error surfacing as a protocol_error.
+    // Covers both an unhonored fork and an abort before the fork resolved.
+    sessionStore.appendRealtime(sid, {
+      id: `fork_not_honored_${Date.now()}`,
+      sessionId: sid,
+      timestamp: new Date().toISOString(),
+      provider,
+      kind: 'error',
+      content: 'Fork did not complete — restored the original view.',
+    } as NormalizedMessage);
+  }, [isForkViewActive, clearForkView, sessionStore, provider]);
+
   useChatRealtimeHandlers({
     subscribe,
     provider,
@@ -258,6 +456,9 @@ function ChatInterface({
     onSessionIdle,
     onWebSocketReconnect: handleWebSocketReconnect,
     sessionStore,
+    onBranchCreated,
+    onForkFailed,
+    onCompleteWithoutBranch,
   });
 
   // Session lock (daemon-holds-the-roster) state for the active session.
@@ -424,6 +625,15 @@ function ChatInterface({
           showRawParameters={showRawParameters}
           showThinking={showThinking}
           selectedProject={selectedProject}
+          canEditPrompt={provider === 'claude' && !isProcessing}
+          editBlockedUuid={editBlockedUuid}
+          onEditPrompt={(m) =>
+            // The rendered uuid is a part id (`<uuid>_text_<n>` for user text
+            // parts); the server resolves the resume point by BARE transcript
+            // uuid, so strip the part suffix before sending.
+            m.uuid && startEditSentPrompt(baseMessageUuid(m.uuid), typeof m.content === 'string' ? m.content : '')
+          }
+          renderBranchSwitcher={renderBranchSwitcher}
         />
 
         <div className="relative flex-shrink-0">
@@ -465,6 +675,8 @@ function ChatInterface({
           queuedDraft={queuedDraft}
           onEditQueuedDraft={editQueuedDraft}
           onDeleteQueuedDraft={deleteQueuedDraft}
+          editingSentPrompt={editingSentPrompt}
+          onCancelEditSentPrompt={cancelEditSentPrompt}
           attachedImages={attachedImages}
           onRemoveImage={(index) =>
             setAttachedImages((previous) =>

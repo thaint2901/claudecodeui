@@ -118,6 +118,15 @@ export function useChatSessionState({
   const [loadAllJustFinished, setLoadAllJustFinished] = useState(false);
   const [showLoadAllOverlay, setShowLoadAllOverlay] = useState(false);
   const [viewHiddenCount, setViewHiddenCount] = useState(0);
+  /**
+   * Uuids to optimistically hide while an edit-and-fork run is in flight.
+   *
+   * Unlike `viewHiddenCount` (a tail-length count reset whenever store
+   * messages change, see below), this is an explicit id set: it survives the
+   * new prompt/response being appended to the store mid-run and keeps hiding
+   * only the pre-fork tail until `clearForkView` (or a fork failure) clears it.
+   */
+  const [forkHiddenIds, setForkHiddenIds] = useState<Set<string> | null>(null);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const wasNearTopRef = useRef(false);
@@ -183,6 +192,7 @@ export function useChatSessionState({
     setLoadAllJustFinished(false);
     setShowLoadAllOverlay(false);
     setViewHiddenCount(0);
+    setForkHiddenIds(null);
     setSearchTarget(null);
     wasNearTopRef.current = false;
     searchScrollActiveRef.current = false;
@@ -272,9 +282,13 @@ export function useChatSessionState({
     if (pendingUserMessage && all.length === 0) {
       return [pendingUserMessage];
     }
-    if (viewHiddenCount > 0 && viewHiddenCount < all.length) return all.slice(0, -viewHiddenCount);
-    return all;
-  }, [storeMessages, viewHiddenCount, pendingUserMessage]);
+    let visible = all;
+    if (forkHiddenIds && forkHiddenIds.size > 0) {
+      visible = visible.filter((m) => !m.uuid || !forkHiddenIds.has(m.uuid));
+    }
+    if (viewHiddenCount > 0 && viewHiddenCount < visible.length) return visible.slice(0, -viewHiddenCount);
+    return visible;
+  }, [storeMessages, viewHiddenCount, pendingUserMessage, forkHiddenIds]);
 
   /* ---------------------------------------------------------------- */
   /*  addMessage / clearMessages / rewindMessages                     */
@@ -299,6 +313,19 @@ export function useChatSessionState({
   }, [activeSessionId, sessionStore]);
 
   const rewindMessages = useCallback((count: number) => setViewHiddenCount(count), []);
+
+  /** Optimistically hides the edited prompt and everything after it while the fork runs. */
+  const beginForkView = useCallback((uuid: string) => {
+    const idx = chatMessages.findIndex((m) => m.uuid === uuid);
+    if (idx < 0) return;
+    setForkHiddenIds(new Set(
+      chatMessages.slice(idx).map((m) => m.uuid).filter((u): u is string => Boolean(u)),
+    ));
+  }, [chatMessages]);
+
+  const clearForkView = useCallback(() => setForkHiddenIds(null), []);
+
+  const isForkViewActive = forkHiddenIds !== null;
 
   const scrollToBottom = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -528,6 +555,7 @@ export function useChatSessionState({
     setLoadAllJustFinished(false);
     setShowLoadAllOverlay(false);
     setViewHiddenCount(0);
+    setForkHiddenIds(null);
     wasNearTopRef.current = false;
     if (loadAllOverlayTimerRef.current) clearTimeout(loadAllOverlayTimerRef.current);
     if (loadAllFinishedTimerRef.current) clearTimeout(loadAllFinishedTimerRef.current);
@@ -823,6 +851,9 @@ export function useChatSessionState({
     addMessage,
     clearMessages,
     rewindMessages,
+    beginForkView,
+    clearForkView,
+    isForkViewActive,
     sessionActivity,
     isProcessing,
     canAbortSession,

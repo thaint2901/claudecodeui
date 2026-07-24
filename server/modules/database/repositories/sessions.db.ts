@@ -12,10 +12,14 @@ type SessionRow = {
   isArchived: number;
   created_at: string;
   updated_at: string;
+  fork_root_session_id: string | null;
+  forked_from_session_id: string | null;
+  forked_at_message_uuid: string | null;
+  active_leaf: number;
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, isArchived, created_at, updated_at, fork_root_session_id, forked_from_session_id, forked_at_message_uuid, active_leaf';
 
 const SQLITE_UTC_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
@@ -367,6 +371,7 @@ export const sessionsDb = {
          FROM sessions
          WHERE project_path = ?
            AND isArchived = 0
+           AND active_leaf = 1
          ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC
          LIMIT ? OFFSET ?`
       )
@@ -383,7 +388,8 @@ export const sessionsDb = {
         `SELECT COUNT(*) AS count
          FROM sessions
          WHERE project_path = ?
-           AND isArchived = 0`
+           AND isArchived = 0
+           AND active_leaf = 1`
       )
       .get(normalizedProjectPath) as { count: number } | undefined;
 
@@ -425,5 +431,121 @@ export const sessionsDb = {
   deleteSessionById(sessionId: string): boolean {
     const db = getConnection();
     return db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId).changes > 0;
+  },
+
+  /**
+   * Records one conversation branch created by the edit-prompt fork flow.
+   * The fork's provider-native id doubles as its app session_id (same
+   * convention as disk-discovered sessions), so the filesystem watcher's
+   * later createSession() call updates this row instead of duplicating it.
+   * Runs in a transaction so the cluster never has 0 or 2 active leaves.
+   */
+  createForkedSession(args: {
+    providerSessionId: string;
+    parentSessionId: string;
+    /** Shared fork anchor (assistant uuid); null for first-prompt forks. */
+    forkedAtMessageUuid: string | null;
+    provider: string;
+    projectPath: string;
+    jsonlPath?: string | null;
+  }): string {
+    const db = getConnection();
+    const normalizedProjectPath = normalizeProjectPathForProvider(args.provider, args.projectPath);
+    projectsDb.createProjectPath(normalizedProjectPath);
+
+    const insertBranch = db.transaction(() => {
+      const parent = db
+        .prepare(`SELECT ${SESSION_ROW_COLUMNS} FROM sessions WHERE session_id = ? LIMIT 1`)
+        .get(args.parentSessionId) as SessionRow | undefined;
+      if (!parent) {
+        throw new Error(`Fork parent session "${args.parentSessionId}" not found`);
+      }
+
+      const rootId = parent.fork_root_session_id ?? parent.session_id;
+
+      // Whole cluster (including a root that predates its own fork column)
+      // goes inactive; the new branch becomes the single active leaf.
+      db.prepare(
+        `UPDATE sessions SET active_leaf = 0, fork_root_session_id = ?
+         WHERE session_id = ? OR fork_root_session_id = ?`
+      ).run(rootId, rootId, rootId);
+
+      db.prepare(
+        `INSERT INTO sessions (
+           session_id, provider, provider_session_id, custom_name, project_path,
+           jsonl_path, isArchived, created_at, updated_at,
+           fork_root_session_id, forked_from_session_id, forked_at_message_uuid, active_leaf
+         ) VALUES (?, ?, ?, NULL, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, 1)`
+      ).run(
+        args.providerSessionId, args.provider, args.providerSessionId,
+        normalizedProjectPath, args.jsonlPath ?? null,
+        rootId, args.parentSessionId, args.forkedAtMessageUuid,
+      );
+
+      return args.providerSessionId;
+    });
+
+    return insertBranch();
+  },
+
+  /** Makes one branch the cluster's visible leaf (two-step, one transaction). */
+  activateBranch(sessionId: string): SessionRow | null {
+    const db = getConnection();
+    const activate = db.transaction(() => {
+      const row = db
+        .prepare(`SELECT ${SESSION_ROW_COLUMNS} FROM sessions WHERE session_id = ? LIMIT 1`)
+        .get(sessionId) as SessionRow | undefined;
+      if (!row || !row.fork_root_session_id) {
+        return null;
+      }
+      db.prepare('UPDATE sessions SET active_leaf = 0 WHERE fork_root_session_id = ?')
+        .run(row.fork_root_session_id);
+      db.prepare('UPDATE sessions SET active_leaf = 1, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?')
+        .run(sessionId);
+      return db
+        .prepare(`SELECT ${SESSION_ROW_COLUMNS} FROM sessions WHERE session_id = ? LIMIT 1`)
+        .get(sessionId) as SessionRow | undefined;
+    });
+    return normalizeSessionRow(activate() ?? null) ?? null;
+  },
+
+  /**
+   * Cluster sizes (branch count per fork root) for every forked cluster in a
+   * project, in one grouped query — avoids one getClusterBranches() call per
+   * row when mapping a project's full session list.
+   */
+  getForkClusterSizesByProjectPath(projectPath: string): Map<string, number> {
+    const db = getConnection();
+    const normalizedProjectPath = normalizeProjectPath(projectPath);
+    const rows = db
+      .prepare(
+        `SELECT fork_root_session_id, COUNT(*) AS c
+         FROM sessions
+         WHERE project_path = ?
+           AND fork_root_session_id IS NOT NULL
+         GROUP BY fork_root_session_id`
+      )
+      .all(normalizedProjectPath) as Array<{ fork_root_session_id: string; c: number }>;
+
+    return new Map(rows.map((row) => [row.fork_root_session_id, row.c]));
+  },
+
+  /** All branches of a session's fork cluster; [] when never forked. */
+  getClusterBranches(sessionId: string): SessionRow[] {
+    const db = getConnection();
+    const row = db
+      .prepare('SELECT fork_root_session_id FROM sessions WHERE session_id = ? LIMIT 1')
+      .get(sessionId) as { fork_root_session_id: string | null } | undefined;
+    if (!row?.fork_root_session_id) {
+      return [];
+    }
+    const rows = db
+      .prepare(
+        `SELECT ${SESSION_ROW_COLUMNS} FROM sessions
+         WHERE fork_root_session_id = ?
+         ORDER BY datetime(created_at) ASC, session_id ASC`
+      )
+      .all(row.fork_root_session_id) as SessionRow[];
+    return normalizeSessionRows(rows);
   },
 };

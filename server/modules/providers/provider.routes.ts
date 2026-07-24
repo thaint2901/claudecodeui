@@ -1,5 +1,8 @@
+import { existsSync } from 'node:fs';
+
 import express, { type Request, type Response } from 'express';
 
+import { sessionsDb } from '@/modules/database/index.js';
 import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
 import { providerCapabilitiesService } from '@/modules/providers/services/provider-capabilities.service.js';
 import { providerMcpService } from '@/modules/providers/services/mcp.service.js';
@@ -7,6 +10,7 @@ import { providerModelsService } from '@/modules/providers/services/provider-mod
 import { providerSkillsService } from '@/modules/providers/services/skills.service.js';
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { broadcastCanonicalSessionUpsert } from '@/modules/websocket/index.js';
 import type {
   LLMProvider,
   McpScope,
@@ -625,6 +629,62 @@ router.get(
       offset,
     });
     res.json(createApiSuccessResponse(result));
+  }),
+);
+
+router.get(
+  '/sessions/:sessionId/branches',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    const branches = sessionsDb
+      .getClusterBranches(sessionId)
+      .filter((row) => !row.jsonl_path || existsSync(row.jsonl_path))
+      .map((row) => ({
+        sessionId: row.session_id,
+        forkedFromSessionId: row.forked_from_session_id,
+        forkedAtMessageUuid: row.forked_at_message_uuid,
+        createdAt: row.created_at,
+        activeLeaf: row.active_leaf === 1,
+      }));
+    res.json(createApiSuccessResponse({ branches }));
+  }),
+);
+
+router.post(
+  '/sessions/:sessionId/activate-branch',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    const existing = sessionsDb.getSessionById(sessionId);
+    if (!existing) {
+      throw new AppError(`Session "${sessionId}" was not found.`, {
+        code: 'SESSION_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+    const session = sessionsDb.activateBranch(sessionId);
+    if (!session) {
+      throw new AppError(`Session "${sessionId}" is not part of a fork cluster.`, {
+        code: 'NOT_A_BRANCH',
+        statusCode: 409,
+      });
+    }
+
+    // Every row in the cluster changed which leaf is active — broadcast each
+    // so connected clients drop the just-deactivated leaf and show the newly
+    // activated one without waiting for a reload.
+    await Promise.all(
+      sessionsDb.getClusterBranches(sessionId).map((row) =>
+        broadcastCanonicalSessionUpsert(row.session_id).catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error('[ProviderRoutes] Failed to broadcast branch activation', {
+            sessionId: row.session_id,
+            error: message,
+          });
+        }),
+      ),
+    );
+
+    res.json(createApiSuccessResponse({ session }));
   }),
 );
 

@@ -112,6 +112,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     isArchived BOOLEAN DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    -- Conversation-fork graph (edit-prompt feature). NULL/1 for never-forked
+    -- sessions. See docs/superpowers/specs/2026-07-23-edit-prompt-fork-design.md
+    fork_root_session_id TEXT,
+    forked_from_session_id TEXT,
+    forked_at_message_uuid TEXT,
+    active_leaf BOOLEAN DEFAULT 1,
     PRIMARY KEY (session_id),
     FOREIGN KEY (project_path) REFERENCES projects(project_path)
     ON DELETE SET NULL

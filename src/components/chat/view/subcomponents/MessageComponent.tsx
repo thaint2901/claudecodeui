@@ -1,5 +1,7 @@
 import { memo, useMemo, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Pencil } from 'lucide-react';
 
 import SessionProviderLogo from '../../../llm-logo-provider/SessionProviderLogo';
 import type {
@@ -35,6 +37,11 @@ type MessageComponentProps = {
   showThinking?: boolean;
   selectedProject?: Project | null;
   provider: Provider | string;
+  /** Whether the active provider/session supports edit-and-fork (Claude only, not while streaming). */
+  canEditPrompt?: boolean;
+  onEditPrompt?: (message: ChatMessage) => void;
+  /** Renders the `< n/total >` branch switcher under this message, or null. */
+  renderBranchSwitcher?: (message: ChatMessage) => ReactNode;
 };
 
 type InteractiveOption = {
@@ -45,7 +52,7 @@ type InteractiveOption = {
 
 const COPY_HIDDEN_TOOL_NAMES = new Set(['Bash', 'Edit', 'Write', 'ApplyPatch']);
 
-const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider }: MessageComponentProps) => {
+const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider, canEditPrompt, onEditPrompt, renderBranchSwitcher }: MessageComponentProps) => {
   const { t } = useTranslation('chat');
   const isGrouped = prevMessage && prevMessage.type === message.type &&
     ((prevMessage.type === 'assistant') ||
@@ -100,6 +107,17 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                   {message.content}
                 </div>
                 <div className="mt-1 flex items-center justify-end gap-1 text-xs text-blue-100">
+                  {canEditPrompt && message.uuid && onEditPrompt && (
+                    <button
+                      type="button"
+                      onClick={() => onEditPrompt(message)}
+                      className="opacity-0 transition-opacity focus:opacity-100 group-hover:opacity-100"
+                      title={t('branch.editTitle')}
+                      aria-label={t('branch.editAria')}
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                  )}
                   {shouldShowUserCopyControl && (
                     <MessageCopyControl content={userCopyContent} messageType="user" />
                   )}
@@ -397,6 +415,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                 {!isGrouped && <span>{formattedTime}</span>}
               </div>
             )}
+            {/* Fork anchors are assistant uuids (the shared resume point copied
+                into every sibling transcript), so the switcher hangs here. */}
+            {renderBranchSwitcher?.(message)}
           </div>
         </div>
       )}
