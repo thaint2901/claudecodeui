@@ -220,6 +220,11 @@
     "editTitle": "Edit & fork from here",
     "editAria": "Edit this prompt and fork the conversation",
     "previous": "Previous branch",
-    "next": "Next branch"
+    "next": "Next branch",
+    "editLabel": "Edit",
+    "groupAria": "Conversation versions",
+    "counter": "Version {{current}}/{{total}}",
+    "announced": "Showing version {{current}} of {{total}}",
+    "forkedBadge": "Forked conversation, {{count}} versions"
   }
 }
