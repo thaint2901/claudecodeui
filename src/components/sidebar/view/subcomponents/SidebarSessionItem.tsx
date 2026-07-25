@@ -1,13 +1,16 @@
-import { useEffect, useRef } from 'react';
-import { Check, Edit2, GitBranch, Loader2, Trash2, X } from 'lucide-react';
+import { useCallback, useEffect, useRef } from 'react';
+import { Check, Edit2, Loader2, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Badge, Tooltip, buttonVariants } from '../../../../shared/view/ui';
 import { cn } from '../../../../lib/utils';
 import type { Project, ProjectSession, LLMProvider } from '../../../../types/app';
 import type { SessionWithProvider } from '../../types/types';
-import { createSessionViewModel } from '../../utils/utils';
+import { createSessionViewModel, formatCompactSessionAge } from '../../utils/utils';
+import { api } from '../../../../utils/api';
 import SessionProviderLogo from '../../../llm-logo-provider/SessionProviderLogo';
+
+import SidebarSessionBranches from './SidebarSessionBranches';
 
 type SidebarSessionItemProps = {
   project: Project;
@@ -31,34 +34,6 @@ type SidebarSessionItemProps = {
     provider: LLMProvider,
   ) => void;
   t: TFunction;
-};
-
-/**
- * Compact relative time for sidebar rows:
- * <1m, Xm, Xhr, Xd.
- */
-const formatCompactSessionAge = (dateString: string, currentTime: Date): string => {
-  const date = new Date(dateString);
-  if (Number.isNaN(date.getTime())) {
-    return '';
-  }
-
-  const diffInMinutes = Math.floor(Math.max(0, currentTime.getTime() - date.getTime()) / (1000 * 60));
-  if (diffInMinutes < 1) {
-    return '<1m';
-  }
-
-  if (diffInMinutes < 60) {
-    return `${diffInMinutes}m`;
-  }
-
-  const diffInHours = Math.floor(diffInMinutes / 60);
-  if (diffInHours < 24) {
-    return `${diffInHours}hr`;
-  }
-
-  const diffInDays = Math.floor(diffInHours / 24);
-  return `${diffInDays}d`;
 };
 
 export default function SidebarSessionItem({
@@ -121,8 +96,35 @@ export default function SidebarSessionItem({
     onDeleteSession(project.projectId, session.id, sessionView.sessionName, session.__provider);
   };
 
+  // Picking a sibling branch has to make it the cluster's active leaf before
+  // navigating: the sidebar lists only the active leaf, so routing first would
+  // land on a session the list is about to drop.
+  const selectBranch = useCallback(
+    (branchId: string) => {
+      if (branchId === session.id) return;
+      void (async () => {
+        try {
+          const response = await api.activateBranch(branchId);
+          if (!response.ok) {
+            console.error('[SidebarSessionItem] Branch activation failed', {
+              branchId,
+              status: response.status,
+            });
+            return;
+          }
+        } catch (error) {
+          console.error('[SidebarSessionItem] Branch activation errored', error);
+          return;
+        }
+        onSessionSelect({ ...session, id: branchId }, project.projectId);
+      })();
+    },
+    [session, project.projectId, onSessionSelect],
+  );
+
   return (
-    <div className="group relative">
+    <div className="group">
+      <div className="relative">
       {(showAttentionIndicator || showRecentIndicator) && (
         <div className="absolute left-0 top-1/2 -translate-x-1 -translate-y-1/2 transform">
           <Tooltip
@@ -189,12 +191,10 @@ export default function SidebarSessionItem({
                     {sessionView.messageCount}
                   </Badge>
                 )}
-                {sessionView.branchCount > 1 && (
-                  <Badge variant="outline" className="gap-0.5 px-1 py-0 text-xs" title="Forked conversation">
-                    <GitBranch className="h-2.5 w-2.5" />
-                    {sessionView.branchCount}
-                  </Badge>
-                )}
+                {/* The fork count used to sit here as a badge. The disclosure
+                    rendered below the row now carries the same icon and count
+                    plus a readable label, and unlike the badge it can be
+                    operated — two copies of the same fact was noise. */}
               </div>
             </div>
 
@@ -272,12 +272,10 @@ export default function SidebarSessionItem({
               </div>
               <div className="mt-0.5 flex items-center gap-1">
                 {sessionView.messageCount > 0 && <Badge variant="secondary" className="px-1 py-0 text-xs">{sessionView.messageCount}</Badge>}
-                {sessionView.branchCount > 1 && (
-                  <Badge variant="outline" className="gap-0.5 px-1 py-0 text-xs" title="Forked conversation">
-                    <GitBranch className="h-2.5 w-2.5" />
-                    {sessionView.branchCount}
-                  </Badge>
-                )}
+                {/* The fork count used to sit here as a badge. The disclosure
+                    rendered below the row now carries the same icon and count
+                    plus a readable label, and unlike the badge it can be
+                    operated — two copies of the same fact was noise. */}
               </div>
             </div>
           </div>
@@ -357,6 +355,15 @@ export default function SidebarSessionItem({
             )}
           </div>
       </div>
+      </div>
+
+      <SidebarSessionBranches
+        sessionId={session.id}
+        branchCount={sessionView.branchCount}
+        onSelectBranch={selectBranch}
+        currentTime={currentTime}
+        t={t}
+      />
     </div>
   );
 }

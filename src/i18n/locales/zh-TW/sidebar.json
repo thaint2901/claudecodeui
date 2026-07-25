@@ -32,7 +32,13 @@
     "loadingSessions": "載入工作階段中...",
     "unnamed": "未命名",
     "loading": "載入中...",
-    "showMore": "顯示更多工作階段"
+    "showMore": "顯示更多工作階段",
+    "branches": {
+      "toggle": "{{count}} versions",
+      "versionLabel": "Version {{index}}",
+      "current": "Current",
+      "loadFailed": "Could not load versions"
+    }
   },
   "tooltips": {
     "viewEnvironments": "查看環境",
@@ -49,7 +55,8 @@
     "cancel": "取消",
     "clearSearch": "清除搜尋",
     "openCommandPalette": "開啟指令面板",
-    "attentionRequiredIndicator": "工作階段需要處理"
+    "attentionRequiredIndicator": "工作階段需要處理",
+    "forkedConversation": "Forked conversation — {{count}} versions"
   },
   "navigation": {
     "chat": "聊天",

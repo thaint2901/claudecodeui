@@ -677,24 +677,40 @@
       touch-action: pan-y;
     }
     
-    /* Fix hover states on mobile */
-    .group:active .group-hover\:opacity-100,
-    .group .group-hover\:opacity-100 {
-      opacity: 1 !important;
-    }
-    
-    @media (hover: none) and (pointer: coarse) {
-      .group-hover\:opacity-100 {
-        opacity: 1 !important;
-      }
-      
-      .hover\:bg-gray-50:hover,
-      .hover\:bg-gray-100:hover,
-      .hover\:bg-red-200:hover,
-      .dark\:hover\:bg-gray-700:hover,
-      .dark\:hover\:bg-red-900\/50:hover {
-        background-color: inherit;
-      }
+    /* Hover-reveal fallbacks used to live here, scoped to max-width: 768px.
+       That left every touch device WIDER than a phone — iPad in landscape,
+       Surface, touch laptops — with permanently invisible controls. They now
+       live in the pointer-capability block below, where they belong. */
+  }
+
+  /* A hover-revealed control that is still transparent must not be clickable.
+     `opacity: 0` does not remove an element from hit-testing, so the edit
+     affordance on a chat bubble could be tapped while invisible: the composer
+     silently filled with the old prompt and the draft then survived a reload.
+     Focus-within is included so keyboard users reveal the same controls. */
+  .group .group-hover\:opacity-100 {
+    pointer-events: none;
+  }
+
+  .group:hover .group-hover\:opacity-100,
+  .group:focus-within .group-hover\:opacity-100,
+  .group .group-hover\:opacity-100:focus-visible {
+    pointer-events: auto;
+  }
+
+  /* WCAG 2.5.8 target size. 24px is the AA floor for any pointer; a finger
+     needs 44px, so the larger value is keyed on pointer capability rather
+     than viewport width. The icon inside stays whatever size it wants — this
+     grows the hit area, not the glyph. */
+  .tap-target {
+    min-height: 24px;
+    min-width: 24px;
+  }
+
+  @media (pointer: coarse) {
+    .tap-target {
+      min-height: 44px;
+      min-width: 44px;
     }
   }
   
@@ -703,7 +719,22 @@
     .touch\:opacity-100 {
       opacity: 1 !important;
     }
-    
+
+    /* No hover means no way to reveal a hover-gated control, so show them all
+       and make them tappable. Keyed on pointer capability, not viewport width:
+       a touch laptop at 1440px needs this exactly as much as a phone does. */
+    .group:active .group-hover\:opacity-100,
+    .group .group-hover\:opacity-100 {
+      opacity: 1 !important;
+      pointer-events: auto;
+    }
+
+    .hover\:bg-red-200:hover,
+    .dark\:hover\:bg-gray-700:hover,
+    .dark\:hover\:bg-red-900\/50:hover {
+      background-color: inherit;
+    }
+
     /* Completely disable hover states on touch devices */
     * {
       -webkit-tap-highlight-color: transparent !important;

@@ -1,4 +1,8 @@
-import { memo, useMemo, useRef } from 'react';
+/* eslint react/jsx-no-bind: ["error", { "ignoreDOMComponents": true, "allowArrowFunctions": false, "allowFunctions": false, "allowBind": false }] --
+ * This is a memoized message row; inline props here defeat the memo boundary
+ * of the tool/markdown children it renders. See CLAUDE.md > Gotchas.
+ */
+import { memo, useCallback, useMemo, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Pencil } from 'lucide-react';
@@ -13,7 +17,7 @@ import type {
 import { formatUsageLimitText } from '../../utils/chatFormatting';
 import type { Project } from '../../../../types/app';
 import { ToolRenderer, shouldHideToolResult } from '../../tools';
-import { Reasoning, ReasoningTrigger, ReasoningContent } from '../../../../shared/view/ui';
+import { Button, Reasoning, ReasoningTrigger, ReasoningContent, Tooltip } from '../../../../shared/view/ui';
 
 import ChatMessageImages from './ChatMessageImages';
 import { Markdown } from './Markdown';
@@ -78,6 +82,12 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
     !message.isThinking;
 
 
+  // Bound to this row's message so the JSX stays free of inline arrows —
+  // `react/jsx-no-bind` is an error in this file for exactly that reason.
+  const handleEditPromptClick = useCallback(() => {
+    onEditPrompt?.(message);
+  }, [onEditPrompt, message]);
+
   const formattedTime = useMemo(() => new Date(message.timestamp).toLocaleTimeString(), [message.timestamp]);
   const shouldHideThinkingMessage = Boolean(message.isThinking && !showThinking);
 
@@ -108,15 +118,27 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                 </div>
                 <div className="mt-1 flex items-center justify-end gap-1 text-xs text-blue-100">
                   {canEditPrompt && message.uuid && onEditPrompt && (
-                    <button
-                      type="button"
-                      onClick={() => onEditPrompt(message)}
-                      className="opacity-0 transition-opacity focus:opacity-100 group-hover:opacity-100"
-                      title={t('branch.editTitle')}
-                      aria-label={t('branch.editAria')}
-                    >
-                      <Pencil className="h-3 w-3" />
-                    </button>
+                    <>
+                      {/* Always rendered, never hover-gated. Forking a
+                          conversation is a feature people have to *discover*,
+                          and a hover-only icon is invisible to touch users and
+                          weak as a signifier for everyone else. The word
+                          "Edit" also separates it from the copy control beside
+                          it, which is a far less consequential action. */}
+                      <Tooltip content={t('branch.editTitle')} position="top">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          onClick={handleEditPromptClick}
+                          aria-label={t('branch.editAria')}
+                          className="tap-target h-6 gap-1 rounded px-1.5 py-0 text-[11px] font-medium text-blue-50 hover:bg-white/20 hover:text-white focus-visible:ring-white/80 [&_svg]:size-3"
+                        >
+                          <Pencil aria-hidden />
+                          {t('branch.editLabel')}
+                        </Button>
+                      </Tooltip>
+                      <span aria-hidden className="mx-0.5 h-3 w-px shrink-0 bg-blue-200/40" />
+                    </>
                   )}
                   {shouldShowUserCopyControl && (
                     <MessageCopyControl content={userCopyContent} messageType="user" />

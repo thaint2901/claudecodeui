@@ -1,3 +1,8 @@
+/* eslint react/jsx-no-bind: ["error", { "ignoreDOMComponents": true, "allowArrowFunctions": false, "allowFunctions": false, "allowBind": false }] --
+ * Every prop this pane hands to a message row must keep its identity, or the
+ * rows' `React.memo` stops holding and each render re-pays the markdown +
+ * syntax-highlight cost for the whole visible transcript. See CLAUDE.md.
+ */
 import { useTranslation } from 'react-i18next';
 import { memo, useCallback, useMemo } from 'react';
 import type { Dispatch, ReactNode, RefObject, SetStateAction } from 'react';

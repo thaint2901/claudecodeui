@@ -32,7 +32,13 @@
     "loadingSessions": "세션 로딩 중...",
     "unnamed": "이름 없음",
     "loading": "로딩 중...",
-    "showMore": "더 많은 세션 보기"
+    "showMore": "더 많은 세션 보기",
+    "branches": {
+      "toggle": "{{count}} versions",
+      "versionLabel": "Version {{index}}",
+      "current": "Current",
+      "loadFailed": "Could not load versions"
+    }
   },
   "tooltips": {
     "viewEnvironments": "환경 보기",
@@ -49,7 +55,8 @@
     "save": "저장",
     "cancel": "취소",
     "openCommandPalette": "명령 팔레트 열기",
-    "attentionRequiredIndicator": "세션에 주의가 필요합니다"
+    "attentionRequiredIndicator": "세션에 주의가 필요합니다",
+    "forkedConversation": "Forked conversation — {{count}} versions"
   },
   "navigation": {
     "chat": "채팅",
