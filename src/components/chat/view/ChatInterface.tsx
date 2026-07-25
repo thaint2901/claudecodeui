@@ -181,12 +181,21 @@ function ChatInterface({
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
 
+  // A failed lookup must not be rendered as "this session has no branches".
+  // Both states used to collapse to `[]`, so one transient 500 while viewing a
+  // branch removed the switcher — the only way back to the sibling turns —
+  // and left the conversation looking like an ordinary un-forked one. On
+  // failure the last known list is kept instead; the session-change effect
+  // below is what clears it, so a new session never inherits stale branches.
   const fetchBranches = useCallback(async (sessionId: string, isCurrent: () => boolean) => {
     try {
       const response = await api.sessionBranches(sessionId);
       if (!isCurrent()) return;
       if (!response.ok) {
-        setBranches([]);
+        console.error('[ChatInterface] Session branches lookup failed', {
+          sessionId,
+          status: response.status,
+        });
         return;
       }
       const json = await response.json();
@@ -194,13 +203,12 @@ function ChatInterface({
     } catch (error) {
       if (!isCurrent()) return;
       console.error('[ChatInterface] Failed to fetch session branches', error);
-      setBranches([]);
     }
   }, []);
 
   useEffect(() => {
+    setBranches([]);
     if (!currentSessionId) {
-      setBranches([]);
       return;
     }
     let cancelled = false;
