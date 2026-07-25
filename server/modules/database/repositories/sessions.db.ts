@@ -118,8 +118,21 @@ function getForkRootId(db: DatabaseHandle, sessionId: string): string | null {
  * most recently touched surviving branch is promoted instead. Call inside the
  * same transaction as the delete/archive so the cluster is never observable
  * without a leaf.
+ *
+ * `preferSessionId` names a row that should win the promotion over plain
+ * recency. Restoring an archived branch passes it: the user just asked to see
+ * that specific conversation, and handing the leaf to whichever sibling
+ * happens to be newest makes their click look like it did nothing — the row
+ * leaves the archived list and still never appears in the sidebar. It only
+ * applies when the cluster has no live leaf at all; a healthy cluster keeps
+ * the leaf it already has, so restoring a branch never yanks the view away
+ * from the conversation someone is reading.
  */
-function promoteClusterLeafIfOrphaned(db: DatabaseHandle, forkRootId: string | null): void {
+function promoteClusterLeafIfOrphaned(
+  db: DatabaseHandle,
+  forkRootId: string | null,
+  preferSessionId?: string
+): void {
   if (!forkRootId) return;
 
   const stillHasLeaf = db
@@ -131,14 +144,26 @@ function promoteClusterLeafIfOrphaned(db: DatabaseHandle, forkRootId: string | n
     .get(forkRootId);
   if (stillHasLeaf) return;
 
-  const replacement = db
-    .prepare(
-      `SELECT session_id FROM sessions
-       WHERE fork_root_session_id = ? AND isArchived = 0
-       ORDER BY ${SESSION_RECENCY_ORDER}
-       LIMIT 1`
-    )
-    .get(forkRootId) as { session_id: string } | undefined;
+  const preferred = preferSessionId
+    ? (db
+        .prepare(
+          `SELECT session_id FROM sessions
+           WHERE session_id = ? AND fork_root_session_id = ? AND isArchived = 0
+           LIMIT 1`
+        )
+        .get(preferSessionId, forkRootId) as { session_id: string } | undefined)
+    : undefined;
+
+  const replacement =
+    preferred ??
+    (db
+      .prepare(
+        `SELECT session_id FROM sessions
+         WHERE fork_root_session_id = ? AND isArchived = 0
+         ORDER BY ${SESSION_RECENCY_ORDER}
+         LIMIT 1`
+      )
+      .get(forkRootId) as { session_id: string } | undefined);
   if (!replacement) return;
 
   db.prepare('UPDATE sessions SET active_leaf = 1 WHERE session_id = ?').run(replacement.session_id);
@@ -510,14 +535,21 @@ export const sessionsDb = {
     const db = getConnection();
     const forkRootId = getForkRootId(db, sessionId);
     const run = db.transaction(() => {
+      // Archiving also clears the row's own leaf flag. An archived row is
+      // hidden either way, so a stale `active_leaf = 1` on it is invisible
+      // until the row comes back — and then the cluster has two live leaves
+      // and fans out into two sidebar rows, which is exactly the one-row-per
+      // -cluster contract this feature rests on. Measured before this line
+      // existed: archive C then restore C listed both B and C.
       db.prepare(
         `UPDATE sessions
-         SET isArchived = ?
+         SET isArchived = ?, active_leaf = CASE WHEN ? THEN 0 ELSE active_leaf END
          WHERE session_id = ?`
-      ).run(isArchived ? 1 : 0, sessionId);
-      // Archiving the leaf orphans its cluster; un-archiving into a cluster
-      // that has since lost its leaf should adopt this row back as one.
-      promoteClusterLeafIfOrphaned(db, forkRootId);
+      ).run(isArchived ? 1 : 0, isArchived ? 1 : 0, sessionId);
+      // Archiving the leaf orphans its cluster, so some sibling has to take
+      // over. Restoring is the opposite: if the cluster has no leaf, the row
+      // the user just restored is the one they asked to see.
+      promoteClusterLeafIfOrphaned(db, forkRootId, isArchived ? undefined : sessionId);
     });
     run();
   },
