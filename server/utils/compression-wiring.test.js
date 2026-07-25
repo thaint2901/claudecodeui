@@ -72,21 +72,66 @@ test('the SSE exemption survives a real request through real middleware', async 
   assert.equal(json.headers.get('content-encoding'), 'gzip', 'ordinary JSON must stay compressed');
 });
 
-test('server/index.js mounts compression with the SSE filter', () => {
-  // Narrow to the mount line before asserting: matching against the whole file
-  // makes a failure dump 55k characters of source instead of the one line that
-  // is wrong.
-  const mountLines = readFileSync(SERVER_INDEX, 'utf8')
-    .split('\n')
-    .filter((line) => line.includes('app.use(compression'))
-    .join('\n')
-    .trim();
+/**
+ * Strips comments so a commented-out line cannot vouch for live code.
+ *
+ * The first version of the check below filtered raw lines containing
+ * `app.use(compression`, which meant this stayed green:
+ *   // app.use(compression({ filter: shouldCompress }));   <- disabled while debugging
+ *   app.use(compression());
+ * i.e. it passed through the exact regression it exists to catch. Quote state
+ * is tracked so a `//` inside a string (`'http://…'`) is not mistaken for a
+ * comment.
+ */
+function stripComments(source) {
+  let out = '';
+  let quote = null;
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      out += char;
+      if (char === '\\') { out += next ?? ''; i += 1; continue; }
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') { quote = char; out += char; continue; }
+    if (char === '/' && next === '/') {
+      while (i < source.length && source[i] !== '\n') i += 1;
+      out += '\n';
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      i += 2;
+      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i += 1;
+      i += 1;
+      continue;
+    }
+    out += char;
+  }
+  return out;
+}
 
-  assert.notEqual(mountLines, '', 'server/index.js no longer mounts compression at all');
+test('server/index.js never mounts compression unfiltered', () => {
+  const source = stripComments(readFileSync(SERVER_INDEX, 'utf8'));
+
+  // Asserting the ABSENCE of the broken shape rather than the presence of one
+  // exact correct shape: hoisting the middleware to a named binding
+  // (`const mw = compression({ filter: shouldCompress }); app.use(mw);`) is
+  // behaviour-preserving and must not fail this test, while `compression()`
+  // with no arguments must fail it however it is spelled.
+  const bareCall = /\bcompression\(\s*\)/.exec(source);
+  assert.equal(
+    bareCall,
+    null,
+    'compression() is invoked with no filter — unfiltered, it buffers every SSE stream until '
+      + 'it closes, freezing clone progress, session search and /api/agent?stream=true.',
+  );
+
+  assert.match(source, /\bcompression\(/, 'server/index.js no longer mounts compression at all');
   assert.match(
-    mountLines,
-    /compression\(\s*\{[^}]*filter:\s*shouldCompress[^}]*\}\s*\)/,
-    'compression() must be mounted with the shouldCompress filter — unfiltered, it buffers '
-      + `every SSE stream until it closes. Found: ${mountLines}`,
+    source,
+    /filter:\s*shouldCompress/,
+    'compression() must be given the shouldCompress filter.',
   );
 });
