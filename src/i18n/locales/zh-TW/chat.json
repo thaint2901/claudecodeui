@@ -261,6 +261,9 @@
     "groupAria": "Conversation versions",
     "counter": "Version {{current}}/{{total}}",
     "announced": "Showing version {{current}} of {{total}}",
-    "forkedBadge": "Forked conversation, {{count}} versions"
+    "forkedBadge": "Forked conversation, {{count}} versions",
+    "contextLabel": "Version {{current}} of {{total}}",
+    "contextAria": "Conversation version context",
+    "backToParent": "Back to previous version"
   }
 }
