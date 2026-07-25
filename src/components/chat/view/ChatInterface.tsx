@@ -10,14 +10,13 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowDownIcon, GitBranch as GitBranchIcon } from 'lucide-react';
+import { ArrowDownIcon } from 'lucide-react';
 
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
 import { useWebSocket } from '../../../contexts/WebSocketContext';
 import { useSessionLock } from '../../../contexts/SessionLockContext';
 import PermissionContext from '../../../contexts/PermissionContext';
 import { QuickSettingsPanel } from '../../quick-settings-panel';
-import { Alert, Button } from '../../../shared/view/ui';
 import type { ChatInterfaceProps, ChatMessage, Provider  } from '../types/types';
 import { useChatProviderState } from '../hooks/useChatProviderState';
 import { useChatSessionState } from '../hooks/useChatSessionState';
@@ -41,7 +40,6 @@ type SessionBranch = {
   forkedAtMessageUuid: string | null;
   createdAt: string;
   activeLeaf: boolean;
-  customName?: string | null;
 };
 
 function ChatInterface({
@@ -300,25 +298,6 @@ function ChatInterface({
       />
     );
   }, [anchorMessageIds, siblingsAt, currentSessionId, switchBranch]);
-
-  // Which branch of its cluster the viewed session is, so the banner below can
-  // say so out loud. Being on a branch is otherwise invisible state: the
-  // transcript reads like any other conversation and the only way back to the
-  // parent was the browser's Back button.
-  const branchContext = useMemo(() => {
-    if (branches.length < 2 || !currentSessionId) return null;
-    const index = branches.findIndex((b) => b.sessionId === currentSessionId);
-    if (index < 0) return null;
-    const parentSessionId = branches[index].forkedFromSessionId;
-    // The cluster root is a normal-looking conversation with nothing to go
-    // back to — leave it unadorned.
-    if (!parentSessionId) return null;
-    return { current: index + 1, total: branches.length, parentSessionId };
-  }, [branches, currentSessionId]);
-
-  const handleBackToParent = useCallback(() => {
-    if (branchContext) void switchBranch(branchContext.parentSessionId);
-  }, [branchContext, switchBranch]);
 
   const {
     input,
@@ -633,32 +612,6 @@ function ChatInterface({
   return (
     <PermissionContext.Provider value={permissionContextValue}>
       <div className="flex h-full min-h-0 flex-col">
-        {branchContext && (
-          <Alert
-            // Alert defaults to role="alert", an assertive live region. This
-            // banner is persistent context, not an event, and the branch
-            // switcher already owns a polite live region for the switch
-            // itself — leaving it assertive would interrupt the user and
-            // double-announce the same fact.
-            role="note"
-            aria-label={t('branch.contextAria')}
-            className="mx-auto mt-2 flex w-full max-w-[54.25rem] items-center gap-2 border-border/60 bg-muted/40 px-3 py-1.5"
-          >
-            <GitBranchIcon className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" aria-hidden />
-            <span className="text-xs text-foreground">
-              {t('branch.contextLabel', { current: branchContext.current, total: branchContext.total })}
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="ml-auto h-7 px-2 text-xs"
-              onClick={handleBackToParent}
-            >
-              {t('branch.backToParent')}
-            </Button>
-          </Alert>
-        )}
-
         <ChatMessagesPane
           scrollContainerRef={scrollContainerRef}
           onWheel={handleScroll}

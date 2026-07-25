@@ -32,13 +32,7 @@
     "loadingSessions": "加载会话中...",
     "unnamed": "未命名",
     "loading": "加载中...",
-    "showMore": "显示更多会话",
-    "branches": {
-      "toggle": "{{count}} versions",
-      "versionLabel": "Version {{index}}",
-      "current": "Current",
-      "loadFailed": "Could not load versions"
-    }
+    "showMore": "显示更多会话"
   },
   "tooltips": {
     "viewEnvironments": "查看环境",
@@ -56,8 +50,7 @@
     "cancel": "取消",
     "clearSearch": "清除搜索",
     "openCommandPalette": "打开命令面板",
-    "attentionRequiredIndicator": "会话需要处理",
-    "forkedConversation": "Forked conversation — {{count}} versions"
+    "attentionRequiredIndicator": "会话需要处理"
   },
   "navigation": {
     "chat": "聊天",

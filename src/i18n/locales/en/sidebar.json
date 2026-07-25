@@ -32,13 +32,7 @@
     "loadingSessions": "Loading sessions...",
     "unnamed": "Unnamed",
     "loading": "Loading...",
-    "showMore": "Show more sessions",
-    "branches": {
-      "toggle": "{{count}} versions",
-      "versionLabel": "Version {{index}}",
-      "current": "Current",
-      "loadFailed": "Could not load versions"
-    }
+    "showMore": "Show more sessions"
   },
   "tooltips": {
     "viewEnvironments": "View Environments",
@@ -56,8 +50,7 @@
     "cancel": "Cancel",
     "clearSearch": "Clear search",
     "openCommandPalette": "Open command palette",
-    "attentionRequiredIndicator": "Session needs attention",
-    "forkedConversation": "Forked conversation — {{count}} versions"
+    "attentionRequiredIndicator": "Session needs attention"
   },
   "navigation": {
     "chat": "Chat",

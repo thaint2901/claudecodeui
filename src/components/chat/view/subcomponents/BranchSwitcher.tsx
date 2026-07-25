@@ -43,9 +43,12 @@ export function BranchSwitcher({ current, total, prevSessionId, nextSessionId, o
 
   return (
     <div className="mt-1 flex items-center justify-end">
-      {/* A bare row of grey chevrons floating in the margin read as decoration.
-          Grouping them into a labelled pill makes it legible as one control
-          that changes which version of the conversation is on screen. */}
+      {/* Grouping the two chevrons into a pill keeps them legible as one
+          control rather than decoration in the margin. The position is left
+          deliberately bare of a counter: two competing numberings (this one
+          counts siblings at the fork point, anything cluster-wide counts the
+          whole tree) contradicted each other on screen, and the arrows alone
+          say what the control does. */}
       <div
         role="group"
         aria-label={t('branch.groupAria')}
@@ -62,14 +65,6 @@ export function BranchSwitcher({ current, total, prevSessionId, nextSessionId, o
           <ChevronLeft aria-hidden />
         </Button>
 
-        {/* Visible wording, not just "3/3": the number alone tells a reader
-            nothing about what is being counted. `text-foreground` also clears
-            the 4.5:1 body-text ratio that muted-foreground missed in light
-            mode (measured 4.43:1). */}
-        <span className="select-none whitespace-nowrap px-1 text-[11px] font-medium text-foreground">
-          {t('branch.counter', { current, total })}
-        </span>
-
         <Button
           type="button"
           variant="ghost"
@@ -84,7 +79,9 @@ export function BranchSwitcher({ current, total, prevSessionId, nextSessionId, o
 
       {/* Switching branches swaps the entire transcript underneath the reader.
           Without a live region a screen reader user gets no signal that
-          anything happened at all. */}
+          anything happened at all — and unlike sighted users, who can see the
+          messages change, they have nothing else to go on. The position is
+          spoken here precisely because it is no longer shown. */}
       <span role="status" aria-live="polite" className="sr-only">
         {t('branch.announced', { current, total })}
       </span>

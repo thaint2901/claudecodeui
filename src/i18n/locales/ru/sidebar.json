@@ -32,13 +32,7 @@
     "loadingSessions": "Загрузка сеансов...",
     "unnamed": "Без имени",
     "loading": "Загрузка...",
-    "showMore": "Показать больше сеансов",
-    "branches": {
-      "toggle": "{{count}} versions",
-      "versionLabel": "Version {{index}}",
-      "current": "Current",
-      "loadFailed": "Could not load versions"
-    }
+    "showMore": "Показать больше сеансов"
   },
   "tooltips": {
     "viewEnvironments": "Просмотр окружений",
@@ -56,8 +50,7 @@
     "cancel": "Отмена",
     "clearSearch": "Очистить поиск",
     "openCommandPalette": "Открыть палитру команд",
-    "attentionRequiredIndicator": "Сессия требует внимания",
-    "forkedConversation": "Forked conversation — {{count}} versions"
+    "attentionRequiredIndicator": "Сессия требует внимания"
   },
   "navigation": {
     "chat": "Чат",

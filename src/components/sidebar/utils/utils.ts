@@ -123,7 +123,6 @@ export const createSessionViewModel = (
     sessionName: getSessionName(session, t),
     sessionTime: getSessionTime(session),
     messageCount: Number(session.messageCount || 0),
-    branchCount: Number(session.branchCount || 0),
   };
 };
 
