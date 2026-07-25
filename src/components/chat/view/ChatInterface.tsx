@@ -67,8 +67,10 @@ function ChatInterface({
   const { t } = useTranslation('chat');
 
   const sessionStore = useSessionStore();
-  const streamTimerRef = useRef<number | null>(null);
-  const accumulatedStreamRef = useRef('');
+  // Keyed by session id: concurrent sessions can stream at the same time, so a
+  // single shared buffer/timer would cross-contaminate their accumulated text.
+  const streamTimerRef = useRef(new Map<string, number>());
+  const accumulatedStreamRef = useRef(new Map<string, string>());
   // When each session's `chat.subscribe` was last sent; idle acks older than
   // a later local request are discarded as stale.
   const statusCheckSentAtRef = useRef(new Map<string, number>());
@@ -77,12 +79,12 @@ function ChatInterface({
   // server replays only the events this client actually missed.
   const lastSeqRef = useRef(new Map<string, number>());
 
+  // Per-session entries are otherwise only ever cleared by that session's own
+  // stream_end/complete — this is just the full-teardown path for unmount.
   const resetStreamingState = useCallback(() => {
-    if (streamTimerRef.current) {
-      clearTimeout(streamTimerRef.current);
-      streamTimerRef.current = null;
-    }
-    accumulatedStreamRef.current = '';
+    streamTimerRef.current.forEach((timer) => clearTimeout(timer));
+    streamTimerRef.current.clear();
+    accumulatedStreamRef.current.clear();
   }, []);
 
   const {
@@ -104,6 +106,7 @@ function ChatInterface({
     cyclePermissionMode,
     providerModelCatalog,
     providerModelCacheCatalog,
+    isProviderAuthenticated,
     providerModelsLoading,
     providerModelsRefreshing,
     hardRefreshProviderModels,
@@ -156,7 +159,6 @@ function ChatInterface({
     newSessionTrigger,
     processingSessions,
     onSessionIdle,
-    resetStreamingState,
     statusCheckSentAtRef,
     lastSeqRef,
     sessionStore,
@@ -655,6 +657,7 @@ function ChatInterface({
           setOpenCodeModel={setOpenCodeModel}
           providerModelCatalog={providerModelCatalog}
           providerModelsLoading={providerModelsLoading}
+          isProviderAuthenticated={isProviderAuthenticated}
           tasksEnabled={tasksEnabled}
           isTaskMasterInstalled={isTaskMasterInstalled}
           onShowAllTasks={onShowAllTasks}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { authenticatedFetch } from '../../../utils/api';
+import { useProviderAuthStatus } from '../../provider-auth/hooks/useProviderAuthStatus';
 import type { PendingPermissionRequest, PermissionMode } from '../types/types';
 import type {
   ProjectSession,
@@ -124,6 +125,8 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   const [providerModelCatalog, setProviderModelCatalog] = useState<
     Partial<Record<LLMProvider, ProviderModelsDefinition>>
   >({});
+
+  const { providerAuthStatus, refreshProviderAuthStatuses } = useProviderAuthStatus();
   const [providerModelCacheCatalog, setProviderModelCacheCatalog] = useState<
     Partial<Record<LLMProvider, ProviderModelsCacheInfo>>
   >({});
@@ -253,6 +256,36 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    void refreshProviderAuthStatuses();
+  }, [refreshProviderAuthStatuses]);
+
+  const isProviderAuthenticated = useCallback((targetProvider: LLMProvider): boolean => {
+    const status = providerAuthStatus[targetProvider];
+    // Treat "still loading" as authenticated so the picker doesn't flash
+    // everything as unavailable on first paint.
+    return status.loading || status.authenticated;
+  }, [providerAuthStatus]);
+
+  // A session pins its own provider (synced below); only reassign the
+  // free-standing selection made before any session exists.
+  useEffect(() => {
+    if (selectedSession?.__provider) {
+      return;
+    }
+
+    const currentStatus = providerAuthStatus[provider];
+    if (currentStatus.loading || currentStatus.authenticated) {
+      return;
+    }
+
+    const nextProvider = PROVIDERS.find((p) => providerAuthStatus[p].authenticated);
+    if (nextProvider && nextProvider !== provider) {
+      setProvider(nextProvider);
+      localStorage.setItem('selected-provider', nextProvider);
+    }
+  }, [provider, providerAuthStatus, selectedSession?.__provider]);
 
   const getPermissionModesForProvider = useCallback((targetProvider: LLMProvider): PermissionMode[] => {
     const capabilityModes = providerCapabilities?.[targetProvider]?.permissionModes;
@@ -578,6 +611,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     cyclePermissionMode,
     providerModelCatalog,
     providerModelCacheCatalog,
+    isProviderAuthenticated,
     providerModelsLoading,
     providerModelsRefreshing,
     hardRefreshProviderModels: () => loadProviderModels({ bypassCache: true }),
