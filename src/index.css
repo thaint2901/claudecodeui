@@ -713,6 +713,21 @@
     opacity: 1;
   }
 
+  /* Revealing the focused control is only half the job. On a sidebar session
+     row the revealed cluster is absolutely positioned on top of the
+     relative-age text, and that text only fades for hover
+     (`group-hover:opacity-0`) — so keyboard focus used to paint the buttons
+     over a fully opaque timestamp, measured at 8/8 rows. Fade the swapped-out
+     content for the focus case too.
+
+     Scoped with `:has()` to the group whose reveal-on-hover control actually
+     holds focus. Tailwind's plain `group-focus-within:opacity-0` variant would
+     also fire when the row's own link is focused — hiding the age while
+     revealing nothing in its place. */
+  .group:has(.group-hover\:opacity-100:focus-within) .group-hover\:opacity-0 {
+    opacity: 0;
+  }
+
   /* WCAG 2.5.8 target size. 24px is the AA floor for any pointer; a finger
      needs 44px, so the larger value is keyed on pointer capability rather
      than viewport width. The icon inside stays whatever size it wants — this
