@@ -1,3 +1,13 @@
+/* eslint react/jsx-no-bind: ["error", { "ignoreDOMComponents": true, "allowArrowFunctions": false, "allowFunctions": false, "allowBind": false }] --
+ * Referential stability at the message-list boundary. Props declared here
+ * reach every rendered message row, and a row re-render re-runs the markdown
+ * pipeline plus one React element per syntax-highlight token (~10 spans per
+ * line of code). One inline arrow prop turns a keystroke into a full
+ * re-render of the visible transcript — measured at 1456ms INP before the
+ * memo boundaries went in. `React.memo` on the rows only holds while every
+ * prop keeps its identity, and nothing else enforces that. Host elements are
+ * exempt: they have no memo boundary to break. See CLAUDE.md > Gotchas.
+ */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowDownIcon } from 'lucide-react';
@@ -282,8 +292,9 @@ function ChatInterface({
       <BranchSwitcher
         current={idx + 1}
         total={sibs.length}
-        onPrev={() => void switchBranch(sibs[idx - 1]?.sessionId)}
-        onNext={() => void switchBranch(sibs[idx + 1]?.sessionId)}
+        prevSessionId={sibs[idx - 1]?.sessionId}
+        nextSessionId={sibs[idx + 1]?.sessionId}
+        onSwitch={switchBranch}
       />
     );
   }, [anchorMessageIds, siblingsAt, currentSessionId, switchBranch]);
@@ -369,6 +380,31 @@ function ChatInterface({
     resolvePermissionModeForProvider,
     onForkSubmitted: beginForkView,
   });
+
+  // Stable identity matters: this is handed to every message row, and an
+  // inline arrow here re-renders the whole list on each ChatInterface render.
+  const handleEditPrompt = useCallback((message: ChatMessage) => {
+    // The rendered uuid is a part id (`<uuid>_text_<n>` for user text parts);
+    // the server resolves the resume point by BARE transcript uuid, so strip
+    // the part suffix before sending.
+    if (!message.uuid) return;
+    startEditSentPrompt(baseMessageUuid(message.uuid), typeof message.content === 'string' ? message.content : '');
+  }, [startEditSentPrompt]);
+
+  // The remaining handlers below are hoisted out of JSX for the same reason:
+  // `ChatMessagesPane` and `ChatComposer` are both memoized, and an inline
+  // arrow prop defeats that on every render of this component.
+  const handleSetProvider = useCallback((nextProvider: string) => {
+    setProvider(nextProvider as Provider);
+  }, [setProvider]);
+
+  const handleSelectEffort = useCallback((nextEffort: string) => {
+    setStoredProviderEffort(provider, nextEffort);
+  }, [setStoredProviderEffort, provider]);
+
+  const handleRemoveImage = useCallback((index: number) => {
+    setAttachedImages((previous) => previous.filter((_, currentIndex) => currentIndex !== index));
+  }, [setAttachedImages]);
 
   // On WebSocket reconnect, re-fetch the current session's messages from the
   // server so missed streaming events are shown, then re-subscribe — the
@@ -587,7 +623,7 @@ function ChatInterface({
           selectedSession={selectedSession}
           currentSessionId={currentSessionId}
           provider={provider}
-          setProvider={(nextProvider) => setProvider(nextProvider as Provider)}
+          setProvider={handleSetProvider}
           textareaRef={textareaRef}
           claudeModel={claudeModel}
           setClaudeModel={setClaudeModel}
@@ -624,12 +660,7 @@ function ChatInterface({
           selectedProject={selectedProject}
           canEditPrompt={provider === 'claude' && !isProcessing}
           editBlockedUuid={editBlockedUuid}
-          onEditPrompt={(m) =>
-            // The rendered uuid is a part id (`<uuid>_text_<n>` for user text
-            // parts); the server resolves the resume point by BARE transcript
-            // uuid, so strip the part suffix before sending.
-            m.uuid && startEditSentPrompt(baseMessageUuid(m.uuid), typeof m.content === 'string' ? m.content : '')
-          }
+          onEditPrompt={handleEditPrompt}
           renderBranchSwitcher={renderBranchSwitcher}
         />
 
@@ -660,7 +691,7 @@ function ChatInterface({
           onModeSwitch={cyclePermissionMode}
           effort={currentProviderEffort}
           availableEffortOptions={currentProviderEffortOptions}
-          onSelectEffort={(nextEffort) => setStoredProviderEffort(provider, nextEffort)}
+          onSelectEffort={handleSelectEffort}
           tokenBudget={tokenBudget}
           onShowTokenUsage={showCostModal}
           slashCommandsCount={slashCommandsCount}
@@ -675,11 +706,7 @@ function ChatInterface({
           editingSentPrompt={editingSentPrompt}
           onCancelEditSentPrompt={cancelEditSentPrompt}
           attachedImages={attachedImages}
-          onRemoveImage={(index) =>
-            setAttachedImages((previous) =>
-              previous.filter((_, currentIndex) => currentIndex !== index),
-            )
-          }
+          onRemoveImage={handleRemoveImage}
           uploadingImages={uploadingImages}
           imageErrors={imageErrors}
           showFileDropdown={showFileDropdown}

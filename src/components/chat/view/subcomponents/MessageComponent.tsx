@@ -1,3 +1,7 @@
+/* eslint react/jsx-no-bind: ["error", { "ignoreDOMComponents": true, "allowArrowFunctions": false, "allowFunctions": false, "allowBind": false }] --
+ * This is a memoized message row; inline props here defeat the memo boundary
+ * of the tool/markdown children it renders. See CLAUDE.md > Gotchas.
+ */
 import { memo, useMemo, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
