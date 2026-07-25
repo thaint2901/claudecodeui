@@ -32,7 +32,13 @@
     "loadingSessions": "加载会话中...",
     "unnamed": "未命名",
     "loading": "加载中...",
-    "showMore": "显示更多会话"
+    "showMore": "显示更多会话",
+    "branches": {
+      "toggle": "{{count}} versions",
+      "versionLabel": "Version {{index}}",
+      "current": "Current",
+      "loadFailed": "Could not load versions"
+    }
   },
   "tooltips": {
     "viewEnvironments": "查看环境",

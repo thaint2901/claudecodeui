@@ -32,7 +32,13 @@
     "loadingSessions": "Oturumlar yükleniyor...",
     "unnamed": "Adsız",
     "loading": "Yükleniyor...",
-    "showMore": "Daha fazla oturum göster"
+    "showMore": "Daha fazla oturum göster",
+    "branches": {
+      "toggle": "{{count}} versions",
+      "versionLabel": "Version {{index}}",
+      "current": "Current",
+      "loadFailed": "Could not load versions"
+    }
   },
   "tooltips": {
     "viewEnvironments": "Ortamları Görüntüle",

@@ -32,7 +32,13 @@
     "loadingSessions": "Sitzungen werden geladen...",
     "unnamed": "Unbenannt",
     "loading": "Lädt...",
-    "showMore": "Weitere Sitzungen anzeigen"
+    "showMore": "Weitere Sitzungen anzeigen",
+    "branches": {
+      "toggle": "{{count}} versions",
+      "versionLabel": "Version {{index}}",
+      "current": "Current",
+      "loadFailed": "Could not load versions"
+    }
   },
   "tooltips": {
     "viewEnvironments": "Umgebungen anzeigen",

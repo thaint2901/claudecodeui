@@ -32,7 +32,13 @@
     "loadingSessions": "Caricamento sessioni...",
     "unnamed": "Senza nome",
     "loading": "Caricamento...",
-    "showMore": "Mostra più sessioni"
+    "showMore": "Mostra più sessioni",
+    "branches": {
+      "toggle": "{{count}} versions",
+      "versionLabel": "Version {{index}}",
+      "current": "Current",
+      "loadFailed": "Could not load versions"
+    }
   },
   "tooltips": {
     "viewEnvironments": "Visualizza ambienti",
