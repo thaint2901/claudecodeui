@@ -185,6 +185,10 @@ export default function SidebarSessionItem({
           className={cn(
             buttonVariants({ variant: 'ghost' }),
             'h-auto w-full justify-start rounded-md border bg-card p-2 text-left font-normal transition-all duration-150',
+            // On touch the rename/delete overlay below is permanently visible
+            // (no hover to reveal it), so reserve its width here or it covers
+            // the relative-age text it normally swaps places with.
+            'touch-reserve-actions',
             isSelected ? 'border-primary/20 bg-primary/5' : 'border-border/30',
             !isSelected && isProcessing
               ? 'border-border/60 bg-muted/20 hover:bg-muted/25'

@@ -687,7 +687,12 @@
      `opacity: 0` does not remove an element from hit-testing, so the edit
      affordance on a chat bubble could be tapped while invisible: the composer
      silently filled with the old prompt and the draft then survived a reload.
-     Focus-within is included so keyboard users reveal the same controls. */
+
+     The rule assumes the revealed control sits INSIDE its `.group` box — true
+     for all current call sites. A control that overhangs the group (see the
+     `sm:group-hover:opacity-100` remove-X in ImageAttachment.tsx, which this
+     selector deliberately does not match) would become a dead corner, because
+     the pointer can be over it while `.group:hover` is still false. */
   .group .group-hover\:opacity-100 {
     pointer-events: none;
   }
@@ -696,6 +701,16 @@
   .group:focus-within .group-hover\:opacity-100,
   .group .group-hover\:opacity-100:focus-visible {
     pointer-events: auto;
+  }
+
+  /* Restoring hit-testing is not enough on its own: a keyboard user could tab
+     onto a control that was clickable but still `opacity: 0` — focusable,
+     invisible, focus ring and all (WCAG 2.4.7). Reveal the focused control
+     itself rather than the whole group, so tabbing never uncovers a row's
+     other controls or hides content behind them. */
+  .group .group-hover\:opacity-100:focus-visible,
+  .group .group-hover\:opacity-100:focus-within {
+    opacity: 1;
   }
 
   /* WCAG 2.5.8 target size. 24px is the AA floor for any pointer; a finger
@@ -721,12 +736,29 @@
     }
 
     /* No hover means no way to reveal a hover-gated control, so show them all
-       and make them tappable. Keyed on pointer capability, not viewport width:
-       a touch laptop at 1440px needs this exactly as much as a phone does. */
+       and make them tappable. Keyed on pointer capability rather than viewport
+       width, which is what previously left tablets with unreachable controls.
+       Note this matches devices whose PRIMARY input is touch (phones, tablets);
+       a touch laptop reports `hover: hover` / `pointer: fine` and keeps the
+       normal hover behaviour, which is correct — it has a pointer. */
     .group:active .group-hover\:opacity-100,
     .group .group-hover\:opacity-100 {
       opacity: 1 !important;
       pointer-events: auto;
+    }
+
+    /* Revealing those controls permanently is only safe when they don't sit on
+       top of content. Two call sites are absolutely positioned over their own
+       row, so on touch they need the space reserved instead of overlapping:
+       without this, every sidebar row lost its relative-age text (measured
+       100% occluded across all 20 rows at 1180x820) and code blocks lost the
+       right end of their first line under the copy pill. */
+    .touch-reserve-actions {
+      padding-right: 4rem !important;
+    }
+
+    .code-block-shell > pre {
+      padding-top: 2.75rem !important;
     }
 
     .hover\:bg-red-200:hover,
