@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { Check, Edit2, Loader2, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
@@ -7,10 +7,7 @@ import { cn } from '../../../../lib/utils';
 import type { Project, ProjectSession, LLMProvider } from '../../../../types/app';
 import type { SessionWithProvider } from '../../types/types';
 import { createSessionViewModel, formatCompactSessionAge } from '../../utils/utils';
-import { api } from '../../../../utils/api';
 import SessionProviderLogo from '../../../llm-logo-provider/SessionProviderLogo';
-
-import SidebarSessionBranches from './SidebarSessionBranches';
 
 type SidebarSessionItemProps = {
   project: Project;
@@ -96,35 +93,8 @@ export default function SidebarSessionItem({
     onDeleteSession(project.projectId, session.id, sessionView.sessionName, session.__provider);
   };
 
-  // Picking a sibling branch has to make it the cluster's active leaf before
-  // navigating: the sidebar lists only the active leaf, so routing first would
-  // land on a session the list is about to drop.
-  const selectBranch = useCallback(
-    (branchId: string) => {
-      if (branchId === session.id) return;
-      void (async () => {
-        try {
-          const response = await api.activateBranch(branchId);
-          if (!response.ok) {
-            console.error('[SidebarSessionItem] Branch activation failed', {
-              branchId,
-              status: response.status,
-            });
-            return;
-          }
-        } catch (error) {
-          console.error('[SidebarSessionItem] Branch activation errored', error);
-          return;
-        }
-        onSessionSelect({ ...session, id: branchId }, project.projectId);
-      })();
-    },
-    [session, project.projectId, onSessionSelect],
-  );
-
   return (
-    <div className="group">
-      <div className="relative">
+    <div className="group relative">
       {(showAttentionIndicator || showRecentIndicator) && (
         <div className="absolute left-0 top-1/2 -translate-x-1 -translate-y-1/2 transform">
           <Tooltip
@@ -191,10 +161,6 @@ export default function SidebarSessionItem({
                     {sessionView.messageCount}
                   </Badge>
                 )}
-                {/* The fork count used to sit here as a badge. The disclosure
-                    rendered below the row now carries the same icon and count
-                    plus a readable label, and unlike the badge it can be
-                    operated — two copies of the same fact was noise. */}
               </div>
             </div>
 
@@ -219,6 +185,10 @@ export default function SidebarSessionItem({
           className={cn(
             buttonVariants({ variant: 'ghost' }),
             'h-auto w-full justify-start rounded-md border bg-card p-2 text-left font-normal transition-all duration-150',
+            // On touch the rename/delete overlay below is permanently visible
+            // (no hover to reveal it), so reserve its width here or it covers
+            // the relative-age text it normally swaps places with.
+            'touch-reserve-actions',
             isSelected ? 'border-primary/20 bg-primary/5' : 'border-border/30',
             !isSelected && isProcessing
               ? 'border-border/60 bg-muted/20 hover:bg-muted/25'
@@ -272,10 +242,6 @@ export default function SidebarSessionItem({
               </div>
               <div className="mt-0.5 flex items-center gap-1">
                 {sessionView.messageCount > 0 && <Badge variant="secondary" className="px-1 py-0 text-xs">{sessionView.messageCount}</Badge>}
-                {/* The fork count used to sit here as a badge. The disclosure
-                    rendered below the row now carries the same icon and count
-                    plus a readable label, and unlike the badge it can be
-                    operated — two copies of the same fact was noise. */}
               </div>
             </div>
           </div>
@@ -355,15 +321,6 @@ export default function SidebarSessionItem({
             )}
           </div>
       </div>
-      </div>
-
-      <SidebarSessionBranches
-        sessionId={session.id}
-        branchCount={sessionView.branchCount}
-        onSelectBranch={selectBranch}
-        currentTime={currentTime}
-        t={t}
-      />
     </div>
   );
 }

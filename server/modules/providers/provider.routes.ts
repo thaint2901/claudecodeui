@@ -645,11 +645,6 @@ router.get(
         forkedAtMessageUuid: row.forked_at_message_uuid,
         createdAt: row.created_at,
         activeLeaf: row.active_leaf === 1,
-        // The sidebar lists these branches for the user to pick between, and
-        // a list of bare uuids is unusable. `custom_name` is the only
-        // human-readable label the row carries; callers fall back to an
-        // ordinal ("Version 2") when a branch was never named.
-        customName: row.custom_name ?? null,
       }));
     res.json(createApiSuccessResponse({ branches }));
   }),

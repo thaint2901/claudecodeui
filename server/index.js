@@ -51,6 +51,7 @@ import {
     extractUrlsFromText,
     shouldAutoOpenUrlFromOutput,
 } from './utils/url-detection.js';
+import { shouldCompress } from './utils/compression-filter.js';
 import gitRoutes from './routes/git.js';
 import authRoutes from './routes/auth.js';
 import cursorRoutes from './routes/cursor.js';
@@ -158,7 +159,10 @@ app.use(cors({ exposedHeaders: ['X-Refreshed-Token'] }));
 // the same applies to the session transcript JSON, which is the single
 // slowest request on a session switch. gzip takes the chunk to ~833 kB
 // (-69%). Placed ahead of express.json so it covers API payloads too.
-app.use(compression());
+//
+// `shouldCompress` exempts SSE — see server/utils/compression-filter.js for
+// why compressing `text/event-stream` silently breaks every progress stream.
+app.use(compression({ filter: shouldCompress }));
 
 app.use(express.json({
     limit: '50mb',

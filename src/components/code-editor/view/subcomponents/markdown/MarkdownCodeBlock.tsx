@@ -38,7 +38,7 @@ export default function MarkdownCodeBlock({
   const language = languageMatch ? languageMatch[1] : 'text';
 
   return (
-    <div className="group relative my-2">
+    <div className="code-block-shell group relative my-2">
       {language !== 'text' && (
         <div className="absolute left-3 top-2 z-10 text-xs font-medium uppercase text-gray-400">{language}</div>
       )}

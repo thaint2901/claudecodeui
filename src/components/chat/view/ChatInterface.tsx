@@ -10,14 +10,13 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowDownIcon, GitBranch as GitBranchIcon } from 'lucide-react';
+import { ArrowDownIcon } from 'lucide-react';
 
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
 import { useWebSocket } from '../../../contexts/WebSocketContext';
 import { useSessionLock } from '../../../contexts/SessionLockContext';
 import PermissionContext from '../../../contexts/PermissionContext';
 import { QuickSettingsPanel } from '../../quick-settings-panel';
-import { Alert, Button } from '../../../shared/view/ui';
 import type { ChatInterfaceProps, ChatMessage, Provider  } from '../types/types';
 import { useChatProviderState } from '../hooks/useChatProviderState';
 import { useChatSessionState } from '../hooks/useChatSessionState';
@@ -41,7 +40,6 @@ type SessionBranch = {
   forkedAtMessageUuid: string | null;
   createdAt: string;
   activeLeaf: boolean;
-  customName?: string | null;
 };
 
 function ChatInterface({
@@ -185,26 +183,46 @@ function ChatInterface({
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
 
+  // A failed lookup must not be rendered as "this session has no branches".
+  // Both states used to collapse to `[]`, so a transient 500 on one of the
+  // refetches below (a failed branch activation, or a re-read after a fork
+  // resolved) removed the switcher — the only way back to the sibling turns —
+  // and left the conversation looking like an ordinary un-forked one. Those
+  // refetches keep the last known list instead.
+  //
+  // This does NOT extend to a session change: the effect below clears the list
+  // before the new session's fetch starts, so a failure there still shows no
+  // switcher. That is the correct trade — the alternative is rendering another
+  // session's branches over this one.
+  //
+  // `isCurrent()` is re-checked after BOTH awaits. Checking only after the
+  // request resolves leaves a window where the headers arrive while the
+  // session is still current, `json()` takes a moment, and the body lands
+  // after the user has moved on — measured as session A's empty list wiping a
+  // 3-branch switcher out of session B's view.
   const fetchBranches = useCallback(async (sessionId: string, isCurrent: () => boolean) => {
     try {
       const response = await api.sessionBranches(sessionId);
       if (!isCurrent()) return;
       if (!response.ok) {
-        setBranches([]);
+        console.error('[ChatInterface] Session branches lookup failed', {
+          sessionId,
+          status: response.status,
+        });
         return;
       }
       const json = await response.json();
+      if (!isCurrent()) return;
       setBranches(json?.data?.branches ?? []);
     } catch (error) {
       if (!isCurrent()) return;
       console.error('[ChatInterface] Failed to fetch session branches', error);
-      setBranches([]);
     }
   }, []);
 
   useEffect(() => {
+    setBranches([]);
     if (!currentSessionId) {
-      setBranches([]);
       return;
     }
     let cancelled = false;
@@ -302,25 +320,6 @@ function ChatInterface({
       />
     );
   }, [anchorMessageIds, siblingsAt, currentSessionId, switchBranch]);
-
-  // Which branch of its cluster the viewed session is, so the banner below can
-  // say so out loud. Being on a branch is otherwise invisible state: the
-  // transcript reads like any other conversation and the only way back to the
-  // parent was the browser's Back button.
-  const branchContext = useMemo(() => {
-    if (branches.length < 2 || !currentSessionId) return null;
-    const index = branches.findIndex((b) => b.sessionId === currentSessionId);
-    if (index < 0) return null;
-    const parentSessionId = branches[index].forkedFromSessionId;
-    // The cluster root is a normal-looking conversation with nothing to go
-    // back to — leave it unadorned.
-    if (!parentSessionId) return null;
-    return { current: index + 1, total: branches.length, parentSessionId };
-  }, [branches, currentSessionId]);
-
-  const handleBackToParent = useCallback(() => {
-    if (branchContext) void switchBranch(branchContext.parentSessionId);
-  }, [branchContext, switchBranch]);
 
   const {
     input,
@@ -635,32 +634,6 @@ function ChatInterface({
   return (
     <PermissionContext.Provider value={permissionContextValue}>
       <div className="flex h-full min-h-0 flex-col">
-        {branchContext && (
-          <Alert
-            // Alert defaults to role="alert", an assertive live region. This
-            // banner is persistent context, not an event, and the branch
-            // switcher already owns a polite live region for the switch
-            // itself — leaving it assertive would interrupt the user and
-            // double-announce the same fact.
-            role="note"
-            aria-label={t('branch.contextAria')}
-            className="mx-auto mt-2 flex w-full max-w-[54.25rem] items-center gap-2 border-border/60 bg-muted/40 px-3 py-1.5"
-          >
-            <GitBranchIcon className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" aria-hidden />
-            <span className="text-xs text-foreground">
-              {t('branch.contextLabel', { current: branchContext.current, total: branchContext.total })}
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="ml-auto h-7 px-2 text-xs"
-              onClick={handleBackToParent}
-            >
-              {t('branch.backToParent')}
-            </Button>
-          </Alert>
-        )}
-
         <ChatMessagesPane
           scrollContainerRef={scrollContainerRef}
           onWheel={handleScroll}

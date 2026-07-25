@@ -149,12 +149,7 @@
     "next": "Next branch",
     "editLabel": "Edit",
     "groupAria": "Conversation versions",
-    "counter": "Version {{current}}/{{total}}",
-    "announced": "Showing version {{current}} of {{total}}",
-    "forkedBadge": "Forked conversation, {{count}} versions",
-    "contextLabel": "Version {{current}} of {{total}}",
-    "contextAria": "Conversation version context",
-    "backToParent": "Back to previous version"
+    "announced": "Showing version {{current}} of {{total}}"
   },
   "sessionLock": {
     "bannerText": "This session is running as a background agent. The prompt unlocks automatically when the session finishes — or use Stop & Resume to stop it now.",

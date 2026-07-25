@@ -485,6 +485,24 @@ export const runMigrations = (db: Database) => {
     }
 
     db.exec(LAST_SCANNED_AT_SQL);
+
+    // Refresh query-planner statistics.
+    //
+    // Without `sqlite_stat1` SQLite plans on defaults, which rate every
+    // non-unique index as equally selective — so the sidebar queries picked
+    // `idx_sessions_is_archived`, an index on a column that is 0 for every
+    // row, and scanned the table once per candidate row. Measured on
+    // synthetic data: the paged session query took 495 ms at 10k rows and
+    // 14.5 s at 50k; with statistics present it takes 2.9 ms and 10 ms, and
+    // the correlated subqueries switch to `idx_sessions_fork_root`.
+    //
+    // Plain ANALYZE rather than `PRAGMA optimize`: optimize does create the
+    // stats when none exist, but measured here it did NOT refresh them after
+    // the table grew fourfold, which is exactly the case that matters as a
+    // user's history accumulates. ANALYZE is unconditional and cheap enough
+    // to pay on every start — 5.8 ms at 1k rows, 24.7 ms at 50k.
+    db.exec('ANALYZE');
+
     console.log('Database migrations completed successfully');
   } catch (error: any) {
     console.error('Error running migrations:', error.message);

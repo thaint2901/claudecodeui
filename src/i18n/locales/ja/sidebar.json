@@ -32,13 +32,7 @@
     "loadingSessions": "セッションを読み込んでいます...",
     "unnamed": "名称未設定",
     "loading": "読み込み中...",
-    "showMore": "さらにセッションを表示",
-    "branches": {
-      "toggle": "{{count}} versions",
-      "versionLabel": "Version {{index}}",
-      "current": "Current",
-      "loadFailed": "Could not load versions"
-    }
+    "showMore": "さらにセッションを表示"
   },
   "tooltips": {
     "viewEnvironments": "環境を表示",
@@ -55,8 +49,7 @@
     "save": "保存",
     "cancel": "キャンセル",
     "openCommandPalette": "コマンドパレットを開く",
-    "attentionRequiredIndicator": "セッションが対応を必要としています",
-    "forkedConversation": "Forked conversation — {{count}} versions"
+    "attentionRequiredIndicator": "セッションが対応を必要としています"
   },
   "navigation": {
     "chat": "チャット",

@@ -86,6 +86,10 @@ mock.module('@/modules/providers/index.js', {
     getLockedBgSessionIds: () => [],
     sessionLockWatcherService: noopRepo,
     closeSessionLockWatcher: () => {},
+    // Added when the edit-prompt fork flow started resolving resume points.
+    // Omitting it makes the whole module fail to load, not just this call —
+    // exactly the trap the comment above warns about.
+    findForkResumePoint: async () => ({ resumeSessionAt: null }),
     sessionsService: {
       createAppSession: () => ({ sessionId: FORKED_APP_SESSION_ID }),
       renameSessionById: async (sessionId: string, summary: string) => {
