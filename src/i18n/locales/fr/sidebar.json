@@ -50,7 +50,8 @@
     "cancel": "Annuler",
     "clearSearch": "Effacer la recherche",
     "openCommandPalette": "Ouvrir la palette de commandes",
-    "attentionRequiredIndicator": "La session nécessite votre attention"
+    "attentionRequiredIndicator": "La session nécessite votre attention",
+    "forkedConversation": "Forked conversation — {{count}} versions"
   },
   "navigation": {
     "chat": "Chat",

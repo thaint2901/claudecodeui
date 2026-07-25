@@ -50,7 +50,8 @@
     "cancel": "İptal",
     "clearSearch": "Aramayı temizle",
     "openCommandPalette": "Komut paletini aç",
-    "attentionRequiredIndicator": "Oturum ilgi bekliyor"
+    "attentionRequiredIndicator": "Oturum ilgi bekliyor",
+    "forkedConversation": "Forked conversation — {{count}} versions"
   },
   "navigation": {
     "chat": "Sohbet",

@@ -50,7 +50,8 @@
     "cancel": "Отмена",
     "clearSearch": "Очистить поиск",
     "openCommandPalette": "Открыть палитру команд",
-    "attentionRequiredIndicator": "Сессия требует внимания"
+    "attentionRequiredIndicator": "Сессия требует внимания",
+    "forkedConversation": "Forked conversation — {{count}} versions"
   },
   "navigation": {
     "chat": "Чат",

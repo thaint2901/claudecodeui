@@ -49,7 +49,8 @@
     "save": "保存",
     "cancel": "キャンセル",
     "openCommandPalette": "コマンドパレットを開く",
-    "attentionRequiredIndicator": "セッションが対応を必要としています"
+    "attentionRequiredIndicator": "セッションが対応を必要としています",
+    "forkedConversation": "Forked conversation — {{count}} versions"
   },
   "navigation": {
     "chat": "チャット",

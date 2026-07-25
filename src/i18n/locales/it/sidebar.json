@@ -50,7 +50,8 @@
     "cancel": "Annulla",
     "clearSearch": "Cancella ricerca",
     "openCommandPalette": "Apri tavolozza comandi",
-    "attentionRequiredIndicator": "La sessione richiede attenzione"
+    "attentionRequiredIndicator": "La sessione richiede attenzione",
+    "forkedConversation": "Forked conversation — {{count}} versions"
   },
   "navigation": {
     "chat": "Chat",

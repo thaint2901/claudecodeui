@@ -50,7 +50,8 @@
     "cancel": "Abbrechen",
     "clearSearch": "Suche leeren",
     "openCommandPalette": "Befehlspalette öffnen",
-    "attentionRequiredIndicator": "Sitzung erfordert Aufmerksamkeit"
+    "attentionRequiredIndicator": "Sitzung erfordert Aufmerksamkeit",
+    "forkedConversation": "Forked conversation — {{count}} versions"
   },
   "navigation": {
     "chat": "Chat",

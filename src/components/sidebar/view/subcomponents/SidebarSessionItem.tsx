@@ -190,8 +190,16 @@ export default function SidebarSessionItem({
                   </Badge>
                 )}
                 {sessionView.branchCount > 1 && (
-                  <Badge variant="outline" className="gap-0.5 px-1 py-0 text-xs" title="Forked conversation">
-                    <GitBranch className="h-2.5 w-2.5" />
+                  <Badge
+                    variant="outline"
+                    className="gap-0.5 px-1 py-0 text-xs"
+                    title={t('tooltips.forkedConversation', { count: sessionView.branchCount })}
+                    aria-label={t('tooltips.forkedConversation', { count: sessionView.branchCount })}
+                  >
+                    {/* At 10px the branch glyph read as an unidentifiable
+                        squiggle. Slightly larger than the digit beside it is
+                        what makes it parse as a branch icon at all. */}
+                    <GitBranch className="h-3.5 w-3.5" aria-hidden />
                     {sessionView.branchCount}
                   </Badge>
                 )}
@@ -273,8 +281,16 @@ export default function SidebarSessionItem({
               <div className="mt-0.5 flex items-center gap-1">
                 {sessionView.messageCount > 0 && <Badge variant="secondary" className="px-1 py-0 text-xs">{sessionView.messageCount}</Badge>}
                 {sessionView.branchCount > 1 && (
-                  <Badge variant="outline" className="gap-0.5 px-1 py-0 text-xs" title="Forked conversation">
-                    <GitBranch className="h-2.5 w-2.5" />
+                  <Badge
+                    variant="outline"
+                    className="gap-0.5 px-1 py-0 text-xs"
+                    title={t('tooltips.forkedConversation', { count: sessionView.branchCount })}
+                    aria-label={t('tooltips.forkedConversation', { count: sessionView.branchCount })}
+                  >
+                    {/* At 10px the branch glyph read as an unidentifiable
+                        squiggle. Slightly larger than the digit beside it is
+                        what makes it parse as a branch icon at all. */}
+                    <GitBranch className="h-3.5 w-3.5" aria-hidden />
                     {sessionView.branchCount}
                   </Badge>
                 )}
