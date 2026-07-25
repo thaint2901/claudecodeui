@@ -7,6 +7,7 @@ import type { Project, ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
 import type { ChatMessage } from '../types/types';
 import { createCachedDiffCalculator, type DiffCalculator } from '../utils/messageTransforms';
+import { baseMessageUuid } from '../utils/branchAnchors';
 
 import { normalizedToChatMessages } from './useChatMessages';
 
@@ -317,9 +318,20 @@ export function useChatSessionState({
 
   const rewindMessages = useCallback((count: number) => setViewHiddenCount(count), []);
 
-  /** Optimistically hides the edited prompt and everything after it while the fork runs. */
+  /**
+   * Optimistically hides the edited prompt and everything after it while the
+   * fork runs.
+   *
+   * `uuid` arrives BARE (ChatInterface strips the part suffix before handing it
+   * to the server), while a rendered user turn from an array-content transcript
+   * entry carries `<uuid>_text_<n>`. Comparing the two directly matched only
+   * string-content turns: measured on the fork-smoke cluster, every user bubble
+   * is `_text_0`-suffixed, so the lookup missed every time — no tail was hidden
+   * and `isForkViewActive` stayed false, which also disabled the
+   * "fork did not complete" recovery path.
+   */
   const beginForkView = useCallback((uuid: string) => {
-    const idx = chatMessages.findIndex((m) => m.uuid === uuid);
+    const idx = chatMessages.findIndex((m) => m.uuid && baseMessageUuid(m.uuid) === uuid);
     if (idx < 0) return;
     setForkHiddenIds(new Set(
       chatMessages.slice(idx).map((m) => m.uuid).filter((u): u is string => Boolean(u)),
