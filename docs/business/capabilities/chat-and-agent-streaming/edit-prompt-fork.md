@@ -31,10 +31,10 @@ Code changes made by the tool calls in the original branch are **never reverted*
 5. `findForkResumePoint` streams the transcript JSONL looking for the edited message's uuid, tracking the last-seen assistant uuid (`RESUME_POINT_RULE = 'preceding-assistant-uuid'`). It returns that assistant uuid as `resumeSessionAt`; a `null` result (edited message was the first prompt) is rejected with `FORK_FAILED` ("start a new session instead"), since omitting `resumeSessionAt` would copy the full history rather than truncate. Any other transcript problem also surfaces as `FORK_FAILED`.
 6. The hub invokes `queryClaudeSDK` with `resume` (the original provider session id), `resumeSessionAt` (the resume point), and `forkSession: true`, plus the new prompt text.
 7. The SDK creates a new provider session and transcript file that shares history up to the resume point, then continues with the edited prompt. During the new run, the old message tail is hidden client-side and the new prompt streams in its place.
-8. On completion, the server records the fork edge in SQLite (`forked_from_session_id`, `forked_at_message_uuid`, `fork_root_session_id` propagated from the root) and marks the new session `active_leaf = 1`, demoting the sibling. A `branch_created` event is broadcast on `complete`.
+8. **Mid-stream**, the instant the SDK announces the fork's provider session id, `recordProviderSessionId` records the fork edge in SQLite (`forked_from_session_id`, `forked_at_message_uuid`, `fork_root_session_id` propagated from the root), marks the new session `active_leaf = 1`, demotes the sibling, and emits `branch_created`. This is deliberately not deferred to `complete` — the client needs to adopt the branch while it is still streaming. The consequence to keep in mind: a run that errors or is aborted *after* the id lands still leaves the branch row inserted and the cluster's active leaf already moved.
 9. `useChatRealtimeHandlers` reacts to `branch_created` to update the view and to `FORK_FAILED` protocol errors by restoring the prior view with the edited text still in the composer (no data lost on failure).
 10. At the fork point, `BranchSwitcher` shows `‹ ›`; either chevron calls `POST /sessions/:id/activate-branch` to switch which sibling is displayed, in place, without navigating away. Both ends stay focusable (`aria-disabled`, not `disabled`) so keyboard focus is not dropped on reaching the first or last version, and the live region announces the new position.
-11. All open tabs/clients subscribed to the session receive the branch-created/activate broadcasts, so switching branches in one tab updates every other tab's sidebar row.
+11. `branch_created` goes only to the socket that started the run. Every *other* tab converges through the separate `session_upserted` broadcast, which is what moves their sidebar row — so a "my other tab did not update" report is a `session_upserted` problem, not a missed `branch_created` subscription.
 
 ## Output
 
@@ -49,7 +49,7 @@ Code changes made by the tool calls in the original branch are **never reverted*
   - `fork_root_session_id TEXT` — the original, never-forked ancestor of the cluster.
   - `forked_from_session_id TEXT` — the immediate parent branch.
   - `forked_at_message_uuid TEXT` — the fork anchor: the uuid of the assistant message the branch resumed from. Unlike the edited user message's uuid (which exists only in the parent transcript), the anchor is copied into every sibling transcript, so the branch switcher can render in any branch. Always set for rows created by this flow (first-prompt edits, which would have no anchor, are rejected up front); the column stays nullable for schema simplicity.
-  - `active_leaf BOOLEAN DEFAULT 1` — which sibling is currently displayed for the cluster; exactly one leaf per cluster is active.
+  - `active_leaf BOOLEAN DEFAULT 1` — which sibling is currently displayed for the cluster; exactly one leaf per cluster is active. Deleting or archiving the active leaf promotes the most recently touched surviving sibling in the same transaction, and the sidebar query falls back to that same row if it ever meets a cluster with no leaf at all — without both, losing the leaf would hide the entire cluster, original conversation included.
 - `GET /sessions/:sessionId/branches` returns all branches in a cluster (filtered to those whose transcript file still exists on disk).
 - `POST /sessions/:sessionId/activate-branch` flips `active_leaf` to the given session and demotes its siblings.
 - **Sessions forked outside cloudcli** (e.g. via `claude --resume` + manual `forkSession` from the CLI directly) have no row with these columns populated and simply appear as ordinary, unrelated sessions — cloudcli only builds the fork graph for forks it initiated itself.
@@ -59,7 +59,7 @@ Code changes made by the tool calls in the original branch are **never reverted*
 - **Frontend UI:** `src/components/chat/view/subcomponents/MessageComponent.tsx` (always-visible Edit control, `canEditPrompt` gate), `BranchSwitcher.tsx` (`‹ ›` chevrons + `sr-only` live region)
 - **Frontend composer:** `src/components/chat/hooks/useChatComposerState.ts` (loads edited text + banner, sets `editAtMessageUuid`)
 - **Frontend realtime:** `src/components/chat/hooks/useChatRealtimeHandlers.ts` (`branch_created` handling, `FORK_FAILED` recovery)
-- **i18n:** `src/i18n/locales/en/chat.json` (`banner` key — Git-note text)
+- **i18n:** `src/i18n/locales/en/chat.json` (`input.editSentPrompt.banner` — Git-note text; `branch.*` — switcher labels)
 - **Backend WS entry:** `server/modules/websocket/services/chat-websocket.service.ts` (validates Claude-only + transcript existence, raises `FORK_FAILED`)
 - **Backend fork logic:** `server/modules/providers/list/claude/claude-fork.provider.ts` (`findForkResumePoint`, `ForkResumePointError`)
 - **Backend run lifecycle:** `server/modules/websocket/services/chat-run-registry.service.ts` (emits `branch_created`)
