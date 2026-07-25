@@ -182,11 +182,22 @@ function ChatInterface({
   }, [currentSessionId]);
 
   // A failed lookup must not be rendered as "this session has no branches".
-  // Both states used to collapse to `[]`, so one transient 500 while viewing a
-  // branch removed the switcher — the only way back to the sibling turns —
-  // and left the conversation looking like an ordinary un-forked one. On
-  // failure the last known list is kept instead; the session-change effect
-  // below is what clears it, so a new session never inherits stale branches.
+  // Both states used to collapse to `[]`, so a transient 500 on one of the
+  // refetches below (a failed branch activation, or a re-read after a fork
+  // resolved) removed the switcher — the only way back to the sibling turns —
+  // and left the conversation looking like an ordinary un-forked one. Those
+  // refetches keep the last known list instead.
+  //
+  // This does NOT extend to a session change: the effect below clears the list
+  // before the new session's fetch starts, so a failure there still shows no
+  // switcher. That is the correct trade — the alternative is rendering another
+  // session's branches over this one.
+  //
+  // `isCurrent()` is re-checked after BOTH awaits. Checking only after the
+  // request resolves leaves a window where the headers arrive while the
+  // session is still current, `json()` takes a moment, and the body lands
+  // after the user has moved on — measured as session A's empty list wiping a
+  // 3-branch switcher out of session B's view.
   const fetchBranches = useCallback(async (sessionId: string, isCurrent: () => boolean) => {
     try {
       const response = await api.sessionBranches(sessionId);
@@ -199,6 +210,7 @@ function ChatInterface({
         return;
       }
       const json = await response.json();
+      if (!isCurrent()) return;
       setBranches(json?.data?.branches ?? []);
     } catch (error) {
       if (!isCurrent()) return;
