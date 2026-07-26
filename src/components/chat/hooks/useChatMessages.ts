@@ -163,6 +163,7 @@ function convertMessages(
               content: unescapeWithMathProtection(decodeHtmlEntities(content)),
               timestamp: msg.timestamp,
               images,
+              uuid: msg.id,
               ...sharedMetadata,
             });
           }
@@ -174,6 +175,7 @@ function convertMessages(
             type: 'assistant',
             content: text,
             timestamp: msg.timestamp,
+            uuid: msg.id,
             ...sharedMetadata,
           });
         }

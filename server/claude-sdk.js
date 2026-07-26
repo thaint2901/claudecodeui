@@ -266,10 +266,14 @@ function mapCliOptionsToSDK(options = {}) {
     sdkOptions.resume = sessionId;
   }
 
-  // /fork: resume an existing provider session but branch into a new session
-  // id instead of appending to it. Set by the websocket /fork interception.
+  // Branch a resumed session into a new session id instead of appending to it.
+  // Used by both the /fork command (websocket interception) and edit-prompt
+  // fork; the latter also pins the branch point via resumeSessionAt.
   if (options.forkSession) {
     sdkOptions.forkSession = true;
+    if (options.resumeSessionAt) {
+      sdkOptions.resumeSessionAt = options.resumeSessionAt;
+    }
   }
 
   return sdkOptions;

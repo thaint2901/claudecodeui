@@ -12,6 +12,7 @@ import { useSessionProtection } from '../../hooks/useSessionProtection';
 import { useProjectsState } from '../../hooks/useProjectsState';
 import { useQueuedMessageAutoSend } from '../../hooks/useQueuedMessageAutoSend';
 import { api } from '../../utils/api';
+import type { SessionEstablishedContext, SessionNavigationOptions } from '../chat/types/types';
 
 type RunningSessionApiItem = {
   sessionId?: unknown;
@@ -95,6 +96,30 @@ function AppContentInner() {
     sendMessage,
     markSessionProcessing,
   });
+
+  // Memoised because these two reach a message row. `onNavigateToSession`
+  // feeds ChatInterface's `switchBranch`, which feeds `renderBranchSwitcher`,
+  // which is a prop on every MessageComponent — as inline arrows they handed
+  // the whole visible transcript a fresh identity on every AppContent render
+  // (composer focus/blur, tab switch, any processingSessions change) and
+  // defeated its `React.memo`. `react/jsx-no-bind` guards the message-row
+  // files themselves but cannot see an unstable prop born three levels up.
+  // Declared here, below `navigate` and `registerOptimisticSession`: a
+  // useCallback placed above a binding it closes over throws at render time
+  // and eslint does not catch it.
+  const handleNavigateToSession = useCallback(
+    (targetSessionId: string, options?: SessionNavigationOptions) => {
+      navigate(`/session/${targetSessionId}`, { replace: Boolean(options?.replace) });
+    },
+    [navigate],
+  );
+
+  const handleSessionEstablished = useCallback(
+    (targetSessionId: string, context: SessionEstablishedContext) => {
+      registerOptimisticSession({ sessionId: targetSessionId, ...context });
+    },
+    [registerOptimisticSession],
+  );
 
   const refreshRunningSessions = useCallback(async () => {
     try {
@@ -252,12 +277,8 @@ function AppContentInner() {
           onSessionProcessing={markSessionProcessing}
           onSessionIdle={markSessionIdle}
           processingSessions={processingSessions}
-          onNavigateToSession={(targetSessionId: string, options) =>
-            navigate(`/session/${targetSessionId}`, { replace: Boolean(options?.replace) })
-          }
-          onSessionEstablished={(targetSessionId, context) =>
-            registerOptimisticSession({ sessionId: targetSessionId, ...context })
-          }
+          onNavigateToSession={handleNavigateToSession}
+          onSessionEstablished={handleSessionEstablished}
           onShowSettings={openSettings}
           externalMessageUpdate={externalMessageUpdate}
           newSessionTrigger={newSessionTrigger}

@@ -280,3 +280,132 @@ test('startRun rejects a second concurrent run for the same session', async () =
     assert.ok(third);
   });
 });
+
+test('startRun with forkMeta creates a branch row when the writer announces a different provider id', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-fork-1', 'claude', '/workspace/demo');
+    sessionsDb.assignProviderSessionId('app-fork-1', 'parent-provider-1');
+    const connection = new FakeConnection();
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-fork-1',
+      provider: 'claude',
+      providerSessionId: 'parent-provider-1',
+      connection,
+      userId: null,
+      forkMeta: {
+        parentSessionId: 'app-fork-1',
+        parentProviderSessionId: 'parent-provider-1',
+        forkedAtMessageUuid: 'msg-uuid-1',
+        projectPath: '/workspace/demo',
+      },
+    });
+    assert.ok(run);
+
+    // The runtime announces a brand-new provider session id — the fork was
+    // honored and produced a genuinely new transcript.
+    run.writer.send({
+      kind: 'session_created',
+      provider: 'claude',
+      sessionId: 'branch-provider-2',
+      newSessionId: 'branch-provider-2',
+    });
+
+    assert.equal(run.branchSessionId, 'branch-provider-2');
+
+    const branchRow = sessionsDb.getSessionById('branch-provider-2');
+    assert.equal(branchRow?.forked_from_session_id, 'app-fork-1');
+    assert.equal(branchRow?.forked_at_message_uuid, 'msg-uuid-1');
+    assert.equal(branchRow?.active_leaf, 1);
+
+    const parentRow = sessionsDb.getSessionById('app-fork-1');
+    assert.equal(parentRow?.active_leaf, 0);
+    // The parent's own provider-id mapping must stay intact — the branch
+    // insert must not have remapped it.
+    assert.equal(parentRow?.provider_session_id, 'parent-provider-1');
+
+    const branchFrames = connection.frames.filter((frame) => frame.kind === 'branch_created');
+    assert.equal(branchFrames.length, 1);
+    assert.equal(branchFrames[0]?.branchSessionId, 'branch-provider-2');
+    assert.equal(branchFrames[0]?.sessionId, 'app-fork-1');
+  });
+});
+
+test('announcing the same provider id as the parent creates no branch', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-fork-2', 'claude', '/workspace/demo');
+    sessionsDb.assignProviderSessionId('app-fork-2', 'parent-provider-2');
+    const connection = new FakeConnection();
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-fork-2',
+      provider: 'claude',
+      providerSessionId: 'parent-provider-2',
+      connection,
+      userId: null,
+      forkMeta: {
+        parentSessionId: 'app-fork-2',
+        parentProviderSessionId: 'parent-provider-2',
+        forkedAtMessageUuid: 'msg-uuid-2',
+        projectPath: '/workspace/demo',
+      },
+    });
+    assert.ok(run);
+
+    // Runtime resumed the SAME provider session — no fork actually happened.
+    run.writer.send({
+      kind: 'session_created',
+      provider: 'claude',
+      sessionId: 'parent-provider-2',
+      newSessionId: 'parent-provider-2',
+    });
+
+    assert.equal(run.branchSessionId, undefined);
+    assert.equal(connection.frames.filter((frame) => frame.kind === 'branch_created').length, 0);
+    assert.deepEqual(sessionsDb.getClusterBranches('app-fork-2'), []);
+  });
+});
+
+test('complete on an unhonored forkMeta run warns and leaves no branch row or frame', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('app-fork-3', 'claude', '/workspace/demo');
+    sessionsDb.assignProviderSessionId('app-fork-3', 'parent-provider-3');
+    const connection = new FakeConnection();
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'app-fork-3',
+      provider: 'claude',
+      providerSessionId: 'parent-provider-3',
+      connection,
+      userId: null,
+      forkMeta: {
+        parentSessionId: 'app-fork-3',
+        parentProviderSessionId: 'parent-provider-3',
+        forkedAtMessageUuid: 'msg-uuid-3',
+        projectPath: '/workspace/demo',
+      },
+    });
+    assert.ok(run);
+
+    const originalWarn = console.warn;
+    const warnCalls: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      warnCalls.push(args);
+    };
+    try {
+      // The runtime completes without ever announcing a (different) provider
+      // session id — the fork request went unhonored.
+      run.writer.send({ kind: 'complete', provider: 'claude', sessionId: 'parent-provider-3', exitCode: 0 });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    assert.ok(
+      warnCalls.some(
+        (args) =>
+          typeof args[0] === 'string' &&
+          args[0].includes('Fork requested but no branch session was created'),
+      ),
+      'expected the unhonored-fork warning to be logged',
+    );
+    assert.equal(run.branchSessionId, undefined);
+    assert.equal(connection.frames.filter((frame) => frame.kind === 'branch_created').length, 0);
+  });
+});
