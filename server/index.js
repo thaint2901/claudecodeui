@@ -11,6 +11,7 @@ import http from 'http';
 import spawn from 'cross-spawn';
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import mime from 'mime-types';
 import Database from 'better-sqlite3';
 
@@ -50,6 +51,7 @@ import {
     extractUrlsFromText,
     shouldAutoOpenUrlFromOutput,
 } from './utils/url-detection.js';
+import { shouldCompress } from './utils/compression-filter.js';
 import gitRoutes from './routes/git.js';
 import authRoutes from './routes/auth.js';
 import cursorRoutes from './routes/cursor.js';
@@ -150,6 +152,18 @@ const wss = createWebSocketServer(server, {
 app.locals.wss = wss;
 
 app.use(cors({ exposedHeaders: ['X-Refreshed-Token'] }));
+
+// Compress every response before the routes and the static handlers below.
+// Measured on a production build: the main JS chunk went out at 2762 kB
+// uncompressed because nothing on this path ever set Content-Encoding, and
+// the same applies to the session transcript JSON, which is the single
+// slowest request on a session switch. gzip takes the chunk to ~833 kB
+// (-69%). Placed ahead of express.json so it covers API payloads too.
+//
+// `shouldCompress` exempts SSE — see server/utils/compression-filter.js for
+// why compressing `text/event-stream` silently breaks every progress stream.
+app.use(compression({ filter: shouldCompress }));
+
 app.use(express.json({
     limit: '50mb',
     type: (req) => {
