@@ -1,5 +1,15 @@
 # Edit Prompt → Conversation Fork — Implementation Plan
 
+> **STATUS: IMPLEMENTED AND SUPERSEDED (2026-07-26).** Shipped in PR #5. The
+> unticked `- [ ]` boxes below are the plan as originally written, kept for
+> history — they are **not** outstanding work. Where this plan and the shipped
+> code disagree, the code and
+> `docs/business/capabilities/chat-and-agent-streaming/edit-prompt-fork.md`
+> win. Known divergences: **Task 11's branch badge was built and then removed**
+> (two surfaces counting branches differently contradicted each other), the
+> sidebar branch list likewise, the `‹ ›` pager moved off the fork anchor onto
+> the prompt that follows it, and the prompt's controls became hover-gated.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let the user edit a previously sent prompt in a Claude session; sending forks the conversation in place (ChatGPT-style) with a `< 1/2 >` branch switcher, per spec `docs/superpowers/specs/2026-07-23-edit-prompt-fork-design.md`.
@@ -16,7 +26,7 @@
 - Every NEW WebSocket `kind` must get an explicit `case` in `src/components/chat/hooks/useChatRealtimeHandlers.ts` — unhandled kinds fall to `default` and corrupt the message store (known gotcha).
 - Feature is Claude-only. UI affordances hidden for other providers.
 - Dev server reads the MAIN checkout, not this worktree — for manual testing `cp` changed files to `/home/thaint/projects/claudecodeui/...` and browse `localhost:5173` (never 3001). Backend has no hot reload (`server:dev` is plain tsx).
-- The spec's error contract: a failed fork must leave NO fork row in the DB (row is written only after the SDK announces the new session id).
+- The spec's error contract: a failed fork must leave NO fork row in the DB (row is written only after the SDK announces the new session id). **As shipped this holds only for failures *before* the announcement** — the row is written mid-stream, so a run that errors afterwards keeps its branch row and its moved active leaf. See §4.4 of the spec.
 - After finishing all tasks run: `npm run typecheck && npm run lint && npx tsx --test --tsconfig server/tsconfig.json server/modules/database/tests/*.test.ts server/modules/providers/list/claude/tests/*.test.ts server/modules/websocket/services/tests/*.test.ts` (adjust to files that exist).
 
 ---
@@ -1266,7 +1276,14 @@ git commit -m "feat(chat): branch switcher for forked conversations"
 
 ---
 
-### Task 11: Sidebar branch badge
+### Task 11: Sidebar branch badge — ❌ NOT SHIPPED (built, then removed)
+
+> Built during review and then reverted, along with the sidebar branch list.
+> Two surfaces counted branches differently — siblings at this anchor vs.
+> whole-cluster size — and contradicted each other on screen. The server-side
+> `branchCount` and `getForkClusterSizesByProjectPath` described below have
+> since been deleted end to end; the `‹ n/total ›` pager on the forked prompt
+> is the only branch count that ships. Kept for history — do not implement.
 
 **Files:**
 - Modify: the projects module code that maps `sessionsDb` rows into the `/api/projects` session payload (grep `messageCount` or `custom_name` under `server/modules/projects/` to find the mapper) — add `branchCount`.
@@ -1320,7 +1337,7 @@ git commit -m "feat(sidebar): branch badge for forked conversation clusters"
 - [ ] **Step 2: E2E smoke (manual, dev server :5173).** Checklist:
   1. Claude session: send "Say ONE", then "Say TWO".
   2. Hover prompt 1 → ✏️ → text loads into composer with the Git-note banner → change to "Say THREE" → send.
-  3. During stream: old tail hidden, new prompt streaming. After complete: view is the branch; sidebar still shows ONE row (branch badge `⑂ 2`).
+  3. During stream: old tail hidden, new prompt streaming. After complete: view is the branch; sidebar still shows ONE row (~~branch badge `⑂ 2`~~ — the badge was removed, see Task 11; the row carries no branch affordance at all).
   4. `< 1/2 >` appears at the fork point; `<` restores the original conversation in place; `>` returns.
   5. Cursor/Codex session: no ✏️ on hover.
   6. Kill `claude` binary from PATH temporarily or edit a session whose JSONL was deleted → error toast, old view intact, edited text still in composer.

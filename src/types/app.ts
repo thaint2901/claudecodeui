@@ -36,7 +36,6 @@ export interface ProjectSession {
   updated_at?: string;
   lastActivity?: string;
   messageCount?: number;
-  branchCount?: number;
   activeLeaf?: boolean;
   provider?: LLMProvider;
   __provider?: LLMProvider;

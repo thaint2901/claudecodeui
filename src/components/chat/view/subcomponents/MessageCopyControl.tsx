@@ -162,8 +162,14 @@ const MessageCopyControl = ({
 
   // One tone for both roles. The user variant used to be blue-on-blue because
   // it sat inside the blue bubble; that row now renders below the bubble on
-  // the page background, where the light-blue text failed contrast.
-  const toneClass = 'text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300';
+  // the page background.
+  //
+  // Measured against the resolved theme tokens, at rest, worst case across the
+  // page (#f7f6f3 / #141414), the card, and the pager pill's `bg-muted/40`:
+  // gray-600 = 6.69:1 light, gray-400 = 6.11:1 dark. The semantic
+  // `muted-foreground` was the first choice and does not qualify — 4.43:1 on
+  // the light page, 4.23:1 on the pill, both under the 4.5:1 of WCAG 1.4.3.
+  const toneClass = 'text-gray-600 hover:text-foreground dark:text-gray-400 dark:hover:text-foreground';
   const copyTitle = copied ? t('copyMessage.copied') : t('copyMessage.copy');
   const rootClassName = canSelectCopyFormat
     ? 'relative flex min-w-0 flex-1 items-center gap-0.5 sm:min-w-max sm:flex-none sm:w-auto'

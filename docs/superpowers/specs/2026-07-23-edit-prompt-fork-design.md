@@ -70,7 +70,7 @@ Migration adding four nullable/default columns to `sessions`
 ```sql
 ALTER TABLE sessions ADD COLUMN fork_root_session_id TEXT;      -- session_id of the cluster root; NULL = never forked
 ALTER TABLE sessions ADD COLUMN forked_from_session_id TEXT;    -- direct parent branch; NULL on the root
-ALTER TABLE sessions ADD COLUMN forked_at_message_uuid TEXT;    -- uuid of the edited user message (fork point)
+ALTER TABLE sessions ADD COLUMN forked_at_message_uuid TEXT;    -- resume anchor: uuid of the ASSISTANT message preceding the edited prompt
 ALTER TABLE sessions ADD COLUMN active_leaf BOOLEAN DEFAULT 1;  -- currently displayed branch of the cluster
 CREATE INDEX IF NOT EXISTS idx_sessions_fork_root ON sessions(fork_root_session_id);
 ```
@@ -113,8 +113,12 @@ Semantics:
 4. **Branch row creation:** when the SDK announces the new `session_id`
    (existing init-message handling), create the new `sessions` row with fork
    metadata and flip `active_leaf` from the parent branch to the new one, in a
-   single transaction in the sessions repository. The DB row is written only
-   after the SDK announces the ID — a failed fork leaves no orphan row.
+   single transaction in the sessions repository. The DB row is written the
+   moment the SDK announces the ID, mid-stream. **As shipped, that means a run
+   which errors or is aborted *after* the id lands still leaves the branch row
+   inserted and the cluster's active leaf already moved** — only a fork that
+   fails before the announcement leaves no row. The earlier wording here ("a
+   failed fork leaves no orphan row") was unconditional and wrong.
 5. **New REST endpoints** (`server/modules/providers/provider.routes.ts`):
    - `GET /sessions/:sessionId/branches` →
      `[{ sessionId, forkedAtMessageUuid, createdAt, activeLeaf }]` for the
@@ -147,18 +151,32 @@ Semantics:
    an explicit `case` in `useChatRealtimeHandlers.ts` (unhandled kinds corrupt
    the message store — known gotcha).
 5. **`BranchSwitcher` component:** on session load, fetch
-   `GET /sessions/:id/branches`; render `< 1/2 >` under user messages whose
-   uuid matches some branch's `forkedAtMessageUuid`. Arrow click →
+   `GET /sessions/:id/branches`; render `‹ 1/2 ›` in the control row of the
+   first plain user prompt that FOLLOWS a branch's `forkedAtMessageUuid` —
+   not on the message the anchor names. The anchor is an assistant uuid (§3),
+   the resume point every sibling copies verbatim, so it is the one message a
+   fork does not change; the prompt after it is what actually differs between
+   siblings. When no prompt follows (anchor is the last loaded message, the
+   tail is optimistically hidden, or an earlier anchor already claimed that
+   prompt) the control falls back to the anchor's own last non-tool assistant
+   part. Rule and measurements: `pickBranchSwitcherOwners` in
+   `src/components/chat/utils/branchAnchors.ts`. Arrow click →
    `POST activate-branch` → load that branch's messages into the store →
-   in-place view swap. Branch lists cached per cluster in `useSessionStore`.
-6. **Sidebar:** shows only active-leaf rows (server provides the field); the
-   cluster row gets a small branch icon + branch count.
+   in-place view swap. ~~Branch lists cached per cluster in
+   `useSessionStore`~~ — **not shipped:** the list is component state in
+   `ChatInterface.tsx`, refetched for whichever session is in view.
+6. **Sidebar:** shows only active-leaf rows (server provides the field).
+   ~~the cluster row gets a small branch icon + branch count~~ — **not
+   shipped.** The badge and the sidebar branch list were both built during
+   review and then removed: two surfaces counting branches two different ways
+   (siblings at this anchor vs. whole-cluster size) contradicted each other on
+   screen. The server-side `branchCount` that fed them has been removed too.
 
 ## 6. Error handling & edge cases
 
 | Case | Behavior |
 |---|---|
-| Fork fails (SDK error, dead CLI, unknown uuid) | Restore `viewHiddenCount = 0` (old view reappears intact), keep edited text in the composer, show error toast. No DB row was created. |
+| Fork fails (SDK error, dead CLI, unknown uuid) | Restore `viewHiddenCount = 0` (old view reappears intact), put the edited text back in the composer and re-enter edit mode, show a destructive `Alert` above the input (as shipped — not a toast). No DB row exists if the failure preceded the SDK's session-id announcement; see §4.4 for the case where it did not. |
 | Edit the FIRST prompt | Not supported: ✏️ hidden on the first user message (pagination-aware — only once the full history is loaded); server rejects with `FORK_FAILED` ("start a new session instead") for stale/non-UI clients. |
 | ✏️ while streaming | Button disabled; user aborts first (existing control). |
 | Edit on a non-active branch | Works identically — fork from the viewed session; new branch becomes active leaf. |

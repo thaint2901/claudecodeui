@@ -49,6 +49,7 @@
     "lint": "eslint src/ server/",
     "lint:fix": "eslint src/ server/ --fix",
     "perf:budget": "node scripts/perf/chat-perf-budget.mjs",
+    "a11y:branch": "node scripts/a11y/branch-switch-contract.mjs",
     "start": "npm run build && npm run server",
     "release": "./release.sh",
     "prepublishOnly": "npm run build",

@@ -99,7 +99,6 @@ export async function broadcastCanonicalSessionUpsert(appSessionId: string): Pro
       messageCount: 0,
       lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
       activeLeaf: row.active_leaf === 1,
-      branchCount: row.fork_root_session_id ? sessionsDb.getClusterBranches(row.session_id).length : 0,
     },
     project: project
       ? {

@@ -178,7 +178,16 @@ function ChatMessagesPane({
       ref={scrollContainerRef}
       onWheel={onWheel}
       onTouchMove={onTouchMove}
-      className={`chat-messages-pane relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden pt-3 sm:pt-4 ${
+      // Programmatically focusable, never in the Tab order. A keyboard branch
+      // switch normally hands focus back to the pager that replaced the one
+      // pressed, but a branch whose fork point sits outside the loaded tail
+      // renders no pager at all — leaving focus on <body>, so the next Tab
+      // restarts from the top of the document (WCAG 2.4.3). The switch puts it
+      // here instead: the region the user was reading, from which Tab
+      // continues into the composer as it would have anyway.
+      tabIndex={-1}
+      data-transcript-region=""
+      className={`chat-messages-pane relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden pt-3 focus:outline-none sm:pt-4 ${
         hasActivityIndicator ? 'pb-12 sm:pb-14' : 'pb-3 sm:pb-4'
       }`}
     >

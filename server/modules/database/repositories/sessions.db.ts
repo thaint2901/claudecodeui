@@ -643,27 +643,6 @@ export const sessionsDb = {
     return normalizeSessionRow(activate() ?? null) ?? null;
   },
 
-  /**
-   * Cluster sizes (branch count per fork root) for every forked cluster in a
-   * project, in one grouped query — avoids one getClusterBranches() call per
-   * row when mapping a project's full session list.
-   */
-  getForkClusterSizesByProjectPath(projectPath: string): Map<string, number> {
-    const db = getConnection();
-    const normalizedProjectPath = normalizeProjectPath(projectPath);
-    const rows = db
-      .prepare(
-        `SELECT fork_root_session_id, COUNT(*) AS c
-         FROM sessions
-         WHERE project_path = ?
-           AND fork_root_session_id IS NOT NULL
-         GROUP BY fork_root_session_id`
-      )
-      .all(normalizedProjectPath) as Array<{ fork_root_session_id: string; c: number }>;
-
-    return new Map(rows.map((row) => [row.fork_root_session_id, row.c]));
-  },
-
   /** All branches of a session's fork cluster; [] when never forked. */
   getClusterBranches(sessionId: string): SessionRow[] {
     const db = getConnection();

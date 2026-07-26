@@ -41,7 +41,9 @@ type MessageComponentProps = {
   showThinking?: boolean;
   selectedProject?: Project | null;
   provider: Provider | string;
-  /** Whether the active provider/session supports edit-and-fork (Claude only, not while streaming). */
+  /** Whether the active provider supports edit-and-fork (Claude only). Deliberately
+   *  independent of "is a run in progress" — that would flip twice per message sent
+   *  and re-render every row; the owner checks it when the button is pressed. */
   canEditPrompt?: boolean;
   onEditPrompt?: (message: ChatMessage) => void;
   /** Renders the `< n/total >` branch switcher under this message, or null. */
@@ -148,37 +150,44 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
               width: 170px of controls against ~110px of text, so a one-word
               prompt still rendered a 194px bubble.
 
-              Hover-gated at the user's request, reversing the earlier
-              "always visible" call. Two escapes keep that from stranding
-              anyone, both via the shared rules in index.css: a coarse
-              pointer (no hover to give) pins the row visible, and
-              `:focus-within` reveals it for keyboard users. Fading with
-              `opacity` rather than mounting on hover is what keeps the next
-              message from jumping. */}
-          <div className="col-start-1 row-start-2 mt-1 flex items-center justify-end gap-1 text-[11px] text-gray-400 opacity-0 transition-opacity duration-150 group-hover:opacity-100 dark:text-gray-500">
-            {canEditPrompt && message.uuid && onEditPrompt && (
-              <>
-                <Tooltip content={t('branch.editTitle')} position="top">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    onClick={handleEditPromptClick}
-                    aria-label={t('branch.editAria')}
-                    className="tap-target h-6 gap-1 rounded px-1.5 py-0 text-[11px] font-medium [&_svg]:size-3"
-                  >
-                    <Pencil aria-hidden />
-                    {t('branch.editLabel')}
-                  </Button>
-                </Tooltip>
-                <span aria-hidden className="mx-0.5 h-3 w-px shrink-0 bg-border" />
-              </>
-            )}
-            {shouldShowUserCopyControl && (
-              <MessageCopyControl content={userCopyContent} messageType="user" />
-            )}
-            {/* Last of the controls: this prompt is the message that differs
-                between siblings, so the version pager belongs to it. */}
-            {branchSwitcher}
+              The row itself is always present and always opaque; only the
+              CONTROLS fade. The timestamp rides along outside that wrapper
+              because hover-gating it left user turns with no visible time
+              while assistant turns kept theirs — an asymmetry nobody asked
+              for. Keeping the row mounted at full height is also what stops
+              the next message jumping when the controls appear.
+
+              The controls are hover-gated at the user's request, reversing
+              the earlier "always visible" call. Two escapes keep that from
+              stranding anyone, both from the shared rules in index.css: a
+              coarse pointer (no hover to give) pins them visible, and
+              `:focus-within` reveals them for keyboard users. */}
+          <div className="col-start-1 row-start-2 mt-1 flex items-center justify-end gap-1 text-[11px] text-gray-600 dark:text-gray-400">
+            <span className="flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+              {canEditPrompt && message.uuid && onEditPrompt && (
+                <>
+                  <Tooltip content={t('branch.editTitle')} position="top">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={handleEditPromptClick}
+                      aria-label={t('branch.editAria')}
+                      className="tap-target h-6 gap-1 rounded px-1.5 py-0 text-[11px] font-medium [&_svg]:size-3"
+                    >
+                      <Pencil aria-hidden />
+                      {t('branch.editLabel')}
+                    </Button>
+                  </Tooltip>
+                  <span aria-hidden className="mx-0.5 h-3 w-px shrink-0 bg-border" />
+                </>
+              )}
+              {shouldShowUserCopyControl && (
+                <MessageCopyControl content={userCopyContent} messageType="user" />
+              )}
+              {/* Last of the controls: this prompt is the message that differs
+                  between siblings, so the version pager belongs to it. */}
+              {branchSwitcher}
+            </span>
             <span>{formattedTime}</span>
           </div>
           {!isGrouped && (
@@ -468,9 +477,29 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
             {/* Fallback slot only. The switcher normally belongs to the user
                 prompt below this turn — the message that actually differs
                 between siblings — but when no such prompt follows the anchor
-                (it is the last loaded message, or everything after it is a
-                tool result) the owner resolves back to this assistant part so
-                the control still has somewhere to render. */}
+                the owner resolves back to this assistant part. Reachable when
+                the anchor is the last loaded message, when the tail is hidden
+                during an optimistic fork, or when an earlier anchor already
+                claimed the prompt. `pickBranchSwitcherOwners` guarantees the
+                id it hands back is a non-tool part, i.e. one this component
+                renders rather than ToolGroupContainer.
+
+                Visible at rest, unlike the copy of this control on a user
+                turn, and that asymmetry is deliberate: a pager follows the
+                visibility of the controls it sits among. On a user turn those
+                are hover-gated at the owner's request; here the copy, speak
+                and timestamp controls directly above are always visible, so
+                hiding only the pager would make it the odd one out.
+
+                Matching the user turn is also not free. These controls fade
+                via the unnamed `group-hover:` utility, whose compiled rule is
+                a plain descendant selector — putting `group` on this
+                container would capture every `group-hover:` inside the
+                answer, so hovering anywhere in a long reply would light up
+                every code block's copy pill at once (Markdown.tsx). A named
+                group would avoid that but would no longer match the touch and
+                `:focus-within` escapes in index.css, which key off the
+                unnamed class. Not worth it for the rarest slot. */}
             {branchSwitcher && (
               <div className="mt-1 flex justify-end">{branchSwitcher}</div>
             )}

@@ -132,6 +132,9 @@ interface ChatComposerProps {
   editingSentPrompt?: { uuid: string; content: string } | null;
   /** Invoked when the user cancels an in-progress edit-and-fork draft. */
   onCancelEditSentPrompt?: () => void;
+  /** Message shown when a fork was rejected; null hides the notice. */
+  forkError?: string | null;
+  onDismissForkError?: () => void;
 }
 
 export default function ChatComposer({
@@ -197,6 +200,8 @@ export default function ChatComposer({
   isStopping = false,
   editingSentPrompt = null,
   onCancelEditSentPrompt,
+  forkError,
+  onDismissForkError,
 }: ChatComposerProps) {
   const { t } = useTranslation('chat');
   const commandMenuPosition = useMemo(() => {
@@ -351,6 +356,22 @@ export default function ChatComposer({
           onEdit={onEditQueuedDraft}
           onDelete={onDeleteQueuedDraft}
         />
+      )}
+
+      {/* A rejected fork used to be reported only to the console while the
+          user's edited prompt vanished with the composer clear. The edit is
+          restored underneath this notice, so the message says where it went. */}
+      {forkError && (
+        <div className="mx-auto mb-3 max-w-[54.25rem]">
+          <Alert variant="destructive">
+            <AlertDescription className="flex items-center justify-between gap-2">
+              <span>{forkError}</span>
+              <button type="button" onClick={onDismissForkError} className="underline">
+                {t('input.editSentPrompt.dismiss', { defaultValue: 'Dismiss' })}
+              </button>
+            </AlertDescription>
+          </Alert>
+        </div>
       )}
 
       {editingSentPrompt && (

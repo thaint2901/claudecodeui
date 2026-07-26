@@ -29,7 +29,7 @@ async function withIsolatedDatabase(runTest: () => void | Promise<void>): Promis
   }
 }
 
-test('getProjectSessionsPage reports branchCount as the active cluster size, 0 for a plain session', async () => {
+test('getProjectSessionsPage lists one row per fork cluster — the active leaf — plus plain sessions', async () => {
   await withIsolatedDatabase(async () => {
     sessionsDb.createSession('root-s', 'claude', '/workspace/p');
     sessionsDb.createForkedSession({
@@ -51,8 +51,5 @@ test('getProjectSessionsPage reports branchCount as the active cluster size, 0 f
     // separately in the database-layer tests); only the active leaf and the
     // plain session should be present here.
     assert.deepEqual([...byId.keys()].sort(), ['branch-1', 'plain-s']);
-
-    assert.equal(byId.get('branch-1')?.branchCount, 2);
-    assert.equal(byId.get('plain-s')?.branchCount, 0);
   });
 });

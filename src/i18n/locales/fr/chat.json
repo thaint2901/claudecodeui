@@ -118,7 +118,12 @@
     "clickToChangeMode": "Cliquez pour changer le mode de permission (ou appuyez sur Tab dans la saisie)",
     "showAllCommands": "Afficher toutes les commandes",
     "clearInput": "Effacer la saisie",
-    "scrollToBottom": "Défiler vers le bas"
+    "scrollToBottom": "Défiler vers le bas",
+    "editSentPrompt": {
+      "banner": "Editing a sent prompt — the new branch only rewinds the conversation. Code changes after this point are kept (see the Git tab).",
+      "cancel": "Cancel",
+      "dismiss": "Dismiss"
+    }
   },
   "providerSelection": {
     "title": "Choisissez votre assistant IA",
@@ -225,6 +230,10 @@
     "next": "Next branch",
     "editLabel": "Edit",
     "groupAria": "Conversation versions",
-    "announced": "Showing version {{current}} of {{total}}"
+    "announced": "Showing version {{current}} of {{total}}",
+    "forkFailed": "Could not fork the conversation.",
+    "forkFailedRestored": "Could not fork the conversation. Your edited prompt is back in the composer.",
+    "switchFailed": "Could not switch versions. Please try again.",
+    "editBlockedWhileRunning": "Wait for the current response to finish before editing a prompt."
   }
 }

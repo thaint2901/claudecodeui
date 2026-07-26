@@ -1,7 +1,7 @@
 # Kế hoạch điều tra hiệu năng frontend (chuyển cảnh giật/lag)
 
 **Ngày:** 2026-07-25
-**Trạng thái:** DRAFT — chờ user chốt scope + orchestration
+**Trạng thái:** HOÀN TẤT (2026-07-26) — điều tra đã kết thúc, fix đã ship trong PR #5. Kết quả đo nằm ở §2.5–§2.10 và §11; các quyết định của user ở §9bis. Phần kế hoạch phía dưới giữ nguyên làm lịch sử.
 **Bối cảnh:** user báo "hiệu năng chuyển cảnh khá tệ, giật, lag, không mượt" khi verify PR #5 trên localhost:5173.
 **Giả định của user:** đây có thể là vấn đề **system design**, ảnh hưởng mọi task tương lai → cần điều tra ở mức kiến trúc, không chỉ vá chỗ đau.
 
@@ -582,6 +582,13 @@ Sửa H2 (1 dòng `useCallback`) + H3 (`memo(Markdown)`) rồi đo lại. ~30 ph
 | 5 | **Ngưỡng** | Tái dùng ngân sách sẵn có trong `.claude/rules/performance.md`: **INP < 200 ms**, **TBT < 200 ms**. Bổ sung ràng buộc riêng cho tương tác chat: **không long task đơn lẻ > 50 ms** — đây là ngưỡng mắt người cảm nhận thành "khựng", và baseline đang vi phạm (111–137 ms) |
 
 ### Sổ theo dõi task (tuần tự, mỗi dòng một fork)
+
+> **Bảng này KHÔNG được cập nhật trong lúc chạy và đã lạc hậu — đừng đọc nó như
+> việc còn tồn.** Điều tra đã kết thúc: thủ phạm là `react-syntax-highlighter`
+> dựng một React element mỗi token, và bất kỳ re-render nào chạm tới message row
+> đều trả lại toàn bộ chi phí đó. Fix (`React.memo` trên `Markdown` và
+> `HighlightedCode`, ổn định tham chiếu prop ở biên message row) đã ship trong
+> PR #5. Số đo thật nằm ở §2.5–§2.10, kết luận ở §11. Giữ bảng làm lịch sử.
 
 | # | Task | Ưu tiên | Trạng thái |
 |---|------|---------|-----------|

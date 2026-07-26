@@ -30,6 +30,38 @@ type AnchorCandidate = {
   isToolUse?: boolean;
 };
 
+type BranchSibling = {
+  sessionId: string;
+  activeLeaf?: boolean;
+};
+
+/**
+ * Which sibling the `‹ n/total ›` pager is currently sitting on, or -1 when the
+ * list can position neither signal (the caller then withholds the pager rather
+ * than render a position it cannot justify).
+ *
+ * The two signals are not interchangeable and must be tried in this order.
+ * `sessionId` is what the user is LOOKING AT; `activeLeaf` is what the server
+ * last told us. They disagree for as long as a switch is ahead of its
+ * `/branches` refetch — the transcript has already moved, the loaded rows still
+ * flag the previous sibling — and the branch list is deliberately kept across
+ * that window (a cleared list made a transient 500 delete the pager outright).
+ *
+ * Resolving both in one predicate (`b.sessionId === current || b.activeLeaf`)
+ * silently made array ORDER the tie-breaker, so a stale leaf on an earlier
+ * sibling beat the exact match on a later one: the pager read `2/3` while
+ * version 3 was on screen, and `›` then navigated to the version already shown.
+ * If that refetch failed, the list is kept and the wrong position was permanent.
+ */
+export function pickBranchIndex(
+  siblings: readonly BranchSibling[],
+  currentSessionId: string | null | undefined,
+): number {
+  const onScreen = siblings.findIndex((b) => b.sessionId === currentSessionId);
+  if (onScreen >= 0) return onScreen;
+  return siblings.findIndex((b) => b.activeLeaf);
+}
+
 /**
  * The uuid of the conversation's FIRST user message, for hiding the
  * edit-prompt affordance on it: editing the first prompt has no preceding
@@ -71,14 +103,20 @@ export function firstUserMessageUuid(
  * proximity nor alignment said who owned it.
  *
  * So: resolve each anchor to the first plain user turn after it, and fall back
- * to the anchor's own assistant part when there is none.
+ * to the anchor's own last non-tool assistant part when there is none.
  *
- * Two shapes force that fallback, and both must keep rendering something
- * rather than silently dropping the control:
+ * The reachable fallback triggers are:
  *   - the anchor is the last loaded message (nothing follows it yet);
- *   - every following user entry is a tool_result (`isToolUse`), which
- *     ChatMessagesPane routes to ToolGroupContainer — a component with no
- *     switcher slot, so an id pointing there renders nothing at all.
+ *   - the tail after it is hidden — `viewHiddenCount` / `forkHiddenIds` during
+ *     an optimistic fork (useChatSessionState.ts);
+ *   - an earlier anchor already claimed the prompt that follows.
+ *
+ * The fallback deliberately skips tool parts: ChatMessagesPane routes grouped
+ * tool parts to ToolGroupContainer, which has no switcher slot, so an id
+ * pointing there would render nothing at all. Today no tool row even reaches
+ * this function with a uuid, but that is an invariant of the renderer rather
+ * than of this module — adding `uuid` to a tool row for deep-linking would
+ * otherwise delete the control silently.
  */
 export function pickBranchSwitcherOwners(
   messages: readonly AnchorCandidate[],
@@ -92,14 +130,31 @@ export function pickBranchSwitcherOwners(
   const owners = new Map<string, string>();
   if (anchors.size === 0) return owners;
 
-  // Last part wins: an array-content assistant turn renders as several parts
-  // and the switcher belongs at the visual end of that turn.
+  // Two indexes per anchor, because they answer different questions.
+  // `anchorIndexes` is where the forward scan starts — the LAST part of the
+  // anchor turn, so the scan cannot re-find the turn's own rows.
+  // `anchorFallbacks` is the id to fall back to, and it has to be a part
+  // MessageComponent will actually render: ChatMessagesPane routes grouped
+  // tool parts to ToolGroupContainer, which has no switcher slot, so an id
+  // pointing there renders nothing at all. Excluding tool parts from the
+  // fallback and not from `anchorIndexes` is deliberate — dropping such an
+  // anchor outright would also lose the switcher when a perfectly good prompt
+  // follows it.
+  //
+  // The `!message.uuid` test is load-bearing rather than defensive: the
+  // renderer gives a uuid only to user-text and assistant-text rows
+  // (useChatMessages.ts), so every tool, thinking and error row arrives with
+  // `uuid: undefined`. Without it `baseMessageUuid` is handed undefined on the
+  // first tool call of any session.
   const anchorIndexes = new Map<string, number>();
+  const anchorFallbacks = new Map<string, string>();
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index];
     if (message.type !== 'assistant' || !message.uuid) continue;
     const base = baseMessageUuid(message.uuid);
-    if (anchors.has(base)) anchorIndexes.set(base, index);
+    if (!anchors.has(base)) continue;
+    anchorIndexes.set(base, index);
+    if (!message.isToolUse) anchorFallbacks.set(base, message.uuid);
   }
 
   // Ascending index order, so when two anchors would claim the same following
@@ -117,7 +172,7 @@ export function pickBranchSwitcherOwners(
       }
     }
 
-    const fallbackId = messages[anchorIndex].uuid;
+    const fallbackId = anchorFallbacks.get(anchor);
     const resolved = ownerId && !owners.has(ownerId) ? ownerId : fallbackId;
     if (resolved && !owners.has(resolved)) owners.set(resolved, anchor);
   }

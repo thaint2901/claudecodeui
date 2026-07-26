@@ -26,12 +26,18 @@ import { useSessionStore } from '../../../stores/useSessionStore';
 import type { NormalizedMessage } from '../../../stores/useSessionStore';
 import { postStopSession } from '../../../contexts/sessionLockApi';
 import { api } from '../../../utils/api';
-import { baseMessageUuid, firstUserMessageUuid, pickBranchSwitcherOwners } from '../utils/branchAnchors';
+import {
+  baseMessageUuid,
+  firstUserMessageUuid,
+  pickBranchIndex,
+  pickBranchSwitcherOwners,
+} from '../utils/branchAnchors';
+import { useBranchSwitchController } from '../hooks/useBranchSwitchController';
 
 import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatComposer from './subcomponents/ChatComposer';
 import CommandResultModal from './subcomponents/CommandResultModal';
-import { BranchSwitcher } from './subcomponents/BranchSwitcher';
+import { BranchSwitcher, type BranchSwitchMeta } from './subcomponents/BranchSwitcher';
 
 /** A row from `GET /api/providers/sessions/:id/branches`. */
 type SessionBranch = {
@@ -149,7 +155,6 @@ function ChatInterface({
     handleScroll,
     beginForkView,
     clearForkView,
-    isForkViewActive,
   } = useChatSessionState({
     selectedProject,
     selectedSession,
@@ -182,6 +187,16 @@ function ChatInterface({
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
+
+  // Read at click time, never rendered. `isProcessing` flips twice per message
+  // sent, so gating the ✏️ button with it — as a `canEditPrompt` prop or as a
+  // `useCallback` dep on the click handler — invalidates `React.memo` on EVERY
+  // message row twice per send. The row props stay constant instead and the
+  // run-in-progress check moves into `handleEditPrompt` below.
+  const isProcessingRef = useRef(isProcessing);
+  useEffect(() => {
+    isProcessingRef.current = isProcessing;
+  }, [isProcessing]);
 
   // A failed lookup must not be rendered as "this session has no branches".
   // Both states used to collapse to `[]`, so a transient 500 on one of the
@@ -221,10 +236,23 @@ function ChatInterface({
   }, []);
 
   useEffect(() => {
-    setBranches([]);
     if (!currentSessionId) {
+      setBranches([]);
       return;
     }
+    // Clearing unconditionally here is what made a transient 500 delete the
+    // pager: `fetchBranches` keeps the last known list on failure, but this
+    // effect had already emptied it, so a failed refetch left the session
+    // looking un-forked — and the sidebar shows one row per cluster, so the
+    // sibling versions had no entry point left anywhere until a reload.
+    // Every in-app route to a sibling (the pager, the post-fork swap) lands on
+    // a session that is already IN the loaded list, so keeping that list while
+    // the refetch is in flight shows the same cluster it belongs to. A session
+    // outside the list is a different conversation and still starts empty —
+    // rendering the previous conversation's branches over it would be worse.
+    setBranches((previous) => (
+      previous.some((branch) => branch.sessionId === currentSessionId) ? previous : []
+    ));
     let cancelled = false;
     void fetchBranches(currentSessionId, () => !cancelled);
     return () => {
@@ -250,29 +278,107 @@ function ChatInterface({
     });
   }, [branches]);
 
-  const switchBranch = useCallback(async (branchSessionId?: string) => {
+  // One owner for the whole switch lifecycle: what the live region says (it has
+  // to live outside the message list, because the pager's subtree is replaced on
+  // every switch and a live region inserted together with its text is not
+  // reliably announced), and which pager may take focus back afterwards.
+  const formatBranchAnnouncement = useCallback(
+    (current: number, total: number) => t('branch.announced', { current, total }),
+    [t],
+  );
+  const {
+    announcement: branchAnnouncement,
+    begin: beginBranchSwitch,
+    commit: commitBranchSwitch,
+    abort: abortBranchSwitch,
+  } = useBranchSwitchController({ currentSessionId, formatAnnouncement: formatBranchAnnouncement });
+
+  /** Set when a fork is rejected, so the composer can say so on screen. */
+  const [forkError, setForkError] = useState<string | null>(null);
+  const dismissForkError = useCallback(() => setForkError(null), []);
+
+  // Every fork error describes something that happened in ONE conversation, but
+  // `ChatInterface` is mounted once for the whole app (MainContent renders it
+  // without a `key`), so the banner outlived the session it belonged to: a
+  // failed switch in A left "Could not switch versions" pinned above B's
+  // composer, describing an action never taken there. The successful paths
+  // already clear it; only leaving did not.
+  useEffect(() => {
+    setForkError(null);
+  }, [currentSessionId]);
+
+  /**
+   * Sessions with a fork submitted and not yet resolved, mapped to the provider
+   * that ran it. The socket is shared by every open session, so "is a fork in
+   * flight?" cannot be answered by state derived from the VIEWED session —
+   * doing that reported a background run's `complete` as a failed fork in a
+   * session that never forked, and reported a real unhonored fork nowhere at
+   * all once the user had navigated away. An entry is removed by exactly one
+   * of the three outcomes below: branch created, fork failed, run completed.
+   */
+  const pendingForkRef = useRef<Map<string, Provider>>(new Map());
+  const handleForkSubmitted = useCallback((uuid: string) => {
+    const sid = currentSessionIdRef.current;
+    if (sid) {
+      pendingForkRef.current.set(sid, provider);
+    }
+    beginForkView(uuid);
+  }, [beginForkView, provider]);
+
+  const switchBranch = useCallback(async (branchSessionId: string | undefined, meta: BranchSwitchMeta) => {
     if (!branchSessionId) return;
+    // Snapshot before the first await: modality, the pager pressed and the
+    // session in view are all only true of the moment the chevron went down.
+    const request = beginBranchSwitch(meta, currentSessionIdRef.current);
     try {
       const response = await api.activateBranch(branchSessionId);
       if (!response.ok) {
         console.error('Branch activation failed', { branchSessionId, status: response.status });
+        abortBranchSwitch(request);
+        // Without this the transcript, the counter and the focus are all
+        // unchanged, so the chevron reads as a dead button.
+        setForkError(t('branch.switchFailed'));
         if (currentSessionId) {
           void fetchBranches(currentSessionId, () => currentSessionIdRef.current === currentSessionId);
         }
         return;
       }
+      setForkError(null);
+      // Everything the snapshot promised is re-checked here. A false means the
+      // user has left this conversation while the request was in flight: the
+      // branch is activated server-side, but pulling the route and the focus
+      // back into a session they walked away from is the defect, not the fix.
+      if (!commitBranchSwitch(request, branchSessionId, { current: meta.targetIndex, total: meta.total })) {
+        return;
+      }
       await sessionStore.refreshFromServer(branchSessionId);
+      // The same rule as the check above, because this is a SECOND await and
+      // the user can leave during it too. `commit` validated the snapshot
+      // before the refresh, not after it; everything below rewrites the route,
+      // so running it here dragged the user out of whatever they had opened in
+      // the meantime — and with `replace: true`, deleted that history entry on
+      // the way out. The branch stays activated server-side either way; the
+      // controller has already retracted the focus claim and the announcement
+      // when the session changed under it.
+      if (currentSessionIdRef.current !== request.fromSessionId) {
+        return;
+      }
       sessionStore.setActiveSession(branchSessionId);
       setCurrentSessionId(branchSessionId);
       onNavigateToSession?.(branchSessionId, { replace: true });
       clearForkView();
     } catch (error) {
       console.error('[ChatInterface] Branch switch failed', error);
+      // A claim made just above must not outlive the refresh that threw, or it
+      // waits for whatever pager mounts next and steals focus into it.
+      abortBranchSwitch(request);
+      setForkError(t('branch.switchFailed'));
       if (currentSessionId) {
         void fetchBranches(currentSessionId, () => currentSessionIdRef.current === currentSessionId);
       }
     }
-  }, [sessionStore, setCurrentSessionId, onNavigateToSession, clearForkView, currentSessionId, fetchBranches]);
+  }, [sessionStore, setCurrentSessionId, onNavigateToSession, clearForkView, currentSessionId, fetchBranches, t,
+    beginBranchSwitch, commitBranchSwitch, abortBranchSwitch]);
 
   // `renderedMessageId -> anchorUuid`: the switcher belongs to the user prompt
   // that differs between siblings, not to the shared assistant resume point the
@@ -310,12 +416,13 @@ function ChatInterface({
     if (!anchor) return null;
     const sibs = siblingsAt(anchor);
     if (sibs.length < 2) return null;
-    const idx = sibs.findIndex((b) => b.sessionId === currentSessionId || b.activeLeaf);
+    const idx = pickBranchIndex(sibs, currentSessionId);
     if (idx < 0) return null;
     return (
       <BranchSwitcher
         current={idx + 1}
         total={sibs.length}
+        anchor={anchor}
         prevSessionId={sibs[idx - 1]?.sessionId}
         nextSessionId={sibs[idx + 1]?.sessionId}
         onSwitch={switchBranch}
@@ -375,6 +482,8 @@ function ChatInterface({
     editingSentPrompt,
     startEditSentPrompt,
     cancelEditSentPrompt,
+    restoreEditSentPrompt,
+    clearEditSubmission,
   } = useChatComposerState({
     selectedProject,
     selectedSession,
@@ -402,7 +511,7 @@ function ChatInterface({
     setIsUserScrolledUp,
     setPendingPermissionRequests,
     resolvePermissionModeForProvider,
-    onForkSubmitted: beginForkView,
+    onForkSubmitted: handleForkSubmitted,
   });
 
   // Stable identity matters: this is handed to every message row, and an
@@ -412,8 +521,18 @@ function ChatInterface({
     // the server resolves the resume point by BARE transcript uuid, so strip
     // the part suffix before sending.
     if (!message.uuid) return;
+    // Forking mid-run would race the stream that is still writing the
+    // transcript being forked from. Checked here, through a ref, so the answer
+    // costs no row prop and no dep on this callback's identity — and said out
+    // loud in the composer, because a click that silently does nothing reads
+    // as a broken button.
+    if (isProcessingRef.current) {
+      setForkError(t('branch.editBlockedWhileRunning'));
+      return;
+    }
+    setForkError(null);
     startEditSentPrompt(baseMessageUuid(message.uuid), typeof message.content === 'string' ? message.content : '');
-  }, [startEditSentPrompt]);
+  }, [startEditSentPrompt, t]);
 
   // The remaining handlers below are hoisted out of JSX for the same reason:
   // `ChatMessagesPane` and `ChatComposer` are both memoized, and an inline
@@ -456,6 +575,9 @@ function ChatInterface({
     // still looking at the parent, and a backgrounded fork would otherwise
     // leave it behind for the next visit to the parent.
     sessionStore.clearRealtime(parentId);
+    pendingForkRef.current.delete(parentId);
+    // A fork landed, so any earlier failure notice is stale.
+    setForkError(null);
     // Adopt in place only when the fork's parent is the session being viewed.
     // A backgrounded fork (user switched to another session before the run
     // finished — including an aborted run whose branch was already created)
@@ -474,29 +596,61 @@ function ChatInterface({
     sessionStore.setActiveSession(branchId);
     setCurrentSessionId(branchId);
     onNavigateToSession?.(branchId);
+    clearEditSubmission();
     void fetchBranches(branchId, () => currentSessionIdRef.current === branchId);
-  }, [clearForkView, sessionStore, setCurrentSessionId, onNavigateToSession, fetchBranches]);
+  }, [clearForkView, clearEditSubmission, sessionStore, setCurrentSessionId, onNavigateToSession, fetchBranches]);
 
-  const onForkFailed = useCallback((_sid: string, error: string) => {
+  // The spec's error contract is three things — restore the view, keep the
+  // edited text, say what happened. Only the first used to ship: the composer
+  // is cleared at send time, so a failed fork silently destroyed the edit and
+  // reported it to the console, where no user is looking.
+  const onForkFailed = useCallback((sid: string, error: string) => {
+    console.error('Fork failed:', sid, error);
+    pendingForkRef.current.delete(sid);
+    // Same rule as `onBranchCreated`: a fork failing in a session the user is
+    // not looking at must not touch the session they ARE looking at. Without
+    // this the restore overwrote the other session's composer with the edited
+    // text and re-entered edit mode on a message uuid from the failed
+    // session — submitting then sent that foreign anchor against this session.
+    if (!sid || currentSessionIdRef.current !== sid) {
+      return;
+    }
     clearForkView();
-    console.error('Fork failed:', error);
-  }, [clearForkView]);
+    const restored = restoreEditSentPrompt();
+    setForkError(
+      restored
+        ? t('branch.forkFailedRestored', { defaultValue: 'Could not fork the conversation. Your edited prompt is back in the composer.' })
+        : t('branch.forkFailed', { defaultValue: 'Could not fork the conversation.' }),
+    );
+  }, [clearForkView, restoreEditSentPrompt, t]);
 
   const onCompleteWithoutBranch = useCallback((sid: string) => {
-    if (!isForkViewActive) return;
-    clearForkView();
-    console.error('Fork did not complete — restored the original view');
-    // Reuse the same in-conversation error surfacing as a protocol_error.
+    // Every run on the socket ends with a `complete`, so the only thing that
+    // makes this one a failed fork is a fork having been submitted for THIS
+    // session. Gating on the viewed session's fork state instead injected a
+    // fabricated fork error into whichever session happened to be on screen,
+    // and stayed silent about a real unhonored fork the user had left behind.
+    const forkProvider = sid ? pendingForkRef.current.get(sid) : undefined;
+    if (!forkProvider) return;
+    pendingForkRef.current.delete(sid);
+    console.error('Fork did not complete — restored the original view', sid);
+    // Reuse the same in-conversation error surfacing as a protocol_error, in
+    // the session that actually forked and under the provider that ran it.
     // Covers both an unhonored fork and an abort before the fork resolved.
     sessionStore.appendRealtime(sid, {
       id: `fork_not_honored_${Date.now()}`,
       sessionId: sid,
       timestamp: new Date().toISOString(),
-      provider,
+      provider: forkProvider,
       kind: 'error',
       content: 'Fork did not complete — restored the original view.',
     } as NormalizedMessage);
-  }, [isForkViewActive, clearForkView, sessionStore, provider]);
+    // The optimistic hiding belongs to the view; only unhide when this session
+    // is the one on screen.
+    if (currentSessionIdRef.current === sid) {
+      clearForkView();
+    }
+  }, [clearForkView, sessionStore]);
 
   useChatRealtimeHandlers({
     subscribe,
@@ -636,6 +790,19 @@ function ChatInterface({
   return (
     <PermissionContext.Provider value={permissionContextValue}>
       <div className="flex h-full min-h-0 flex-col">
+        {/* One live region for the whole transcript, mounted for the lifetime
+            of the view. The pager cannot host it: switching branches replaces
+            the prompt the pager lives in, and a region inserted at the same
+            moment as its text is not reliably announced — the switch went out
+            silently for screen-reader users while a sighted user sees the
+            entire transcript change. The text carries an invisible nonce so a
+            switch back to a position already announced still mutates this node;
+            an identical string is a no-op for `useState` and therefore silent.
+            The controller also empties it on a session change, so another
+            conversation never shows a position from this one. */}
+        <span role="status" aria-live="polite" className="sr-only">
+          {branchAnnouncement}
+        </span>
         <ChatMessagesPane
           scrollContainerRef={scrollContainerRef}
           onWheel={handleScroll}
@@ -683,7 +850,7 @@ function ChatInterface({
           showRawParameters={showRawParameters}
           showThinking={showThinking}
           selectedProject={selectedProject}
-          canEditPrompt={provider === 'claude' && !isProcessing}
+          canEditPrompt={provider === 'claude'}
           editBlockedUuid={editBlockedUuid}
           onEditPrompt={handleEditPrompt}
           renderBranchSwitcher={renderBranchSwitcher}
@@ -730,6 +897,8 @@ function ChatInterface({
           onDeleteQueuedDraft={deleteQueuedDraft}
           editingSentPrompt={editingSentPrompt}
           onCancelEditSentPrompt={cancelEditSentPrompt}
+          forkError={forkError}
+          onDismissForkError={dismissForkError}
           attachedImages={attachedImages}
           onRemoveImage={handleRemoveImage}
           uploadingImages={uploadingImages}
