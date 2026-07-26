@@ -26,7 +26,7 @@ import { useSessionStore } from '../../../stores/useSessionStore';
 import type { NormalizedMessage } from '../../../stores/useSessionStore';
 import { postStopSession } from '../../../contexts/sessionLockApi';
 import { api } from '../../../utils/api';
-import { baseMessageUuid, firstUserMessageUuid, pickBranchAnchorMessageIds } from '../utils/branchAnchors';
+import { baseMessageUuid, firstUserMessageUuid, pickBranchSwitcherOwners } from '../utils/branchAnchors';
 
 import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatComposer from './subcomponents/ChatComposer';
@@ -274,21 +274,21 @@ function ChatInterface({
     }
   }, [sessionStore, setCurrentSessionId, onNavigateToSession, clearForkView, currentSessionId, fetchBranches]);
 
-  // Anchors are BARE transcript uuids, but array-content assistant messages
-  // render as parts with `<uuid>_<partIndex>` ids — match on base uuid and
-  // hang the switcher on exactly one part per turn (the last assistant part).
+  // `renderedMessageId -> anchorUuid`: the switcher belongs to the user prompt
+  // that differs between siblings, not to the shared assistant resume point the
+  // anchor names (see pickBranchSwitcherOwners for the measurements).
   // `visibleMessages` gets a new reference on every stream flush (~100ms), so
   // the recomputed Map is swapped in only when its CONTENT changed — a stable
   // reference keeps `renderBranchSwitcher`'s identity, which is what lets
   // `React.memo` on the message rows keep working during streaming.
-  const anchorMessageIdsRef = useRef<Map<string, string>>(new Map());
-  const anchorMessageIds = useMemo(() => {
-    const next = pickBranchAnchorMessageIds(visibleMessages, branches.map((b) => b.forkedAtMessageUuid));
-    const prev = anchorMessageIdsRef.current;
-    if (prev.size === next.size && [...next].every(([anchor, id]) => prev.get(anchor) === id)) {
+  const switcherOwnersRef = useRef<Map<string, string>>(new Map());
+  const switcherOwners = useMemo(() => {
+    const next = pickBranchSwitcherOwners(visibleMessages, branches.map((b) => b.forkedAtMessageUuid));
+    const prev = switcherOwnersRef.current;
+    if (prev.size === next.size && [...next].every(([id, anchor]) => prev.get(id) === anchor)) {
       return prev;
     }
-    anchorMessageIdsRef.current = next;
+    switcherOwnersRef.current = next;
     return next;
   }, [visibleMessages, branches]);
 
@@ -304,8 +304,10 @@ function ChatInterface({
 
   const renderBranchSwitcher = useCallback((message: ChatMessage) => {
     if (!message.uuid) return null;
-    const anchor = baseMessageUuid(message.uuid);
-    if (anchorMessageIds.get(anchor) !== message.uuid) return null;
+    // Keyed by the RENDERED id, not the base uuid: the owning prompt is a
+    // different message from the anchor it switches at.
+    const anchor = switcherOwners.get(message.uuid);
+    if (!anchor) return null;
     const sibs = siblingsAt(anchor);
     if (sibs.length < 2) return null;
     const idx = sibs.findIndex((b) => b.sessionId === currentSessionId || b.activeLeaf);
@@ -319,7 +321,7 @@ function ChatInterface({
         onSwitch={switchBranch}
       />
     );
-  }, [anchorMessageIds, siblingsAt, currentSessionId, switchBranch]);
+  }, [switcherOwners, siblingsAt, currentSessionId, switchBranch]);
 
   const {
     input,

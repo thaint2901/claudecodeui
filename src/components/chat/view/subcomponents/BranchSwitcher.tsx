@@ -42,13 +42,14 @@ export function BranchSwitcher({ current, total, prevSessionId, nextSessionId, o
   if (total < 2) return null;
 
   return (
-    <div className="mt-1 flex items-center justify-end">
-      {/* Grouping the two chevrons into a pill keeps them legible as one
-          control rather than decoration in the margin. The position is left
-          deliberately bare of a counter: two competing numberings (this one
-          counts siblings at the fork point, anything cluster-wide counts the
-          whole tree) contradicted each other on screen, and the arrows alone
-          say what the control does. */}
+    <span className="inline-flex items-center">
+      {/* Grouping the chevrons into a pill keeps them legible as one control
+          rather than decoration in the margin. The counter between them is
+          shown: it was sr-only while a second, cluster-wide numbering existed
+          in the sidebar and the two contradicted each other on screen. That
+          list is gone, so this is now the only count — and without it the
+          arrows cannot say how many versions exist or which one is on
+          screen. */}
       <div
         role="group"
         aria-label={t('branch.groupAria')}
@@ -65,6 +66,14 @@ export function BranchSwitcher({ current, total, prevSessionId, nextSessionId, o
           <ChevronLeft aria-hidden />
         </Button>
 
+        {/* `aria-hidden` because the live region below already speaks the
+            position — without it a screen reader announces the count twice on
+            every switch. `tabular-nums` stops the pill resizing as the digits
+            change, which would nudge the whole row. */}
+        <span aria-hidden className="px-0.5 text-[11px] tabular-nums leading-none">
+          {current}/{total}
+        </span>
+
         <Button
           type="button"
           variant="ghost"
@@ -80,11 +89,12 @@ export function BranchSwitcher({ current, total, prevSessionId, nextSessionId, o
       {/* Switching branches swaps the entire transcript underneath the reader.
           Without a live region a screen reader user gets no signal that
           anything happened at all — and unlike sighted users, who can see the
-          messages change, they have nothing else to go on. The position is
-          spoken here precisely because it is no longer shown. */}
+          messages change, they have nothing else to go on. A visible counter
+          does not replace this: static text changing off-focus is not
+          announced. */}
       <span role="status" aria-live="polite" className="sr-only">
         {t('branch.announced', { current, total })}
       </span>
-    </div>
+    </span>
   );
 }
