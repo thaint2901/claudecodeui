@@ -27,16 +27,9 @@ export function baseMessageUuid(id: string): string {
 type AnchorCandidate = {
   uuid?: string;
   type: string;
+  isToolUse?: boolean;
 };
 
-/**
- * Picks, for every anchor uuid, the single message id that should render the
- * branch switcher: the LAST 'assistant'-typed message whose base uuid equals
- * the anchor. Assistant text parts are the only ones routed to
- * MessageComponent (tool parts render via ToolGroupContainer, which has no
- * switcher slot), and the last part puts the switcher at the visual end of
- * the turn.
- */
 /**
  * The uuid of the conversation's FIRST user message, for hiding the
  * edit-prompt affordance on it: editing the first prompt has no preceding
@@ -63,7 +56,31 @@ export function firstUserMessageUuid(
   return null;
 }
 
-export function pickBranchAnchorMessageIds(
+/**
+ * Decides which rendered message owns the `‹ n/total ›` switcher for each fork
+ * anchor, as a `renderedMessageId -> anchorUuid` map.
+ *
+ * The anchor itself is an ASSISTANT uuid — the resume point every sibling
+ * copies verbatim — so it is the one message a fork point does NOT change.
+ * What differs between siblings is the user prompt that follows it. Hanging
+ * the control on the anchor therefore paginated the shared message: measured
+ * on a real 4-branch cluster, pressing `›` left the attached message identical
+ * and rewrote the one below it. It also landed the control in the gutter
+ * between two turns (4px from the assistant block above, 16px from the user
+ * bubble below, right edge overhanging that bubble by 44px), so neither
+ * proximity nor alignment said who owned it.
+ *
+ * So: resolve each anchor to the first plain user turn after it, and fall back
+ * to the anchor's own assistant part when there is none.
+ *
+ * Two shapes force that fallback, and both must keep rendering something
+ * rather than silently dropping the control:
+ *   - the anchor is the last loaded message (nothing follows it yet);
+ *   - every following user entry is a tool_result (`isToolUse`), which
+ *     ChatMessagesPane routes to ToolGroupContainer — a component with no
+ *     switcher slot, so an id pointing there renders nothing at all.
+ */
+export function pickBranchSwitcherOwners(
   messages: readonly AnchorCandidate[],
   anchorUuids: Iterable<string | null | undefined>,
 ): Map<string, string> {
@@ -72,17 +89,38 @@ export function pickBranchAnchorMessageIds(
     if (anchor) anchors.add(anchor);
   }
 
-  const chosen = new Map<string, string>();
-  if (anchors.size === 0) return chosen;
+  const owners = new Map<string, string>();
+  if (anchors.size === 0) return owners;
 
-  for (const message of messages) {
+  // Last part wins: an array-content assistant turn renders as several parts
+  // and the switcher belongs at the visual end of that turn.
+  const anchorIndexes = new Map<string, number>();
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
     if (message.type !== 'assistant' || !message.uuid) continue;
     const base = baseMessageUuid(message.uuid);
-    if (anchors.has(base)) {
-      // Later parts overwrite earlier ones — the last match wins.
-      chosen.set(base, message.uuid);
-    }
+    if (anchors.has(base)) anchorIndexes.set(base, index);
   }
 
-  return chosen;
+  // Ascending index order, so when two anchors would claim the same following
+  // prompt the earlier one keeps it and the later one falls back to its own
+  // assistant part instead of overwriting.
+  const ordered = [...anchorIndexes].sort((a, b) => a[1] - b[1]);
+
+  for (const [anchor, anchorIndex] of ordered) {
+    let ownerId: string | undefined;
+    for (let index = anchorIndex + 1; index < messages.length; index++) {
+      const message = messages[index];
+      if (message.type === 'user' && message.uuid && !message.isToolUse) {
+        ownerId = message.uuid;
+        break;
+      }
+    }
+
+    const fallbackId = messages[anchorIndex].uuid;
+    const resolved = ownerId && !owners.has(ownerId) ? ownerId : fallbackId;
+    if (resolved && !owners.has(resolved)) owners.set(resolved, anchor);
+  }
+
+  return owners;
 }
