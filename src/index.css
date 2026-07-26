@@ -677,24 +677,70 @@
       touch-action: pan-y;
     }
     
-    /* Fix hover states on mobile */
-    .group:active .group-hover\:opacity-100,
-    .group .group-hover\:opacity-100 {
-      opacity: 1 !important;
-    }
-    
-    @media (hover: none) and (pointer: coarse) {
-      .group-hover\:opacity-100 {
-        opacity: 1 !important;
-      }
-      
-      .hover\:bg-gray-50:hover,
-      .hover\:bg-gray-100:hover,
-      .hover\:bg-red-200:hover,
-      .dark\:hover\:bg-gray-700:hover,
-      .dark\:hover\:bg-red-900\/50:hover {
-        background-color: inherit;
-      }
+    /* Hover-reveal fallbacks used to live here, scoped to max-width: 768px.
+       That left every touch device WIDER than a phone — iPad in landscape,
+       Surface, touch laptops — with permanently invisible controls. They now
+       live in the pointer-capability block below, where they belong. */
+  }
+
+  /* A hover-revealed control that is still transparent must not be clickable.
+     `opacity: 0` does not remove an element from hit-testing, so the edit
+     affordance on a chat bubble could be tapped while invisible: the composer
+     silently filled with the old prompt and the draft then survived a reload.
+
+     The rule assumes the revealed control sits INSIDE its `.group` box — true
+     for all current call sites. A control that overhangs the group (see the
+     `sm:group-hover:opacity-100` remove-X in ImageAttachment.tsx, which this
+     selector deliberately does not match) would become a dead corner, because
+     the pointer can be over it while `.group:hover` is still false. */
+  .group .group-hover\:opacity-100 {
+    pointer-events: none;
+  }
+
+  .group:hover .group-hover\:opacity-100,
+  .group:focus-within .group-hover\:opacity-100,
+  .group .group-hover\:opacity-100:focus-visible {
+    pointer-events: auto;
+  }
+
+  /* Restoring hit-testing is not enough on its own: a keyboard user could tab
+     onto a control that was clickable but still `opacity: 0` — focusable,
+     invisible, focus ring and all (WCAG 2.4.7). Reveal the focused control
+     itself rather than the whole group, so tabbing never uncovers a row's
+     other controls or hides content behind them. */
+  .group .group-hover\:opacity-100:focus-visible,
+  .group .group-hover\:opacity-100:focus-within {
+    opacity: 1;
+  }
+
+  /* Revealing the focused control is only half the job. On a sidebar session
+     row the revealed cluster is absolutely positioned on top of the
+     relative-age text, and that text only fades for hover
+     (`group-hover:opacity-0`) — so keyboard focus used to paint the buttons
+     over a fully opaque timestamp, measured at 8/8 rows. Fade the swapped-out
+     content for the focus case too.
+
+     Scoped with `:has()` to the group whose reveal-on-hover control actually
+     holds focus. Tailwind's plain `group-focus-within:opacity-0` variant would
+     also fire when the row's own link is focused — hiding the age while
+     revealing nothing in its place. */
+  .group:has(.group-hover\:opacity-100:focus-within) .group-hover\:opacity-0 {
+    opacity: 0;
+  }
+
+  /* WCAG 2.5.8 target size. 24px is the AA floor for any pointer; a finger
+     needs 44px, so the larger value is keyed on pointer capability rather
+     than viewport width. The icon inside stays whatever size it wants — this
+     grows the hit area, not the glyph. */
+  .tap-target {
+    min-height: 24px;
+    min-width: 24px;
+  }
+
+  @media (pointer: coarse) {
+    .tap-target {
+      min-height: 44px;
+      min-width: 44px;
     }
   }
   
@@ -703,7 +749,39 @@
     .touch\:opacity-100 {
       opacity: 1 !important;
     }
-    
+
+    /* No hover means no way to reveal a hover-gated control, so show them all
+       and make them tappable. Keyed on pointer capability rather than viewport
+       width, which is what previously left tablets with unreachable controls.
+       Note this matches devices whose PRIMARY input is touch (phones, tablets);
+       a touch laptop reports `hover: hover` / `pointer: fine` and keeps the
+       normal hover behaviour, which is correct — it has a pointer. */
+    .group:active .group-hover\:opacity-100,
+    .group .group-hover\:opacity-100 {
+      opacity: 1 !important;
+      pointer-events: auto;
+    }
+
+    /* Revealing those controls permanently is only safe when they don't sit on
+       top of content. Two call sites are absolutely positioned over their own
+       row, so on touch they need the space reserved instead of overlapping:
+       without this, every sidebar row lost its relative-age text (measured
+       100% occluded across all 20 rows at 1180x820) and code blocks lost the
+       right end of their first line under the copy pill. */
+    .touch-reserve-actions {
+      padding-right: 4rem !important;
+    }
+
+    .code-block-shell > pre {
+      padding-top: 2.75rem !important;
+    }
+
+    .hover\:bg-red-200:hover,
+    .dark\:hover\:bg-gray-700:hover,
+    .dark\:hover\:bg-red-900\/50:hover {
+      background-color: inherit;
+    }
+
     /* Completely disable hover states on touch devices */
     * {
       -webkit-tap-highlight-color: transparent !important;

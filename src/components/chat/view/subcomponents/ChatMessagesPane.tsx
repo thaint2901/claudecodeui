@@ -1,6 +1,11 @@
+/* eslint react/jsx-no-bind: ["error", { "ignoreDOMComponents": true, "allowArrowFunctions": false, "allowFunctions": false, "allowBind": false }] --
+ * Every prop this pane hands to a message row must keep its identity, or the
+ * rows' `React.memo` stops holding and each render re-pays the markdown +
+ * syntax-highlight cost for the whole visible transcript. See CLAUDE.md.
+ */
 import { useTranslation } from 'react-i18next';
 import { memo, useCallback, useMemo } from 'react';
-import type { Dispatch, RefObject, SetStateAction } from 'react';
+import type { Dispatch, ReactNode, RefObject, SetStateAction } from 'react';
 
 import type { ChatMessage } from '../../types/types';
 import type {
@@ -66,6 +71,13 @@ interface ChatMessagesPaneProps {
   showRawParameters?: boolean;
   showThinking?: boolean;
   selectedProject: Project;
+  /** Whether the active provider/session supports edit-and-fork (Claude only, not while streaming). */
+  canEditPrompt?: boolean;
+  /** Rendered uuid of the conversation's first user message — its ✏️ is hidden (no resume anchor before it). */
+  editBlockedUuid?: string | null;
+  onEditPrompt?: (message: ChatMessage) => void;
+  /** Renders the `< n/total >` branch switcher under a user message forked at that point, or null. */
+  renderBranchSwitcher?: (message: ChatMessage) => ReactNode;
 }
 
 function ChatMessagesPane({
@@ -115,6 +127,10 @@ function ChatMessagesPane({
   showRawParameters,
   showThinking,
   selectedProject,
+  canEditPrompt,
+  editBlockedUuid,
+  onEditPrompt,
+  renderBranchSwitcher,
 }: ChatMessagesPaneProps) {
   const { t } = useTranslation('chat');
   const groupedVisibleMessages = useMemo(
@@ -162,7 +178,16 @@ function ChatMessagesPane({
       ref={scrollContainerRef}
       onWheel={onWheel}
       onTouchMove={onTouchMove}
-      className={`chat-messages-pane relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden pt-3 sm:pt-4 ${
+      // Programmatically focusable, never in the Tab order. A keyboard branch
+      // switch normally hands focus back to the pager that replaced the one
+      // pressed, but a branch whose fork point sits outside the loaded tail
+      // renders no pager at all — leaving focus on <body>, so the next Tab
+      // restarts from the top of the document (WCAG 2.4.3). The switch puts it
+      // here instead: the region the user was reading, from which Tab
+      // continues into the composer as it would have anyway.
+      tabIndex={-1}
+      data-transcript-region=""
+      className={`chat-messages-pane relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden pt-3 focus:outline-none sm:pt-4 ${
         hasActivityIndicator ? 'pb-12 sm:pb-14' : 'pb-3 sm:pb-4'
       }`}
     >
@@ -288,6 +313,9 @@ function ChatMessagesPane({
                   showThinking={showThinking}
                   selectedProject={selectedProject}
                   provider={provider}
+                  canEditPrompt={canEditPrompt && (!editBlockedUuid || item.uuid !== editBlockedUuid)}
+                  onEditPrompt={onEditPrompt}
+                  renderBranchSwitcher={renderBranchSwitcher}
                 />
               );
             });

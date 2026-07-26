@@ -1,3 +1,7 @@
+/* eslint react/jsx-no-bind: ["error", { "ignoreDOMComponents": true, "allowArrowFunctions": false, "allowFunctions": false, "allowBind": false }] --
+ * Renders message rows; inline props here defeat their memo boundary and
+ * re-pay the syntax-highlight cost on every parent render. See CLAUDE.md.
+ */
 import { useMemo, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 

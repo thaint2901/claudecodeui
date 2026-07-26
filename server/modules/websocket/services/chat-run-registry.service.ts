@@ -36,6 +36,20 @@ type ChatRun = {
   writer: ChatSessionWriter;
   startedAt: number;
   completedAt: number | null;
+  /**
+   * Present only for edit-prompt-fork runs: the parent session this run
+   * branches from. When set, `recordProviderSessionId` must not remap the
+   * parent's app-id → provider-id mapping (see below) — it creates a new
+   * branch session row instead.
+   */
+  forkMeta?: {
+    parentSessionId: string;
+    parentProviderSessionId: string;
+    forkedAtMessageUuid: string | null;
+    projectPath: string;
+  };
+  /** The new session id created for a fork branch, once known. */
+  branchSessionId?: string;
 };
 
 /**
@@ -62,7 +76,7 @@ const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
  */
 const runs = new Map<string, ChatRun>();
 
-async function broadcastCanonicalSessionUpsert(appSessionId: string): Promise<void> {
+export async function broadcastCanonicalSessionUpsert(appSessionId: string): Promise<void> {
   const row = sessionsDb.getSessionById(appSessionId);
   if (!row || row.isArchived) {
     return;
@@ -84,6 +98,7 @@ async function broadcastCanonicalSessionUpsert(appSessionId: string): Promise<vo
       summary: row.custom_name || '',
       messageCount: 0,
       lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
+      activeLeaf: row.active_leaf === 1,
     },
     project: project
       ? {
@@ -150,6 +165,13 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     run.status = 'completed';
     run.completedAt = Date.now();
     evictRunLater(run.appSessionId);
+
+    if (run.forkMeta && !run.branchSessionId) {
+      console.warn('[ChatRunRegistry] Fork requested but no branch session was created during the run', {
+        appSessionId: run.appSessionId,
+        forkedAtMessageUuid: run.forkMeta.forkedAtMessageUuid,
+      });
+    }
   }
 
   run.events.push(outbound);
@@ -175,6 +197,45 @@ function recordProviderSessionId(run: ChatRun, providerSessionId: string): void 
   }
 
   run.providerSessionId = providerSessionId;
+
+  // Edit-prompt fork: the announced id belongs to a NEW branch session.
+  // The parent's app-id → provider-id mapping must stay intact (it still
+  // addresses the original transcript), so instead of remapping we insert
+  // the branch row and flip the cluster's active leaf.
+  if (run.forkMeta && providerSessionId !== run.forkMeta.parentProviderSessionId) {
+    try {
+      const branchSessionId = sessionsDb.createForkedSession({
+        providerSessionId,
+        parentSessionId: run.forkMeta.parentSessionId,
+        forkedAtMessageUuid: run.forkMeta.forkedAtMessageUuid,
+        provider: run.provider,
+        projectPath: run.forkMeta.projectPath,
+      });
+      run.branchSessionId = branchSessionId;
+
+      const event = decorateAndRecordEvent(run, {
+        kind: 'branch_created',
+        sessionId: run.appSessionId,
+        branchSessionId,
+        forkedAtMessageUuid: run.forkMeta.forkedAtMessageUuid,
+        timestamp: new Date().toISOString(),
+      } as unknown as NormalizedMessage);
+      if (event && run.writer.ws && run.writer.ws.readyState === WS_OPEN_STATE) {
+        run.writer.ws.send(JSON.stringify(event));
+      }
+
+      void broadcastCanonicalSessionUpsert(branchSessionId).catch(() => undefined);
+      void broadcastCanonicalSessionUpsert(run.forkMeta.parentSessionId).catch(() => undefined);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[ChatRunRegistry] Failed to persist fork branch', {
+        appSessionId: run.appSessionId,
+        providerSessionId,
+        error: message,
+      });
+    }
+    return;
+  }
 
   try {
     sessionsDb.assignProviderSessionId(run.appSessionId, providerSessionId);
@@ -215,6 +276,12 @@ export const chatRunRegistry = {
     providerSessionId: string | null;
     connection: RealtimeClientConnection;
     userId: string | number | null;
+    forkMeta?: {
+      parentSessionId: string;
+      parentProviderSessionId: string;
+      forkedAtMessageUuid: string | null;
+      projectPath: string;
+    };
     /**
      * Optional extra observer invoked (after the internal provider-id mapping
      * is recorded) every time the writer captures a provider-native session
@@ -240,6 +307,7 @@ export const chatRunRegistry = {
       writer: null as unknown as ChatSessionWriter,
       startedAt: Date.now(),
       completedAt: null,
+      forkMeta: input.forkMeta,
     };
 
     run.writer = new ChatSessionWriter({

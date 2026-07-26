@@ -67,6 +67,8 @@ interface UseChatComposerStateArgs {
   addMessage: (msg: ChatMessage) => void;
   setIsUserScrolledUp: (isScrolledUp: boolean) => void;
   setPendingPermissionRequests: Dispatch<SetStateAction<PendingPermissionRequest[]>>;
+  /** Called right after an edit-and-fork request is sent, with the edited message's uuid. */
+  onForkSubmitted?: (uuid: string) => void;
 }
 
 interface MentionableFile {
@@ -217,6 +219,7 @@ export function useChatComposerState({
   addMessage,
   setIsUserScrolledUp,
   setPendingPermissionRequests,
+  onForkSubmitted,
 }: UseChatComposerStateArgs) {
   const [input, setInput] = useState(() => {
     if (typeof window !== 'undefined' && selectedProject) {
@@ -231,6 +234,11 @@ export function useChatComposerState({
   const [imageErrors, setImageErrors] = useState<Map<string, string>>(new Map());
   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
   const [commandModalPayload, setCommandModalPayload] = useState<CommandModalPayload | null>(null);
+  /** Set while composing a reply to an edited (previously sent) prompt; drives `editAtMessageUuid`. */
+  const [editingSentPrompt, setEditingSentPrompt] = useState<{ uuid: string; content: string } | null>(null);
+  // Survives the unconditional composer clear in handleSubmit so a FORK_FAILED
+  // can hand the edit back. Cleared as soon as it is restored or cancelled.
+  const lastEditSubmissionRef = useRef<{ uuid: string; content: string } | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputHighlightRef = useRef<HTMLDivElement>(null);
@@ -811,6 +819,8 @@ export function useChatComposerState({
         }
         // selectedProject is guaranteed by the guard at the top of handleSubmit.
         safeLocalStorage.removeItem(`draft_input_${selectedProject.projectId}`);
+        // A queued draft must never carry the fork intent of the message it displaced.
+        setEditingSentPrompt(null);
         return;
       }
 
@@ -845,6 +855,8 @@ export function useChatComposerState({
           if (textareaRef.current) {
             textareaRef.current.style.height = 'auto';
           }
+          // A slash command is not a reply to the edited prompt — clear the fork intent.
+          setEditingSentPrompt(null);
           return;
         }
       }
@@ -961,8 +973,19 @@ export function useChatComposerState({
         options: {
           ...buildSendOptions(messageContent),
           images: uploadedImages,
+          ...(editingSentPrompt ? { editAtMessageUuid: editingSentPrompt.uuid } : {}),
         },
       });
+
+      if (editingSentPrompt) {
+        // Hold the text until the fork is known to have taken. The composer is
+        // cleared unconditionally below, and a FORK_FAILED afterwards used to
+        // leave the user with nothing — their edit gone from the composer and
+        // from the per-project draft, with only a console line to say why.
+        lastEditSubmissionRef.current = { uuid: editingSentPrompt.uuid, content: messageContent };
+        onForkSubmitted?.(editingSentPrompt.uuid);
+        setEditingSentPrompt(null);
+      }
 
       setInput('');
       inputValueRef.current = '';
@@ -996,6 +1019,8 @@ export function useChatComposerState({
       addMessage,
       setIsUserScrolledUp,
       slashCommands,
+      editingSentPrompt,
+      onForkSubmitted,
     ],
   );
 
@@ -1063,6 +1088,46 @@ export function useChatComposerState({
     setQueuedDraft(null);
   }, []);
 
+  const startEditSentPrompt = useCallback((uuid: string, content: string) => {
+    setEditingSentPrompt({ uuid, content });
+    setInput(content);
+    inputValueRef.current = content;
+    textareaRef.current?.focus();
+  }, []);
+
+  const cancelEditSentPrompt = useCallback(() => {
+    setEditingSentPrompt(null);
+    setInput('');
+    inputValueRef.current = '';
+    lastEditSubmissionRef.current = null;
+  }, []);
+
+  /**
+   * Puts a failed fork's edited text back in the composer and re-enters edit
+   * mode, so the user can retry or copy it out. Returns false when there is
+   * nothing to restore (the failure did not come from an edit submission).
+   */
+  const restoreEditSentPrompt = useCallback(() => {
+    const pending = lastEditSubmissionRef.current;
+    if (!pending) return false;
+    lastEditSubmissionRef.current = null;
+    setEditingSentPrompt({ uuid: pending.uuid, content: pending.content });
+    setInput(pending.content);
+    inputValueRef.current = pending.content;
+    textareaRef.current?.focus();
+    return true;
+  }, []);
+
+  /**
+   * Drops the held edit text without touching the composer. Called once the
+   * fork is known to have landed: the text has served its purpose, and leaving
+   * it behind meant a LATER unrelated failure could push a stale edit — and its
+   * stale anchor uuid — back into the composer.
+   */
+  const clearEditSubmission = useCallback(() => {
+    lastEditSubmissionRef.current = null;
+  }, []);
+
   // A voice transcript either fills the input (to edit before sending) or, when the
   // user tapped "stop and send", is submitted straight away. Mirror the value into
   // inputValueRef synchronously so handleSubmit reads the new text, not the stale state.
@@ -1126,6 +1191,30 @@ export function useChatComposerState({
       return;
     }
     setQueuedDraft(restoreQueuedDraft(sessionKey));
+  }, [sessionKey]);
+
+  // Edit-sent-prompt state is anchored to a specific message uuid in the
+  // session being viewed; ChatInterface never remounts on a session switch,
+  // so without this it would survive into the new session and reuse a stale
+  // anchor. Switching away mid-edit is treated as CANCEL: the composer text
+  // is the edit prefill (written by startEditSentPrompt into the per-project
+  // draft), so it is cleared along with the anchor — but only when an edit
+  // was actually active, so ordinary per-project drafts are left alone.
+  const editingSentPromptRef = useRef(editingSentPrompt);
+  useEffect(() => {
+    editingSentPromptRef.current = editingSentPrompt;
+  }, [editingSentPrompt]);
+  useEffect(() => {
+    // Unconditionally: the held edit text is anchored to a uuid in the session
+    // being left, so it must not survive to be restored into another one — and
+    // it outlives the edit-mode flag, which `handleSubmit` already cleared.
+    lastEditSubmissionRef.current = null;
+    if (!editingSentPromptRef.current) {
+      return;
+    }
+    setEditingSentPrompt(null);
+    setInput('');
+    inputValueRef.current = '';
   }, [sessionKey]);
 
   useEffect(() => {
@@ -1339,6 +1428,11 @@ export function useChatComposerState({
     queuedDraft,
     editQueuedDraft,
     deleteQueuedDraft,
+    editingSentPrompt,
+    startEditSentPrompt,
+    cancelEditSentPrompt,
+    restoreEditSentPrompt,
+    clearEditSubmission,
     handleVoiceTranscript,
     handleInputChange,
     handleKeyDown,

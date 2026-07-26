@@ -117,7 +117,12 @@
     "clickToChangeMode": "Нажмите для смены режима разрешений (или нажмите Tab в поле ввода)",
     "showAllCommands": "Показать все команды",
     "clearInput": "Очистить ввод",
-    "scrollToBottom": "Прокрутить вниз"
+    "scrollToBottom": "Прокрутить вниз",
+    "editSentPrompt": {
+      "banner": "Editing a sent prompt — the new branch only rewinds the conversation. Code changes after this point are kept (see the Git tab).",
+      "cancel": "Cancel",
+      "dismiss": "Dismiss"
+    }
   },
   "providerSelection": {
     "title": "Выберите вашего AI-ассистента",
@@ -215,5 +220,18 @@
   },
   "tasks": {
     "nextTaskPrompt": "Начать следующую задачу"
+  },
+  "branch": {
+    "editTitle": "Edit & fork from here",
+    "editAria": "Edit this prompt and fork the conversation",
+    "previous": "Previous branch",
+    "next": "Next branch",
+    "editLabel": "Edit",
+    "groupAria": "Conversation versions",
+    "announced": "Showing version {{current}} of {{total}}",
+    "forkFailed": "Could not fork the conversation.",
+    "forkFailedRestored": "Could not fork the conversation. Your edited prompt is back in the composer.",
+    "switchFailed": "Could not switch versions. Please try again.",
+    "editBlockedWhileRunning": "Wait for the current response to finish before editing a prompt."
   }
 }

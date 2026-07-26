@@ -117,7 +117,12 @@
     "clickToChangeMode": "点击更改权限模式（或在输入框中按 Tab）",
     "showAllCommands": "显示所有命令",
     "clearInput": "清空输入",
-    "scrollToBottom": "滚动到底部"
+    "scrollToBottom": "滚动到底部",
+    "editSentPrompt": {
+      "banner": "Editing a sent prompt — the new branch only rewinds the conversation. Code changes after this point are kept (see the Git tab).",
+      "cancel": "Cancel",
+      "dismiss": "Dismiss"
+    }
   },
   "providerSelection": {
     "title": "选择您的 AI 助手",
@@ -215,5 +220,18 @@
   },
   "tasks": {
     "nextTaskPrompt": "开始下一个任务"
+  },
+  "branch": {
+    "editTitle": "Edit & fork from here",
+    "editAria": "Edit this prompt and fork the conversation",
+    "previous": "Previous branch",
+    "next": "Next branch",
+    "editLabel": "Edit",
+    "groupAria": "Conversation versions",
+    "announced": "Showing version {{current}} of {{total}}",
+    "forkFailed": "Could not fork the conversation.",
+    "forkFailedRestored": "Could not fork the conversation. Your edited prompt is back in the composer.",
+    "switchFailed": "Could not switch versions. Please try again.",
+    "editBlockedWhileRunning": "Wait for the current response to finish before editing a prompt."
   }
 }

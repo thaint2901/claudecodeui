@@ -1,5 +1,11 @@
-import { memo, useMemo, useRef } from 'react';
+/* eslint react/jsx-no-bind: ["error", { "ignoreDOMComponents": true, "allowArrowFunctions": false, "allowFunctions": false, "allowBind": false }] --
+ * This is a memoized message row; inline props here defeat the memo boundary
+ * of the tool/markdown children it renders. See CLAUDE.md > Gotchas.
+ */
+import { memo, useCallback, useMemo, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Pencil } from 'lucide-react';
 
 import SessionProviderLogo from '../../../llm-logo-provider/SessionProviderLogo';
 import type {
@@ -11,7 +17,7 @@ import type {
 import { formatUsageLimitText } from '../../utils/chatFormatting';
 import type { Project } from '../../../../types/app';
 import { ToolRenderer, shouldHideToolResult } from '../../tools';
-import { Reasoning, ReasoningTrigger, ReasoningContent } from '../../../../shared/view/ui';
+import { Button, Reasoning, ReasoningTrigger, ReasoningContent, Tooltip } from '../../../../shared/view/ui';
 
 import ChatMessageImages from './ChatMessageImages';
 import { Markdown } from './Markdown';
@@ -35,6 +41,13 @@ type MessageComponentProps = {
   showThinking?: boolean;
   selectedProject?: Project | null;
   provider: Provider | string;
+  /** Whether the active provider supports edit-and-fork (Claude only). Deliberately
+   *  independent of "is a run in progress" — that would flip twice per message sent
+   *  and re-render every row; the owner checks it when the button is pressed. */
+  canEditPrompt?: boolean;
+  onEditPrompt?: (message: ChatMessage) => void;
+  /** Renders the `< n/total >` branch switcher under this message, or null. */
+  renderBranchSwitcher?: (message: ChatMessage) => ReactNode;
 };
 
 type InteractiveOption = {
@@ -45,7 +58,7 @@ type InteractiveOption = {
 
 const COPY_HIDDEN_TOOL_NAMES = new Set(['Bash', 'Edit', 'Write', 'ApplyPatch']);
 
-const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider }: MessageComponentProps) => {
+const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider, canEditPrompt, onEditPrompt, renderBranchSwitcher }: MessageComponentProps) => {
   const { t } = useTranslation('chat');
   const isGrouped = prevMessage && prevMessage.type === message.type &&
     ((prevMessage.type === 'assistant') ||
@@ -65,11 +78,19 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
     message.isToolUse && COPY_HIDDEN_TOOL_NAMES.has(String(message.toolName || ''))
   );
   const shouldShowUserCopyControl = message.type === 'user' && userCopyContent.trim().length > 0;
+  // An image-only turn drops the bubble but keeps the row beneath it.
+  const hasTextBubble = userCopyContent.trim().length > 0 || !message.images?.length;
   const shouldShowAssistantCopyControl = message.type === 'assistant' &&
     assistantCopyContent.trim().length > 0 &&
     !isCommandOrFileEditToolResponse &&
     !message.isThinking;
 
+
+  // Bound to this row's message so the JSX stays free of inline arrows —
+  // `react/jsx-no-bind` is an error in this file for exactly that reason.
+  const handleEditPromptClick = useCallback(() => {
+    onEditPrompt?.(message);
+  }, [onEditPrompt, message]);
 
   const formattedTime = useMemo(() => new Date(message.timestamp).toLocaleTimeString(), [message.timestamp]);
   const shouldHideThinkingMessage = Boolean(message.isThinking && !showThinking);
@@ -78,6 +99,10 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
     return null;
   }
 
+  // One call, two possible slots: the user prompt's action row (normal) or the
+  // assistant fallback below. Returns null for every message that owns no fork.
+  const branchSwitcher = renderBranchSwitcher?.(message) ?? null;
+
   return (
     <div
       ref={messageRef}
@@ -85,36 +110,88 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
       className={`chat-message ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' ? 'flex justify-end px-3 sm:px-0' : 'px-3 sm:px-0'}`}
     >
       {message.type === 'user' ? (
-        /* User turn on the right: claude.ai-style attachment cards above the bubble */
-        <div className="flex w-full items-end space-x-0 sm:w-auto sm:max-w-[85%] sm:space-x-3 md:max-w-md lg:max-w-lg xl:max-w-xl">
-          <div className="flex min-w-0 flex-1 flex-col items-end gap-2 sm:flex-initial">
+        /* User turn on the right: claude.ai-style attachment cards above the bubble.
+
+           Grid rather than a flex row, because the avatar and the control row
+           answer to different things. The avatar belongs beside the BUBBLE;
+           the controls belong under it. A single flex column ending in the
+           control row bottom-aligned the avatar to that row instead — and
+           since the row keeps its space while hover-hidden, the avatar sat
+           adrift below the bubble even at rest.
+
+           Two rows sharing one column settle both: the avatar occupies row 1
+           next to the bubble, the controls row 2 beneath it, and because the
+           bubble and the controls are the same column their right edges line
+           up on their own — no offset hand-derived from the avatar's width.
+
+           `group` covers the whole turn, so the avatar is a hover surface for
+           the controls too. The row stays inside the group box, which is the
+           assumption the pointer-events rules in index.css are built on. */
+        <div
+          className={`group grid w-full grid-cols-[minmax(0,1fr)] items-end sm:w-auto sm:max-w-[85%] md:max-w-md lg:max-w-lg xl:max-w-xl ${isGrouped ? '' : 'sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-x-3'}`}
+        >
+          <div className="col-start-1 row-start-1 flex min-w-0 max-w-full flex-col items-end gap-2">
             {message.images && message.images.length > 0 && (
               <ChatMessageImages
                 images={message.images}
                 projectId={selectedProject?.projectId}
               />
             )}
-            {userCopyContent.trim().length > 0 || !message.images?.length ? (
-              <div className="group max-w-full rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-white shadow-sm sm:px-4">
+            {hasTextBubble && (
+              <div className="max-w-full rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-white shadow-sm sm:px-4">
                 <div dir="auto" className="whitespace-pre-wrap break-words font-serif text-sm">
                   {message.content}
                 </div>
-                <div className="mt-1 flex items-center justify-end gap-1 text-xs text-blue-100">
-                  {shouldShowUserCopyControl && (
-                    <MessageCopyControl content={userCopyContent} messageType="user" />
-                  )}
-                  <span>{formattedTime}</span>
-                </div>
-              </div>
-            ) : (
-              /* Image-only turn: no text bubble, but the timestamp still shows */
-              <div className="flex items-center justify-end gap-1 text-xs text-muted-foreground">
-                <span>{formattedTime}</span>
               </div>
             )}
           </div>
+          {/* Controls live BELOW the bubble, not inside it. While they were
+              inside, this row — not the prompt — set the bubble's minimum
+              width: 170px of controls against ~110px of text, so a one-word
+              prompt still rendered a 194px bubble.
+
+              The row itself is always present and always opaque; only the
+              CONTROLS fade. The timestamp rides along outside that wrapper
+              because hover-gating it left user turns with no visible time
+              while assistant turns kept theirs — an asymmetry nobody asked
+              for. Keeping the row mounted at full height is also what stops
+              the next message jumping when the controls appear.
+
+              The controls are hover-gated at the user's request, reversing
+              the earlier "always visible" call. Two escapes keep that from
+              stranding anyone, both from the shared rules in index.css: a
+              coarse pointer (no hover to give) pins them visible, and
+              `:focus-within` reveals them for keyboard users. */}
+          <div className="col-start-1 row-start-2 mt-1 flex items-center justify-end gap-1 text-[11px] text-gray-600 dark:text-gray-400">
+            <span className="flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+              {canEditPrompt && message.uuid && onEditPrompt && (
+                <>
+                  <Tooltip content={t('branch.editTitle')} position="top">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={handleEditPromptClick}
+                      aria-label={t('branch.editAria')}
+                      className="tap-target h-6 gap-1 rounded px-1.5 py-0 text-[11px] font-medium [&_svg]:size-3"
+                    >
+                      <Pencil aria-hidden />
+                      {t('branch.editLabel')}
+                    </Button>
+                  </Tooltip>
+                  <span aria-hidden className="mx-0.5 h-3 w-px shrink-0 bg-border" />
+                </>
+              )}
+              {shouldShowUserCopyControl && (
+                <MessageCopyControl content={userCopyContent} messageType="user" />
+              )}
+              {/* Last of the controls: this prompt is the message that differs
+                  between siblings, so the version pager belongs to it. */}
+              {branchSwitcher}
+            </span>
+            <span>{formattedTime}</span>
+          </div>
           {!isGrouped && (
-            <div className="hidden h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm text-white sm:flex">
+            <div className="col-start-2 row-start-1 hidden h-8 w-8 flex-shrink-0 items-center justify-center self-end rounded-full bg-blue-600 text-sm text-white sm:flex">
               U
             </div>
           )}
@@ -396,6 +473,35 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                 )}
                 {!isGrouped && <span>{formattedTime}</span>}
               </div>
+            )}
+            {/* Fallback slot only. The switcher normally belongs to the user
+                prompt below this turn — the message that actually differs
+                between siblings — but when no such prompt follows the anchor
+                the owner resolves back to this assistant part. Reachable when
+                the anchor is the last loaded message, when the tail is hidden
+                during an optimistic fork, or when an earlier anchor already
+                claimed the prompt. `pickBranchSwitcherOwners` guarantees the
+                id it hands back is a non-tool part, i.e. one this component
+                renders rather than ToolGroupContainer.
+
+                Visible at rest, unlike the copy of this control on a user
+                turn, and that asymmetry is deliberate: a pager follows the
+                visibility of the controls it sits among. On a user turn those
+                are hover-gated at the owner's request; here the copy, speak
+                and timestamp controls directly above are always visible, so
+                hiding only the pager would make it the odd one out.
+
+                Matching the user turn is also not free. These controls fade
+                via the unnamed `group-hover:` utility, whose compiled rule is
+                a plain descendant selector — putting `group` on this
+                container would capture every `group-hover:` inside the
+                answer, so hovering anywhere in a long reply would light up
+                every code block's copy pill at once (Markdown.tsx). A named
+                group would avoid that but would no longer match the touch and
+                `:focus-within` escapes in index.css, which key off the
+                unnamed class. Not worth it for the rarest slot. */}
+            {branchSwitcher && (
+              <div className="mt-1 flex justify-end">{branchSwitcher}</div>
             )}
           </div>
         </div>

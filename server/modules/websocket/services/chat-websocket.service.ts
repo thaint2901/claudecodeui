@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { WebSocket } from 'ws';
 
 import { sessionsDb } from '@/modules/database/index.js';
-import { sessionsService } from '@/modules/providers/index.js';
+import { findForkResumePoint, sessionsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import { getGlobalImageAssetsDir, normalizeImageDescriptors } from '@/shared/image-attachments.js';
@@ -141,6 +141,33 @@ function readRequiredSessionId(data: AnyRecord): string | null {
   return sessionId.length > 0 ? sessionId : null;
 }
 
+/** Exported for tests: shapes the fork-specific runtime options. */
+export function buildForkRuntimeOptions(
+  editAtMessageUuid: string | null,
+  forkResumeSessionAt: string | null,
+): AnyRecord {
+  if (!editAtMessageUuid) return {};
+  return { forkSession: true, ...(forkResumeSessionAt ? { resumeSessionAt: forkResumeSessionAt } : {}) };
+}
+
+/**
+ * Exported for tests: reduces a client-sent edit anchor to the BARE transcript
+ * uuid that `findForkResumePoint` matches against.
+ *
+ * The frontend renders normalized message PARTS whose ids suffix the bare
+ * uuid (`<uuid>_text_<n>` / `<uuid>_text` / `<uuid>_tr_<toolUseId>` /
+ * `<uuid>_images` / `<uuid>_<n>` — see the Claude normalizer). The frontend
+ * already strips these (src/components/chat/utils/branchAnchors.ts,
+ * `baseMessageUuid` — keep the two regexes in sync), but the server must not
+ * trust the client's id format, so it normalizes again on receipt.
+ */
+export function normalizeEditAtMessageUuid(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  return trimmed.replace(/_(?:tr_.+|text(?:_\d+)?|images|\d+)$/, '');
+}
+
 /** Matches "/fork" or "/fork <prompt>" typed as the whole message. */
 export function parseForkCommand(content: string): { prompt: string } | null {
   const match = content.trim().match(/^\/fork(?:\s+([\s\S]*))?$/);
@@ -205,6 +232,51 @@ async function handleChatSend(
   if (!spawnFn) {
     sendProtocolError(ws, 'UNSUPPORTED_PROVIDER', `Provider "${provider}" is not available.`, sessionId);
     return;
+  }
+
+  const clientOptions = (data.options ?? {}) as AnyRecord;
+  // Fork options are server-derived only (buildForkRuntimeOptions / the /fork
+  // block below). A client-supplied forkSession/resumeSessionAt would skip the
+  // edit-prompt validation entirely and — because forkMeta stays unset — make
+  // recordProviderSessionId remap THIS session's provider id onto the fork's,
+  // silently orphaning the original transcript.
+  delete clientOptions.forkSession;
+  delete clientOptions.resumeSessionAt;
+  const editAtMessageUuid = normalizeEditAtMessageUuid(clientOptions.editAtMessageUuid);
+
+  let forkResumeSessionAt: string | null = null;
+  if (editAtMessageUuid) {
+    if (provider !== 'claude') {
+      sendProtocolError(ws, 'FORK_FAILED', 'Editing a sent prompt is only supported for Claude sessions.', sessionId);
+      return;
+    }
+    if (!session.provider_session_id || !session.jsonl_path) {
+      sendProtocolError(ws, 'FORK_FAILED', 'This session has no transcript to fork yet.', sessionId);
+      return;
+    }
+    try {
+      const point = await findForkResumePoint(session.jsonl_path, session.provider_session_id, editAtMessageUuid);
+      forkResumeSessionAt = point.resumeSessionAt;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      sendProtocolError(ws, 'FORK_FAILED', `Cannot fork: ${message}`, sessionId);
+      return;
+    }
+    // No preceding assistant turn means this is the conversation's FIRST
+    // prompt. Omitting resumeSessionAt would make the SDK copy the FULL
+    // history into the branch (spike-verified), so the "edited" prompt would
+    // just append after the old conversation — wrong semantics. The UI hides
+    // the edit affordance for the first prompt; this guard covers stale or
+    // non-UI clients.
+    if (!forkResumeSessionAt) {
+      sendProtocolError(
+        ws,
+        'FORK_FAILED',
+        'Editing the first prompt of a conversation is not supported — start a new session instead.',
+        sessionId
+      );
+      return;
+    }
   }
 
   const forkCommand = provider === 'claude' ? parseForkCommand(typeof data.content === 'string' ? data.content : '') : null;
@@ -300,7 +372,6 @@ async function handleChatSend(
       return;
     }
 
-    const clientOptions = (data.options ?? {}) as AnyRecord;
     const forkOptions: AnyRecord = {
       ...clientOptions,
       // Resume-only run: attachments belong to the original message, not this fork.
@@ -376,6 +447,18 @@ async function handleChatSend(
     providerSessionId: session.provider_session_id,
     connection: ws,
     userId,
+    forkMeta: editAtMessageUuid
+      ? {
+          parentSessionId: sessionId,
+          parentProviderSessionId: session.provider_session_id as string,
+          // The fork ANCHOR: the resume-point assistant uuid, which — unlike
+          // the edited user uuid — is copied into every sibling transcript,
+          // so the branch switcher can render in any branch. Null for
+          // first-prompt edits (no shared history ⇒ no switcher).
+          forkedAtMessageUuid: forkResumeSessionAt,
+          projectPath: session.project_path ?? '',
+        }
+      : undefined,
   });
 
   if (!run) {
@@ -388,7 +471,6 @@ async function handleChatSend(
     return;
   }
 
-  const clientOptions = (data.options ?? {}) as AnyRecord;
   let command = typeof data.content === 'string' ? data.content : '';
 
   const subtaskCommand = provider === 'claude' ? parseSubtaskCommand(command) : null;
@@ -410,10 +492,12 @@ async function handleChatSend(
     resume: Boolean(session.provider_session_id),
     cwd: clientOptions.cwd ?? session.project_path ?? undefined,
     projectPath: session.project_path ?? clientOptions.projectPath,
+    ...buildForkRuntimeOptions(editAtMessageUuid, forkResumeSessionAt),
     // /subtask is the only caller that needs the fork subagent env vars —
     // scoped to this run only (see mapCliOptionsToSDK for why).
     ...(subtaskCommand ? { forkSubagent: true } : {}),
   };
+  delete runtimeOptions.editAtMessageUuid;
 
   try {
     await spawnFn(command, runtimeOptions, run.writer);

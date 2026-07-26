@@ -43,6 +43,8 @@ export interface SubagentState {
 
 export interface ChatMessage {
   type: string;
+  /** Transcript message uuid (from the store's `NormalizedMessage.id`); used to target edit/fork operations. */
+  uuid?: string;
   content?: string;
   displayText?: string;
   timestamp: string | number | Date;

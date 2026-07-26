@@ -58,6 +58,39 @@ type CodeBlockProps = {
   children?: React.ReactNode;
 };
 
+/**
+ * The highlighted block on its own memo boundary.
+ *
+ * `SyntaxHighlighter` builds one React element per token — a few thousand for a
+ * medium code block — and rebuilds them all on every render. Keying that work
+ * to the code text itself means a re-render with unchanged code (the common
+ * case: streaming appends a later block, a sibling message updates) reuses the
+ * previous element tree instead of paying for it again.
+ */
+const HighlightedCode = React.memo(({ raw, language, isDarkMode }: { raw: string; language: string; isDarkMode: boolean }) => (
+  <SyntaxHighlighter
+    language={language}
+    style={isDarkMode ? oneDark : oneLight}
+    customStyle={{
+      margin: 0,
+      borderRadius: '0.75rem',
+      fontSize: '0.875rem',
+      padding: language && language !== 'text' ? '2rem 1rem 1rem 1rem' : '1rem',
+      // ChatGPT-style soft grey block in light mode; keep oneDark's own bg in dark.
+      ...(isDarkMode ? {} : { background: 'hsl(var(--muted))' }),
+    }}
+    codeTagProps={{
+      style: {
+        fontFamily:
+          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+        ...(isDarkMode ? {} : { background: 'transparent' }),
+      },
+    }}
+  >
+    {raw}
+  </SyntaxHighlighter>
+));
+
 const CodeBlock = ({ node, inline, className, children, ...props }: CodeBlockProps) => {
   const { t } = useTranslation('chat');
   const { isDarkMode } = useTheme();
@@ -83,7 +116,7 @@ const CodeBlock = ({ node, inline, className, children, ...props }: CodeBlockPro
   const language = match ? match[1] : 'text';
 
   return (
-    <div className="group relative my-2">
+    <div className="code-block-shell group relative my-2">
       {language && language !== 'text' && (
         <div className="absolute left-3 top-2 z-10 text-xs font-medium uppercase text-gray-400">{language}</div>
       )}
@@ -132,27 +165,7 @@ const CodeBlock = ({ node, inline, className, children, ...props }: CodeBlockPro
         )}
       </button>
 
-      <SyntaxHighlighter
-        language={language}
-        style={isDarkMode ? oneDark : oneLight}
-        customStyle={{
-          margin: 0,
-          borderRadius: '0.75rem',
-          fontSize: '0.875rem',
-          padding: language && language !== 'text' ? '2rem 1rem 1rem 1rem' : '1rem',
-          // ChatGPT-style soft grey block in light mode; keep oneDark's own bg in dark.
-          ...(isDarkMode ? {} : { background: 'hsl(var(--muted))' }),
-        }}
-        codeTagProps={{
-          style: {
-            fontFamily:
-              'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-            ...(isDarkMode ? {} : { background: 'transparent' }),
-          },
-        }}
-      >
-        {raw}
-      </SyntaxHighlighter>
+      <HighlightedCode raw={raw} language={language} isDarkMode={isDarkMode} />
     </div>
   );
 };
@@ -183,7 +196,7 @@ const markdownComponents = {
   ),
 };
 
-export function Markdown({ children, className }: MarkdownProps) {
+function MarkdownImpl({ children, className }: MarkdownProps) {
   const content = normalizeInlineCodeFences(String(children ?? ''));
   const remarkPlugins = useMemo(() => [remarkGfm, remarkMath], []);
   const rehypePlugins = useMemo(() => [rehypeKatex], []);
@@ -236,3 +249,7 @@ export function Markdown({ children, className }: MarkdownProps) {
     </div>
   );
 }
+
+// Same markdown source renders the same tree — re-parsing it on every parent
+// render is pure waste, and for code-heavy messages that parse feeds Prism.
+export const Markdown = React.memo(MarkdownImpl);

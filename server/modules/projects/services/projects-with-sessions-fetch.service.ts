@@ -131,7 +131,7 @@ function readProjectSessionsIncludingArchived(projectPath: string): ProjectSessi
   const rows = sessionsDb.getSessionsByProjectPathIncludingArchived(projectPath) as SessionRepositoryRow[];
 
   return {
-    sessions: rows.map(mapSessionRowToSummary),
+    sessions: rows.map((row) => mapSessionRowToSummary(row)),
     total: rows.length,
     hasMore: false,
   };
@@ -153,7 +153,7 @@ function readProjectSessionsPageByPath(
   const total = sessionsDb.countSessionsByProjectPath(projectPath);
 
   return {
-    sessions: rows.map(mapSessionRowToSummary),
+    sessions: rows.map((row) => mapSessionRowToSummary(row)),
     total,
     hasMore: pagination.offset + rows.length < total,
   };

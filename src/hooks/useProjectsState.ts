@@ -239,6 +239,30 @@ const getSessionAliasIds = (event: SessionUpsertedEvent): Set<string> => {
 const upsertSessionIntoProject = (project: Project, event: SessionUpsertedEvent): Project => {
   const sessions = project.sessions ?? [];
   const aliasIds = getSessionAliasIds(event);
+
+  // A cluster's just-deactivated leaf (superseded by a fork or a branch
+  // switch) broadcasts `activeLeaf: false` — drop it from the sidebar
+  // immediately instead of upserting, so a parent+branch pair never coexist
+  // until reload. Sessions that were never part of a fork cluster always
+  // have `active_leaf = 1` in the DB and never send `activeLeaf: false`, so
+  // their behavior is unchanged.
+  if (event.session?.activeLeaf === false) {
+    const nextSessions = sessions.filter((session) => !aliasIds.has(String(session.id)));
+    if (nextSessions.length === sessions.length) {
+      return project;
+    }
+
+    const updatedProject: Project = { ...project, sessions: nextSessions };
+    const totalSessions = Math.max(0, Number(project.sessionMeta?.total ?? 0) - 1);
+    updatedProject.sessionMeta = {
+      ...project.sessionMeta,
+      total: totalSessions,
+      hasMore: countLoadedProjectSessions(updatedProject) < totalSessions,
+    };
+
+    return updatedProject;
+  }
+
   const normalizedSession: ProjectSession = {
     ...event.session,
     id: event.sessionId,
