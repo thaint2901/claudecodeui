@@ -895,6 +895,39 @@ test('a failing applyFlagSettings does NOT reject a turn that only relaxes permi
   assert.equal(state.turns, 3, 'a failed RELAXATION must not stop the turn');
   assert.equal(state.closed, false);
 
+  // Turn 4 asks for the exact same relaxation again. If the failed push in
+  // turn 3 had advanced the reconciliation snapshot anyway, this identical
+  // request would look "already applied" and the pool would never retry —
+  // the process would keep denying Bash for the rest of its life while the UI
+  // shows it enabled. It must actually call applyFlagSettings() again here.
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('four'),
+    sdkOptions: { allowedTools: ['Bash'], disallowedTools: [] },
+  });
+  assert.deepEqual(
+    state.flagSettings,
+    [
+      { permissions: { ask: ['Bash'], deny: [] } },
+      // `derivePermissionOverrides` collapses an empty ask/deny pair to `null`
+      // so the caller clears the layer entirely instead of pushing an empty one.
+      { permissions: null },
+    ],
+    'turn 4 must retry the relaxation push that turn 3 failed to apply',
+  );
+
+  // Turn 5 repeats the same request once more: the retry succeeded, so there
+  // is nothing left to reconcile and no further push should happen.
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('five'),
+    sdkOptions: { allowedTools: ['Bash'], disallowedTools: [] },
+  });
+  assert.equal(state.flagSettings.length, 2, 'once the retry succeeds, an identical turn must not push again');
+
+  assert.equal(state.turns, 5, 'a failed RELAXATION must not stop the turn');
+  assert.equal(state.closed, false);
+
   claudeSessionPool.closeSession('opts-flags-relax');
 });
 

@@ -250,6 +250,10 @@ turn, nor claim idle in a way that hides live work.
 4. Abort settles the run rather than hanging it.
 5. `npm run typecheck` and `npm run lint` clean; new pool tests pass.
 
+**Test-runner note.** `server/claude-sdk-abort-race.test.ts` uses `mock.module`, so any aggregate
+test command must include `--experimental-test-module-mocks`. Without it the file fails loudly
+(exit 1) rather than being skipped, so a suite that checks its exit code cannot be fooled.
+
 ---
 
 ## Amendments after implementation (2026-07-28)
@@ -363,6 +367,13 @@ The agreed follow-up is to **warn**, not evict: surface to the user when a sessi
 a long time, so they can decide whether the task is still wanted. Tracked separately; the decision
 recorded here is that eviction is off the table.
 
-**Test-runner note.** `server/claude-sdk-abort-race.test.ts` uses `mock.module`, so any aggregate
-test command must include `--experimental-test-module-mocks`. Without it the file fails loudly
-(exit 1) rather than being skipped, so a suite that checks its exit code cannot be fooled.
+**Unmeasured interaction with the user's own `settings.json`.** ccui spawns with
+`settingSources = ['project', 'user', 'local']` (`server/claude-sdk.js:262`), so a freshly spawned
+process also reads whatever `allow` rules live in the user's own settings files, and the live
+flag-settings `permissions` layer this pool pushes sits above those files. Before this pool existed,
+a tool the user un-checked in ccui but had `allow`-listed in their own `settings.json` was still
+auto-approved by a freshly spawned process (turn-per-process, so the file layer was the only one in
+play); now the same tool gets an `ask` rule pushed on top and the process PROMPTS instead. Not
+measured against a real `settings.json` with such a rule. The direction is safe either way — a
+prompt is not a denial, and the user retains the ability to approve on demand — but the behaviour
+change itself has not been verified end to end.

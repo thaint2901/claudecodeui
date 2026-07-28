@@ -163,7 +163,7 @@ function addsRestriction(applied, next) {
 async function applyToolPermissionsToLiveProcess(session, nextSnapshot) {
   const next = derivePermissionOverrides(session.spawnAllowedTools, nextSnapshot);
   if (JSON.stringify(next) === JSON.stringify(session.appliedPermissions)) {
-    return;
+    return true;
   }
 
   const tightening = addsRestriction(session.appliedPermissions, next);
@@ -180,7 +180,7 @@ async function applyToolPermissionsToLiveProcess(session, nextSnapshot) {
     console.warn('[ClaudeSessionPool] no applyFlagSettings(); a relaxed tool permission cannot reach the live process', {
       appSessionId: session.appSessionId,
     });
-    return;
+    return false;
   }
 
   try {
@@ -199,10 +199,11 @@ async function applyToolPermissionsToLiveProcess(session, nextSnapshot) {
       appSessionId: session.appSessionId,
       error: detail,
     });
-    return;
+    return false;
   }
 
   session.appliedPermissions = next;
+  return true;
 }
 
 /**
@@ -252,11 +253,21 @@ async function applyLiveOptionChanges(session, nextSnapshot) {
   // spawn-time allowlist without ever calling us. This pushes the current lists
   // into the CLI's own permission engine; on failure it throws, which rejects
   // the turn rather than running it under permissions the user has revoked.
+  let permissionsApplied = true;
   if (changed.includes('allowedTools') || changed.includes('disallowedTools')) {
-    await applyToolPermissionsToLiveProcess(session, nextSnapshot);
+    permissionsApplied = await applyToolPermissionsToLiveProcess(session, nextSnapshot);
   }
 
   for (const field of changed) {
+    // A skipped or failed (relaxation) push leaves `appliedPermissions` behind
+    // `nextSnapshot`. Advancing `optionSnapshot` here anyway would make the
+    // NEXT turn's identical request compare as "unchanged" and never retry the
+    // push — the process would keep enforcing the stale rule for its whole
+    // life. Leaving these two fields stale keeps them showing up in `changed`
+    // (both here and in the caller's outer diff) until a push actually lands.
+    if (!permissionsApplied && (field === 'allowedTools' || field === 'disallowedTools')) {
+      continue;
+    }
     session.optionSnapshot[field] = nextSnapshot[field];
   }
 }
