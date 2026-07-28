@@ -8,7 +8,7 @@ import type { MarkSessionIdle, MarkSessionProcessing } from '../../../hooks/useS
 import type { PendingPermissionRequest } from '../types/types';
 import type { ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
-import { isNonTranscriptKind } from '../utils/realtimeKinds';
+import { isNonTranscriptKind, resolveBackgroundTaskOutcome } from '../utils/realtimeKinds';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -212,15 +212,11 @@ export function useChatRealtimeHandlers({
         // actually distinguishes success from failure from a reaped task.
         case 'background_task': {
           if (sid) {
-            const status = msg.status === 'failed' || msg.status === 'stopped' ? msg.status : 'completed';
+            // Fails toward "not a success" for an unrecognised status — see
+            // `resolveBackgroundTaskOutcome`.
+            const { status, outcome } = resolveBackgroundTaskOutcome(msg.status);
             const outputFile = typeof msg.outputFile === 'string' ? msg.outputFile : undefined;
             const summaryText = (typeof msg.summary === 'string' && msg.summary) || 'Background task finished';
-            const outcome =
-              status === 'failed'
-                ? 'failed'
-                : status === 'stopped'
-                  ? 'was stopped (likely reaped under memory pressure)'
-                  : 'completed';
 
             sessionStore.appendRealtime(sid, {
               id: `background_task_${(typeof msg.taskId === 'string' && msg.taskId) || Date.now()}`,
