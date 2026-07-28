@@ -8,6 +8,7 @@ import type { MarkSessionIdle, MarkSessionProcessing } from '../../../hooks/useS
 import type { PendingPermissionRequest } from '../types/types';
 import type { ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
+import { isNonTranscriptKind } from '../utils/realtimeKinds';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -196,6 +197,15 @@ export function useChatRealtimeHandlers({
         case 'session_lock_state_changed':
           return;
 
+        // A background shell settled — possibly long after the turn that
+        // started it, possibly killed by the OS memory-pressure reaper. The
+        // user needs to know either way, and it is not a transcript message.
+        case 'background_task': {
+          showCompletionTitleIndicator();
+          void playNotificationSound();
+          return;
+        }
+
         default:
           break;
       }
@@ -239,7 +249,8 @@ export function useChatRealtimeHandlers({
 
       // --- All other messages: route to store ---
       const shouldPersist =
-        msg.kind !== 'complete'
+        !isNonTranscriptKind(msg.kind)
+        && msg.kind !== 'complete'
         && msg.kind !== 'status'
         && msg.kind !== 'permission_request'
         && msg.kind !== 'permission_cancelled';
