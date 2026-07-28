@@ -377,6 +377,12 @@ async function handleChatSend(
       // Resume-only run: attachments belong to the original message, not this fork.
       images: [],
       sessionId: session.provider_session_id,
+      // The fork's OWN stable app-session row id — distinct from `sessionId`
+      // above (the PARENT's provider-native id, used only as the resume
+      // target). The Claude runtime's session pool keys its live process map
+      // on this id, never the provider-native one (forks reassign that
+      // mid-stream once the SDK announces the fork's own id).
+      appSessionId: forked.sessionId,
       resume: true,
       forkSession: true,
       cwd: session.project_path ?? undefined,
@@ -489,6 +495,11 @@ async function handleChatSend(
     // global upload store may reach the provider runtimes' file reads.
     images: filterImagesToUploadStore(clientOptions.images),
     sessionId: session.provider_session_id ?? undefined,
+    // The stable app-session row id, distinct from `sessionId` above. The
+    // Claude runtime's session pool keys its live process map on this id so
+    // background shells survive a mid-conversation provider-id change (forks
+    // reassign the provider id once the SDK announces the fork's own).
+    appSessionId: sessionId,
     resume: Boolean(session.provider_session_id),
     cwd: clientOptions.cwd ?? session.project_path ?? undefined,
     projectPath: session.project_path ?? clientOptions.projectPath,

@@ -177,6 +177,37 @@ test('settleTurn resolves an in-flight turn without closing the process', async 
   claudeSessionPool.closeSession('s4');
 });
 
+test('interruptTurn calls the live query\'s interrupt() without closing the process', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, state } = createFakeQuery([[{ type: 'assistant', text: 'working' }]]);
+  const turnStarted = createDeferred();
+
+  const pending = claudeSessionPool.runTurn({
+    appSessionId: 's8',
+    userMessage: userMessage('long'),
+    sdkOptions: {},
+    onMessage: () => turnStarted.resolve(),
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  await turnStarted.promise;
+  assert.equal(await claudeSessionPool.interruptTurn('s8'), true);
+  assert.equal(state.interrupted, true);
+  assert.equal(state.closed, false, 'interruptTurn must not close the process');
+
+  // The interrupted turn itself still needs settling — interruptTurn only
+  // reaches the SDK's interrupt(), it is not a replacement for settleTurn.
+  claudeSessionPool.settleTurn('s8', 'aborted');
+  await pending;
+  claudeSessionPool.closeSession('s8');
+});
+
+test('interruptTurn on a missing session is a silent no-op', async () => {
+  claudeSessionPool._resetForTests();
+  assert.equal(await claudeSessionPool.interruptTurn('does-not-exist'), false);
+});
+
 /**
  * Fake `query()` that counts how many times the factory itself is invoked
  * (i.e. how many "processes" were spawned), with a separate message script

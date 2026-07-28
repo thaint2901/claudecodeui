@@ -229,6 +229,29 @@ export const claudeSessionPool = {
     return settleCurrentTurn(session, { type: 'result', subtype: reason });
   },
 
+  /**
+   * Interrupts the CURRENT turn without closing the input stream or killing
+   * the process — a background shell started earlier in the session must
+   * survive. The underlying SDK query object never leaves the pool; callers
+   * (abort) reach it only through this method. A missing/dead session is a
+   * silent no-op: there is nothing left to interrupt.
+   */
+  async interruptTurn(appSessionId) {
+    const session = live.get(appSessionId);
+    if (!session || session.dead) {
+      return false;
+    }
+    try {
+      await session.query.interrupt?.();
+    } catch (error) {
+      console.warn('[ClaudeSessionPool] interrupt() failed', {
+        appSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return true;
+  },
+
   closeSession(appSessionId) {
     const session = live.get(appSessionId);
     if (session) {

@@ -19,6 +19,9 @@ import path from 'path';
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
+import { emitBackgroundTaskEvent } from '@/modules/websocket/index.js';
+
+import { claudeSessionPool } from './claude-session-pool.js';
 import { buildClaudeUserContent, normalizeImageDescriptors } from './shared/image-attachments.js';
 import { CLAUDE_FALLBACK_MODELS } from './modules/providers/list/claude/claude-models.provider.js';
 import { providerModelsService } from './modules/providers/services/provider-models.service.js';
@@ -312,7 +315,10 @@ function shouldRecaptureSessionId(isFork, announcedId, capturedId) {
  * @param {Object} deps
  * @param {string} deps.oldId - The currently captured (parent-seeded) session id.
  * @param {string} deps.newId - The newly announced fork session id.
- * @param {Object} deps.queryInstance - The SDK query instance to re-track under the new id.
+ * @param {Object} deps.queryInstance - Opaque value re-tracked under the new id via
+ *   `deps.addSession` — historically the raw SDK query instance, now (post
+ *   session-pool wiring) a pool handle exposing `interrupt()`. This function
+ *   never inspects it, only forwards it.
  * @param {Object} deps.ws - The websocket writer; its `setSessionId` (if present) labels its outgoing events.
  * @param {(sessionId: string) => void} deps.removeSession
  * @param {(sessionId: string, queryInstance: Object, writer?: Object) => void} deps.addSession
@@ -353,16 +359,22 @@ function sendSessionCreatedEvent(ws, newSessionId) {
 
 /**
  * Adds a session to the active sessions map
- * @param {string} sessionId - Session identifier
- * @param {Object} queryInstance - SDK query instance
+ * @param {string} sessionId - Session identifier (provider-native id)
+ * @param {Object} queryInstance - SDK query instance, or (post pool-wiring) a
+ *   handle exposing `interrupt()` for the pool-backed session
  * @param {Object} writer - WebSocket writer for reconnect support
+ * @param {string|null} poolSessionId - The stable app-level id this run is
+ *   keyed under in `claudeSessionPool`, so abort can address the pool by the
+ *   same key `queryClaudeSDK` used for `runTurn` (never the provider-native
+ *   `sessionId`, which forks change mid-stream).
  */
-function addSession(sessionId, queryInstance, writer = null) {
+function addSession(sessionId, queryInstance, writer = null, poolSessionId = null) {
   activeSessions.set(sessionId, {
     instance: queryInstance,
     startTime: Date.now(),
     status: 'active',
-    writer
+    writer,
+    poolSessionId
   });
 }
 
@@ -480,35 +492,27 @@ function extractTokenBudget(sdkMessage) {
 }
 
 /**
- * Builds the SDK `prompt` payload for one turn.
- *
- * Plain text turns pass the string through unchanged. Turns with image
- * attachments use the SDK's streaming-input mode: a single SDKUserMessage
- * whose content carries the prompt text plus one base64 `image` block per
- * attachment (read from the global `~/.cloudcli/assets` folder).
+ * Builds ONE SDKUserMessage for the pool to push into the session's open input
+ * stream. Previously this returned a bare string (or a generator that closed
+ * after one yield), which told the CLI input was finished and made it reap the
+ * session's background shells.
  *
  * @param {string} command - User prompt
  * @param {Array} images - Image descriptors ({ path, name?, mimeType? })
  * @param {string} cwd - Project working directory image paths resolve against
- * @returns {Promise<string|AsyncIterable>} SDK prompt payload
+ * @returns {Promise<Object>} A single SDKUserMessage
  */
 async function buildPromptPayload(command, images, cwd) {
-  if (normalizeImageDescriptors(images).length === 0) {
-    return command;
-  }
+  const content = normalizeImageDescriptors(images).length === 0
+    ? command
+    : await buildClaudeUserContent(command, images, cwd);
 
-  const content = await buildClaudeUserContent(command, images, cwd);
-  return (async function* () {
-    yield {
-      type: 'user',
-      message: {
-        role: 'user',
-        content
-      },
-      parent_tool_use_id: null,
-      timestamp: new Date().toISOString()
-    };
-  })();
+  return {
+    type: 'user',
+    message: { role: 'user', content },
+    parent_tool_use_id: null,
+    timestamp: new Date().toISOString(),
+  };
 }
 
 /**
@@ -580,6 +584,35 @@ async function queryClaudeSDK(command, options = {}, ws) {
   let capturedSessionId = sessionId;
   let sessionCreatedSent = false;
 
+  // The pool must be keyed on a STABLE app-level id, never the provider-native
+  // id captured above (`capturedSessionId`/`sessionId`) — forks re-announce a
+  // NEW provider id mid-stream (see `recaptureForkSession`), and a brand-new
+  // session has no provider id at all until the first SDK message arrives, so
+  // neither can serve as the key `runTurn` needs up front.
+  //
+  // `options.appSessionId` is populated by the chat websocket gateway
+  // (chat-websocket.service.ts) from its own persistent session row id, which
+  // never changes for the session's lifetime. The gateway is the only caller
+  // that has such an id; the direct REST entry points
+  // (server/routes/agent.js, server/routes/git.js) are one-shot calls with no
+  // app-session concept, so they fall back to the provider-native id when
+  // resuming (stable across their own repeat calls) or, for a brand-new
+  // one-shot run, a fresh id scoped to just this call.
+  const poolSessionId = options.appSessionId || sessionId || createRequestId();
+
+  // A stand-in for the raw SDK query instance: the pool owns the real object
+  // internally (it may not even exist yet, or may be a currently-idle
+  // between-turn session), so abort addresses it through the pool by
+  // `poolSessionId` instead of holding a direct reference.
+  const poolSessionHandle = {
+    interrupt: () => claudeSessionPool.interruptTurn(poolSessionId),
+  };
+
+  // Threads `poolSessionId` through the existing `addSession` bookkeeping
+  // (keyed by provider-native id) without changing `recaptureForkSession`'s
+  // own signature/tests, which only know about a 3-arg `addSession` callback.
+  const addSessionForPool = (id, instance, writer) => addSession(id, instance, writer, poolSessionId);
+
   const emitNotification = (event) => {
     notifyUserIfEnabled({
       userId: ws?.userId || null,
@@ -611,11 +644,6 @@ async function queryClaudeSDK(command, options = {}, ws) {
     if (mcpServers) {
       sdkOptions.mcpServers = mcpServers;
     }
-
-    // Turns with image attachments switch to streaming input so the images
-    // ride along as real content blocks. Built per query attempt because an
-    // async generator cannot be replayed once consumed.
-    const createPrompt = () => buildPromptPayload(command, options.images, options.cwd);
 
     sdkOptions.hooks = {
       Notification: [{
@@ -715,53 +743,40 @@ async function queryClaudeSDK(command, options = {}, ws) {
       return { behavior: 'deny', message: decision.message ?? 'User denied tool use' };
     };
 
-    // Query constructor reads this synchronously.
-    const prevStreamTimeout = process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
-    process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = '300000';
+    // Older/newer SDK versions may not accept the hook shape query() is given
+    // below. Falls back to a hooks-less query so the run still works —
+    // notifications degrade to runtime events instead of failing the run.
+    const createQueryWithHookFallback = (params) => {
+      try {
+        return query(params);
+      } catch (hookError) {
+        console.warn('Failed to initialize Claude query with hooks, retrying without hooks:', hookError?.message || hookError);
+        const { hooks: _dropped, ...optionsWithoutHooks } = params.options;
+        return query({ ...params, options: optionsWithoutHooks });
+      }
+    };
 
-    let queryInstance;
-    try {
-      queryInstance = query({
-        prompt: await createPrompt(),
-        options: sdkOptions
-      });
-    } catch (hookError) {
-      // Older/newer SDK versions may not accept hook shapes yet.
-      // Keep notification behavior operational via runtime events even if hook registration fails.
-      console.warn('Failed to initialize Claude query with hooks, retrying without hooks:', hookError?.message || hookError);
-      delete sdkOptions.hooks;
-      queryInstance = query({
-        prompt: await createPrompt(),
-        options: sdkOptions
-      });
-    }
-
-    // Restore immediately — Query constructor already captured the value
-    if (prevStreamTimeout !== undefined) {
-      process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = prevStreamTimeout;
-    } else {
-      delete process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
-    }
-
-    // Track the query instance for abort capability. For fork runs,
+    // Track the pool handle for abort capability. For fork runs,
     // capturedSessionId is still the PARENT's id here (pre-seeded) until the
     // first init message triggers recaptureForkSession — so this briefly
-    // registers the fork's query under the parent's id. Tolerated because the
+    // registers the pool handle under the parent's id. Tolerated because the
     // parent can't have a concurrent run: the /fork flow guards on isProcessing.
     if (capturedSessionId) {
-      addSession(capturedSessionId, queryInstance, ws);
+      addSessionForPool(capturedSessionId, poolSessionHandle, ws);
     }
 
-    // Process streaming messages
-    console.log('Starting async generator loop for session:', capturedSessionId || 'NEW');
-    for await (const message of queryInstance) {
+    // The entire former body of `for await (const message of queryInstance)`
+    // lives on unchanged here as a callback the pool drives per message —
+    // moved, not rewritten, so session-id capture/recapture, builtin-command
+    // caching, normalization, and ws.send all behave exactly as before.
+    const handleSdkMessage = (message) => {
       // Capture session ID from first message. Any other message (session_id
       // already captured, or not a recapture candidate per
       // shouldRecaptureSessionId) needs no handling here — fall through.
       if (message.session_id && !capturedSessionId) {
 
         capturedSessionId = message.session_id;
-        addSession(capturedSessionId, queryInstance, ws);
+        addSessionForPool(capturedSessionId, poolSessionHandle, ws);
         setWriterSessionId(ws, capturedSessionId);
 
         // Send session-created event only once for new sessions
@@ -778,10 +793,10 @@ async function queryClaudeSDK(command, options = {}, ws) {
         capturedSessionId = recaptureForkSession({
           oldId: capturedSessionId,
           newId: newSessionId,
-          queryInstance,
+          queryInstance: poolSessionHandle,
           ws,
           removeSession,
-          addSession,
+          addSession: addSessionForPool,
           sendSessionCreated: () => {
             if (!sessionCreatedSent) {
               sessionCreatedSent = true;
@@ -817,6 +832,58 @@ async function queryClaudeSDK(command, options = {}, ws) {
       if (tokenBudgetData) {
         ws.send(createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget: tokenBudgetData, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
       }
+    };
+
+    // Only background-task settlement is meaningful with no turn in flight —
+    // it is the path that carries a background task's completion to the UI
+    // after the turn that started it already ended.
+    const forwardBetweenTurnMessage = (message) => {
+      if (message?.type !== 'system' || message.subtype !== 'task_notification') {
+        return;
+      }
+      emitBackgroundTaskEvent({
+        // The app-level id, not `capturedSessionId` — the frontend (and this
+        // event's own consumer contract) never sees the provider-native id.
+        sessionId: poolSessionId,
+        taskId: message.task_id,
+        status: message.status,
+        outputFile: message.output_file,
+        summary: message.summary,
+      });
+    };
+
+    // Query constructor reads this synchronously; kept set for the whole turn
+    // because construction now happens lazily inside the pool (only when a
+    // NEW process is actually spun up, not on every turn of a reused session).
+    const prevStreamTimeout = process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
+    process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = '300000';
+
+    let turnResult;
+    try {
+      turnResult = await claudeSessionPool.runTurn({
+        appSessionId: poolSessionId,
+        userMessage: await buildPromptPayload(command, options.images, options.cwd),
+        sdkOptions,
+        onMessage: handleSdkMessage,
+        onBetweenTurnMessage: forwardBetweenTurnMessage,
+        createQuery: createQueryWithHookFallback,
+      });
+    } finally {
+      if (prevStreamTimeout !== undefined) {
+        process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = prevStreamTimeout;
+      } else {
+        delete process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
+      }
+    }
+
+    // The pool intercepts `result` messages entirely (they end a turn and
+    // never reach `handleSdkMessage`) — but a SDKResultMessage still carries
+    // the turn's final `modelUsage`, which the old per-turn loop forwarded as
+    // a token_budget status update. Replicate that here so the token/context
+    // indicator does not go stale on every turn.
+    const resultTokenBudget = extractTokenBudget(turnResult);
+    if (resultTokenBudget) {
+      ws.send(createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget: resultTokenBudget, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
     }
 
     // Clean up session on completion
@@ -893,8 +960,25 @@ async function abortClaudeSDKSession(sessionId) {
     // terminal complete (the abort handler sends the aborted one).
     abortedSessionIds.add(sessionId);
 
-    // Call interrupt() on the query instance
+    // Call interrupt() on the query instance. This only interrupts the
+    // CURRENT turn — the process stays alive on purpose, because a
+    // background shell started earlier in this session must survive abort.
     await session.instance.interrupt();
+
+    // An interrupted turn emits no `result` (verified in the spike), so
+    // `runTurn`'s promise would never settle on its own — settle it
+    // ourselves. Keyed by `poolSessionId` (the app-level id), NOT `sessionId`
+    // (the provider-native id this function receives) — those are different
+    // key spaces; see the `poolSessionId` derivation in `queryClaudeSDK`.
+    if (session.poolSessionId) {
+      claudeSessionPool.settleTurn(session.poolSessionId, 'aborted');
+      // Mirrors the pool's own turn-end policy (`closeIfIdle`): only close
+      // the process if nothing is still using it. A live background task
+      // must keep the process open across this abort.
+      if (claudeSessionPool.getLiveTaskIds(session.poolSessionId).length === 0) {
+        claudeSessionPool.closeSession(session.poolSessionId);
+      }
+    }
 
     // Update session status
     session.status = 'aborted';
