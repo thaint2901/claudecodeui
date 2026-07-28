@@ -20,11 +20,12 @@ const IDLE_GRACE_MS = 60000;
  * Option fields whose value must match the live process for a turn to be
  * allowed to reuse it, split by whether a RUNNING process can be reconfigured.
  *
- * `LIVE_APPLICABLE_*` have a real mid-session mechanism: `setPermissionMode()`
- * and `setModel()` are SDK control requests (streaming-input-only — which is
- * exactly the mode this pool put us in), and the allow/deny lists reach our own
- * approval callback through the shared `turnContext` object rather than through
- * the closure the SDK captured on turn 1.
+ * `LIVE_APPLICABLE_*` have a real mid-session mechanism: `setPermissionMode()`,
+ * `setModel()` and `applyFlagSettings()` are SDK control requests
+ * (streaming-input-only — which is exactly the mode this pool put us in), and a
+ * LOOSENED allow list additionally reaches our own approval callback through the
+ * shared `turnContext` object rather than through the closure the SDK captured
+ * on turn 1.
  *
  * `RECREATE_ONLY_*` can only be honoured by a fresh `query()`: `cwd` and
  * `effort` are fixed at spawn, and a fork needs its own process (there is no
@@ -59,6 +60,10 @@ const live = new Map();
  * @property {object} optionSnapshot - Normalized `RELEVANT_OPTION_FIELDS` as
  *   currently in force on this process (creation values, amended by whatever
  *   control requests have since been applied).
+ * @property {string[]} spawnAllowedTools - The `--allowedTools` list this process
+ *   was spawned with, which the CLI auto-approves from for its whole lifetime.
+ * @property {{ ask: string[], deny: string[] } | null} appliedPermissions - The
+ *   flag-settings `permissions` layer last successfully pushed into the process.
  * @property {object | null} turnContext - Mutable object the caller's captured
  *   callbacks (`canUseTool`, hooks) read from. Updated IN PLACE on reuse so
  *   turn 1's captured closures act on turn N's writer and settings.
@@ -88,16 +93,131 @@ function differingFields(fields, current, next) {
 }
 
 /**
+ * Derives the flag-settings `permissions` layer a live process needs so that
+ * THIS turn's tool settings are the ones actually enforced.
+ *
+ * The problem it solves: the CLI keeps the `--allowedTools` allowlist it was
+ * spawned with and auto-approves against it WITHOUT calling `canUseTool`
+ * (measured — `spikes/streaming-input-mode/live-deny.mjs` STEP 1). So refreshing
+ * `turnContext.allowedTools` cannot tighten anything: our callback is never
+ * reached for a tool the CLI already considers allowed. Only a rule pushed into
+ * the CLI's own permission engine can.
+ *
+ * The mapping is chosen to reproduce a freshly spawned process exactly, which is
+ * what every turn used to get before this pool existed:
+ *
+ * - A tool the user has since UN-CHECKED means "prompt me" in ccui — `canUseTool`
+ *   falls through to a `permission_request` for anything on neither list. So it
+ *   becomes an `ask` rule, which the CLI routes back through `canUseTool`
+ *   (measured: STEP 4 → PROMPTED). A `deny` here would be stricter than main and
+ *   would take away the user's ability to approve on demand.
+ * - A tool on `disallowedTools` means "never" — `canUseTool` returns `deny`. So it
+ *   becomes a `deny` rule, which the CLI refuses outright (measured: STEP 6 →
+ *   "Permission to use Bash has been denied."). Pushing it is what makes a tool
+ *   ALREADY in the spawn allowlist actually disallowable mid-session.
+ * - A tool the user has since CHECKED needs nothing here: it is not in the spawn
+ *   allowlist, so the CLI asks us, and `turnContext.allowedTools` says yes.
+ *
+ * Returns `null` when no flag layer is needed, so the caller can clear ours and
+ * fall back to the user's own settings files rather than leaving an empty object
+ * sitting above them.
+ */
+function derivePermissionOverrides(spawnAllowedTools, nextSnapshot) {
+  const nextAllowed = new Set(nextSnapshot.allowedTools ?? []);
+  const deny = [...(nextSnapshot.disallowedTools ?? [])];
+  const denySet = new Set(deny);
+  const ask = spawnAllowedTools.filter((entry) => !nextAllowed.has(entry) && !denySet.has(entry));
+
+  if (ask.length === 0 && deny.length === 0) {
+    return null;
+  }
+  return { ask, deny };
+}
+
+/**
+ * True when `next` restricts something `applied` did not. Used to decide whether
+ * a FAILED `applyFlagSettings` must reject the turn: failing to install a new
+ * restriction means running under permissions the user has already revoked, so
+ * that is fail-closed. Failing to install a pure relaxation only means the user
+ * gets asked when they need not have been, which is safe to proceed with.
+ */
+function addsRestriction(applied, next) {
+  const appliedAsk = new Set(applied?.ask ?? []);
+  const appliedDeny = new Set(applied?.deny ?? []);
+  // A `deny` is stricter than an `ask`, so an entry moving from ask to deny is a
+  // tightening even though it was already restricted.
+  return (
+    (next?.deny ?? []).some((entry) => !appliedDeny.has(entry))
+    || (next?.ask ?? []).some((entry) => !appliedAsk.has(entry) && !appliedDeny.has(entry))
+  );
+}
+
+/**
+ * Pushes `session`'s tool permissions into the RUNNING process's flag-settings
+ * layer. No-op when the derived layer already matches what was last applied.
+ *
+ * `applyFlagSettings` shallow-merges top-level keys, so a second call replaces
+ * the whole `permissions` object — the derived layer is therefore always sent
+ * complete, never as a delta, and cleared with `null` rather than `{}`.
+ */
+async function applyToolPermissionsToLiveProcess(session, nextSnapshot) {
+  const next = derivePermissionOverrides(session.spawnAllowedTools, nextSnapshot);
+  if (JSON.stringify(next) === JSON.stringify(session.appliedPermissions)) {
+    return;
+  }
+
+  const tightening = addsRestriction(session.appliedPermissions, next);
+
+  if (typeof session.query.applyFlagSettings !== 'function') {
+    if (tightening) {
+      throw new Error(
+        `Cannot apply the current tool permissions to the live Claude session "${session.appSessionId}": `
+        + 'this SDK build exposes no applyFlagSettings() control request, and the process must stay alive '
+        + 'for its background work. Refusing to run the turn, because the CLI would auto-approve tools '
+        + 'you have just turned off. Wait for the background task to finish, or stop it, and retry.',
+      );
+    }
+    console.warn('[ClaudeSessionPool] no applyFlagSettings(); a relaxed tool permission cannot reach the live process', {
+      appSessionId: session.appSessionId,
+    });
+    return;
+  }
+
+  try {
+    await session.query.applyFlagSettings({ permissions: next });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (tightening) {
+      throw new Error(
+        `Cannot apply the current tool permissions to the live Claude session "${session.appSessionId}" `
+        + `(${detail}). The process must stay alive for its background work, so refusing to run the turn `
+        + 'rather than let the CLI auto-approve tools you have just turned off. Wait for the background '
+        + 'task to finish, or stop it, and retry.',
+      );
+    }
+    console.warn('[ClaudeSessionPool] applyFlagSettings() failed while relaxing tool permissions', {
+      appSessionId: session.appSessionId,
+      error: detail,
+    });
+    return;
+  }
+
+  session.appliedPermissions = next;
+}
+
+/**
  * Reconfigures a RUNNING process to the new turn's options.
  *
  * Only reached when the session has live background work, i.e. when closing and
- * recreating would kill the very task this pool exists to protect. A failure to
- * apply `permissionMode` rejects the turn instead of running it: the mode is a
- * safety boundary (`bypassPermissions` skips the approval callback entirely
- * inside the CLI), so silently proceeding under the previous mode would let a
- * user who just tightened their settings be auto-approved against the old ones.
- * `model` is not a safety boundary, so a failure there is logged and the turn
- * proceeds.
+ * recreating would kill the very task this pool exists to protect.
+ *
+ * Both permission-carrying fields are fail-closed: a failure to apply
+ * `permissionMode` or the tool permissions rejects the turn instead of running
+ * it, because either one silently proceeding would evaluate the turn against
+ * settings the user has already abandoned — `bypassPermissions` skips the
+ * approval callback entirely inside the CLI, and the CLI's spawn-time allowlist
+ * auto-approves without calling it. `model` is not a safety boundary, so a
+ * failure there is logged and the turn proceeds.
  */
 async function applyLiveOptionChanges(session, nextSnapshot) {
   const changed = differingFields(LIVE_APPLICABLE_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
@@ -126,13 +246,16 @@ async function applyLiveOptionChanges(session, nextSnapshot) {
     }
   }
 
-  // `allowedTools` / `disallowedTools` need no control request: they are read
-  // per invocation from `session.turnContext`, which the caller refreshes on
-  // every turn. Caveat, recorded honestly: the CLI ALSO holds the spawn-time
-  // allowlist and auto-approves against it without consulting our callback, so
-  // a tool REMOVED from `allowedTools` mid-session stays auto-approved inside
-  // the CLI until the process is recreated. Tightening via `disallowedTools`
-  // does take effect, because those tools reach our callback.
+  // Loosening the tool lists needs no control request — `canUseTool` reads them
+  // per invocation from `session.turnContext`, which the caller refreshes every
+  // turn. TIGHTENING them does, because the CLI auto-approves from its
+  // spawn-time allowlist without ever calling us. This pushes the current lists
+  // into the CLI's own permission engine; on failure it throws, which rejects
+  // the turn rather than running it under permissions the user has revoked.
+  if (changed.includes('allowedTools') || changed.includes('disallowedTools')) {
+    await applyToolPermissionsToLiveProcess(session, nextSnapshot);
+  }
+
   for (const field of changed) {
     session.optionSnapshot[field] = nextSnapshot[field];
   }
@@ -313,6 +436,12 @@ function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTur
     currentTurn: null,
     onBetweenTurnMessage,
     optionSnapshot: snapshotOptions(sdkOptions),
+    // The allowlist the CLI was SPAWNED with — the set it will auto-approve from
+    // for the whole life of the process, regardless of what `optionSnapshot`
+    // later says. Frozen here because `optionSnapshot.allowedTools` is rewritten
+    // on every reconcile, and it is the spawn-time list that has to be countered.
+    spawnAllowedTools: [...(snapshotOptions(sdkOptions).allowedTools ?? [])],
+    appliedPermissions: null,
     turnContext: turnContext ?? null,
     idleTimer: null,
     dead: false,

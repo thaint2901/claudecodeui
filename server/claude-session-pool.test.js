@@ -9,8 +9,21 @@ import { claudeSessionPool } from './claude-session-pool.js';
  * queues per turn. Mirrors the real SDK shape — an AsyncGenerator with control
  * methods — without spawning a CLI.
  */
-function createFakeQuery(scriptPerTurn, { omitSetPermissionMode = false } = {}) {
-  const state = { closed: false, interrupted: false, turns: 0, prompts: [], permissionModes: [], models: [] };
+function createFakeQuery(scriptPerTurn, {
+  omitSetPermissionMode = false,
+  omitApplyFlagSettings = false,
+  // Which applyFlagSettings() calls throw, by 0-based call index.
+  applyFlagSettingsFailsOn = () => false,
+} = {}) {
+  const state = {
+    closed: false,
+    interrupted: false,
+    turns: 0,
+    prompts: [],
+    permissionModes: [],
+    models: [],
+    flagSettings: [],
+  };
 
   const factory = ({ prompt }) => {
     const generator = (async function* run() {
@@ -32,6 +45,20 @@ function createFakeQuery(scriptPerTurn, { omitSetPermissionMode = false } = {}) 
       generator.setPermissionMode = async (mode) => { state.permissionModes.push(mode); };
     }
     generator.setModel = async (model) => { state.models.push(model); };
+    // The control request that pushes tool permissions into the RUNNING CLI's own
+    // permission engine — the only thing that can tighten a tool the CLI is
+    // already auto-approving from its spawn-time allowlist.
+    if (!omitApplyFlagSettings) {
+      let applyCalls = 0;
+      generator.applyFlagSettings = async (settings) => {
+        const callIndex = applyCalls;
+        applyCalls += 1;
+        if (applyFlagSettingsFailsOn(callIndex)) {
+          throw new Error('control request refused by the fake process');
+        }
+        state.flagSettings.push(settings);
+      };
+    }
     return generator;
   };
 
@@ -631,6 +658,11 @@ test('a live session WITH a background task keeps its process and is reconfigure
   assert.deepEqual(state.permissionModes, ['default'], 'the mode change must reach the live process');
   assert.deepEqual(state.models, ['opus'], 'the model change must reach the live process');
   assert.deepEqual(
+    state.flagSettings,
+    [{ permissions: { ask: [], deny: ['Bash'] } }],
+    'Bash was in the spawn allowlist, so only a rule inside the CLI can stop it auto-approving; disallowed means deny',
+  );
+  assert.deepEqual(
     capturedContext,
     { ws: 'writer-for-turn-2', permissionMode: 'default', allowedTools: [], disallowedTools: ['Bash'] },
     'the captured context must now describe turn 2 — writer included, so this turn\'s frames go to this turn\'s writer',
@@ -668,8 +700,202 @@ test('unchanged options on a reused session issue no control requests', async ()
   assert.equal(state.turns, 2);
   assert.deepEqual(state.permissionModes, []);
   assert.deepEqual(state.models, []);
+  assert.deepEqual(state.flagSettings, [], 'nothing changed, so the CLI\'s permission engine must not be touched');
 
   claudeSessionPool.closeSession('opts-same');
+});
+
+/**
+ * The gap final review flagged as untested, and the security regression this
+ * whole round exists to close: a tool the user UN-CHECKS is removed from
+ * `allowedTools` and does NOT appear in `disallowedTools`. ccui's `canUseTool`
+ * treats "on neither list" as "prompt the user" — but on a protected live
+ * session the callback is never reached at all, because the CLI auto-approves
+ * from the `--allowedTools` list it was spawned with (measured in
+ * `spikes/streaming-input-mode/live-deny.mjs` STEP 1). Refreshing `turnContext`
+ * therefore fixes nothing here; only a rule pushed into the CLI does. It has to
+ * be `ask` rather than `deny`, so the user keeps the ability to approve on
+ * demand exactly as they would against a freshly spawned process (STEP 4:
+ * PROMPTED; STEP 6: DENIED).
+ */
+test('a tool merely un-checked on a protected session becomes an ask rule inside the live CLI', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, state } = createFakeQuery([
+    [{ type: 'system', subtype: 'task_started', task_id: 'survivor' }, { type: 'result', subtype: 'success' }],
+    [{ type: 'result', subtype: 'success' }],
+    [{ type: 'result', subtype: 'success' }],
+  ]);
+
+  const common = {
+    appSessionId: 'opts-uncheck',
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    sdkOptions: { allowedTools: ['Bash', 'Write', 'Agent', 'Task'], disallowedTools: [] },
+  });
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('opts-uncheck'), ['survivor']);
+
+  // Turn 2: the user un-checked Bash. It is on NEITHER list now.
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('two'),
+    sdkOptions: { allowedTools: ['Write', 'Agent', 'Task'], disallowedTools: [] },
+  });
+
+  assert.equal(state.turns, 2, 'the process must be reused — recreating it kills the background shell');
+  assert.equal(state.closed, false);
+  assert.deepEqual(
+    state.flagSettings,
+    [{ permissions: { ask: ['Bash'], deny: [] } }],
+    'the un-checked tool must stop being auto-approved, and must prompt rather than hard-fail',
+  );
+
+  // Turn 3: the user re-checks Bash. The restriction must lift, or a tool can
+  // never be re-enabled for the lifetime of a long-held process.
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('three'),
+    sdkOptions: { allowedTools: ['Bash', 'Write', 'Agent', 'Task'], disallowedTools: [] },
+  });
+
+  assert.deepEqual(
+    state.flagSettings[1],
+    { permissions: null },
+    'nothing left to restrict, so our flag layer is cleared rather than left as an empty object above the user\'s own settings',
+  );
+
+  claudeSessionPool.closeSession('opts-uncheck');
+});
+
+test('a shrinking allowedTools that cannot be pushed into a protected process rejects the turn', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, state } = createFakeQuery(
+    [
+      [{ type: 'system', subtype: 'task_started', task_id: 'survivor' }, { type: 'result', subtype: 'success' }],
+      [{ type: 'result', subtype: 'success' }],
+    ],
+    { omitApplyFlagSettings: true },
+  );
+
+  const common = {
+    appSessionId: 'opts-no-flags',
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    sdkOptions: { allowedTools: ['Bash'], disallowedTools: [] },
+  });
+
+  // Fail closed. Proceeding would run the turn with Bash still auto-approved
+  // inside the CLI, and closing the process would kill the background task.
+  await assert.rejects(
+    () => claudeSessionPool.runTurn({
+      ...common,
+      userMessage: userMessage('two'),
+      sdkOptions: { allowedTools: [], disallowedTools: [] },
+    }),
+    /applyFlagSettings/,
+  );
+
+  assert.equal(state.turns, 1, 'the refused turn must not have run');
+  assert.equal(state.closed, false, 'the background task must survive the refusal');
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('opts-no-flags'), ['survivor']);
+
+  claudeSessionPool.closeSession('opts-no-flags');
+});
+
+test('a failing applyFlagSettings rejects a tightening turn', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, state } = createFakeQuery(
+    [
+      [{ type: 'system', subtype: 'task_started', task_id: 'survivor' }, { type: 'result', subtype: 'success' }],
+      [{ type: 'result', subtype: 'success' }],
+    ],
+    { applyFlagSettingsFailsOn: () => true },
+  );
+
+  const common = {
+    appSessionId: 'opts-flags-throw',
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    sdkOptions: { allowedTools: ['Bash'], disallowedTools: [] },
+  });
+
+  await assert.rejects(
+    () => claudeSessionPool.runTurn({
+      ...common,
+      userMessage: userMessage('two'),
+      sdkOptions: { allowedTools: [], disallowedTools: ['Bash'] },
+    }),
+    /control request refused by the fake process/,
+  );
+
+  assert.equal(state.turns, 1, 'the refused turn must not have run');
+  assert.equal(state.closed, false, 'the background task must survive the refusal');
+
+  claudeSessionPool.closeSession('opts-flags-throw');
+});
+
+test('a failing applyFlagSettings does NOT reject a turn that only relaxes permissions', async () => {
+  claudeSessionPool._resetForTests();
+  // Call 0 is the tightening (it must succeed, so a restriction is on record);
+  // call 1 is the relaxation that clears it, and that one fails.
+  const { factory, state } = createFakeQuery(
+    [
+      [{ type: 'system', subtype: 'task_started', task_id: 'survivor' }, { type: 'result', subtype: 'success' }],
+      [{ type: 'result', subtype: 'success' }],
+      [{ type: 'result', subtype: 'success' }],
+    ],
+    { applyFlagSettingsFailsOn: (callIndex) => callIndex === 1 },
+  );
+
+  const common = {
+    appSessionId: 'opts-flags-relax',
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    sdkOptions: { allowedTools: ['Bash'], disallowedTools: [] },
+  });
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('two'),
+    sdkOptions: { allowedTools: [], disallowedTools: [] },
+  });
+  assert.deepEqual(state.flagSettings, [{ permissions: { ask: ['Bash'], deny: [] } }]);
+
+  // Turn 3 re-checks Bash: the only consequence of failing to clear the rule is
+  // that the user gets prompted when they need not have been. Nothing is
+  // exposed, so blocking their work here would be gratuitous.
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('three'),
+    sdkOptions: { allowedTools: ['Bash'], disallowedTools: [] },
+  });
+
+  assert.equal(state.turns, 3, 'a failed RELAXATION must not stop the turn');
+  assert.equal(state.closed, false);
+
+  claudeSessionPool.closeSession('opts-flags-relax');
 });
 
 test('a permission-mode change that cannot be applied to a protected process rejects the turn', async () => {

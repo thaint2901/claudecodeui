@@ -36,6 +36,7 @@ const sdkState = {
   queryCalls: [] as Array<{ options: Record<string, unknown> }>,
   closeCalls: 0,
   permissionModes: [] as unknown[],
+  flagSettings: [] as unknown[],
 };
 
 const turnTwoReachedTheProcess = createDeferred();
@@ -99,6 +100,9 @@ mock.module('@anthropic-ai/claude-agent-sdk', {
         sdkState.permissionModes.push(mode);
       };
       (generator as unknown as { setModel: (m?: unknown) => Promise<void> }).setModel = async () => {};
+      (generator as unknown as { applyFlagSettings: (s: unknown) => Promise<void> }).applyFlagSettings = async (settings) => {
+        sdkState.flagSettings.push(settings);
+      };
 
       return generator;
     },
@@ -197,6 +201,16 @@ test('a reused live session runs the CURRENT turn\'s options, writer included, w
     sdkState.permissionModes,
     ['default'],
     'the mode switch must be pushed into the running process via setPermissionMode()',
+  );
+  // The security regression this closes: refreshing `turnContext` cannot tighten
+  // anything, because the CLI auto-approves from the `--allowedTools` list it was
+  // spawned with WITHOUT calling `canUseTool` at all. Only a rule pushed into the
+  // CLI's own permission engine stops it. Verified against the real binary in
+  // `spikes/streaming-input-mode/live-deny.mjs`.
+  assert.deepEqual(
+    sdkState.flagSettings,
+    [{ permissions: { ask: [], deny: ['Bash'] } }],
+    'the newly disallowed tool must be denied inside the live CLI, not just inside our callback',
   );
 
   // This is literally the closure the SDK captured on turn 1. Before the fix it

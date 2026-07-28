@@ -108,3 +108,40 @@ Not covered by this spike, and worth resolving in the spec:
   `replayEvents` assume one run per loop).
 - Recovery when the persistent process dies mid-session — fall back to a fresh `query({resume})`.
 - Whether image prompts, MCP servers, and `settingSources` behave identically across turns.
+
+---
+
+## Follow-up probe: `live-deny.mjs` — can a tightening reach a RUNNING CLI?
+
+Added during the final-review fix round, because the pool's option-reconciliation path had a claimed
+residual gap: a tool removed from `allowedTools` mid-session was said to stay auto-approved inside
+the CLI until the process closed. Run with `node spikes/streaming-input-mode/live-deny.mjs`.
+
+Setup mirrors production: `permissionMode: 'default'`, `allowedTools: ['Bash','Agent','Task']`
+(the shape `mapCliOptionsToSDK` builds, dispatch tools auto-injected), one background shell started
+first so the session is protected from recreation exactly as the pool protects it.
+
+Observed against CLI 2.1.220 / SDK 0.3.165:
+
+```
+STEP 1 canUseTool consulted           : 0 []
+STEP 1 tool_result                    : [{"isError":false,"text":"BASELINE-OK"}]
+STEP 1 VERDICT (the hole)             : STILL AUTO-APPROVED — live tightening does NOT enforce
+STEP 4 canUseTool consulted           : 1 ["Bash"]
+STEP 4 VERDICT (live 'ask')           : PROMPTED (reached canUseTool)
+STEP 6 canUseTool consulted           : 0 []
+STEP 6 tool_result                    : [{"isError":true,"text":"Permission to use Bash has been denied."}]
+STEP 6 VERDICT (live 'deny')          : DENIED by the CLI
+background task still alive afterwards : true
+```
+
+**Findings.** The gap is real (STEP 1: a tool in the spawn allowlist is auto-approved with
+`canUseTool` never consulted, so no amount of refreshing our own state can tighten it). And it is
+closable without recreating the process: `applyFlagSettings({ permissions: … })` is a streaming-only
+control request that reaches the CLI's own permission engine — `ask` routes the call back through
+`canUseTool` (restoring the prompt a freshly spawned process would have produced), `deny` refuses it
+outright. Neither disturbed the protected background task.
+
+**Caveat found while measuring:** successive `applyFlagSettings` calls *replace* the whole
+`permissions` object rather than merging — STEP 5's `{deny:[...]}` dropped STEP 3's `{ask:[...]}`.
+The pool therefore always sends a complete layer and clears with `permissions: null`.
