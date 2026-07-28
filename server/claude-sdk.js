@@ -793,26 +793,16 @@ async function queryClaudeSDK(command, options = {}, ws) {
       }
     };
 
-    // The Query constructor reads CLAUDE_CODE_STREAM_CLOSE_TIMEOUT
-    // synchronously, so the variable only needs to be set across that one
-    // synchronous call. `process.env` is global: holding it for the whole turn
-    // (as this did while construction moved into the pool) means two overlapping
-    // turns interleave their set/restore and leave it permanently set. There is
-    // no `await` between the set and the restore below, so no other turn can
-    // observe or clobber the window.
-    const createQueryWithStreamCloseTimeout = (params) => {
-      const prevStreamTimeout = process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
-      process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = '300000';
-      try {
-        return createQueryWithHookFallback(params);
-      } finally {
-        if (prevStreamTimeout !== undefined) {
-          process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = prevStreamTimeout;
-        } else {
-          delete process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
-        }
-      }
-    };
+    // NOTE on CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: an earlier revision set this
+    // around the `query()` construction call to lengthen the stream-close
+    // window. It was doing nothing. The name occurs 0 times anywhere in SDK
+    // 0.3.165's `sdk.mjs` and 0 times in the CLI 2.1.220 binary — only in a
+    // stale doc comment at `sdk.d.ts:474`. And even if some build did
+    // read it, it could not have reached the child: `initialize()` snapshots the
+    // environment (`env: c = { ...process.env }`) before our window opens, so a
+    // mutation of `process.env` made later is invisible to the spawned CLI. If a
+    // future SDK/CLI genuinely needs it, set it inside `sdkOptions.env` (which
+    // IS forwarded to the child), never on `process.env`.
 
     // Track the pool handle for abort capability. For fork runs,
     // capturedSessionId is still the PARENT's id here (pre-seeded) until the
@@ -925,7 +915,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
       turnContext,
       onMessage: handleSdkMessage,
       onBetweenTurnMessage: forwardBetweenTurnMessage,
-      createQuery: createQueryWithStreamCloseTimeout,
+      createQuery: createQueryWithHookFallback,
     });
 
     // The pool intercepts `result` messages entirely (they end a turn and
@@ -1056,10 +1046,12 @@ async function abortClaudeSDKSession(sessionId) {
 /**
  * Closes every live pooled `claude` process.
  *
- * Called from the server's shutdown handler. Before the pool, a turn owned its
- * subprocess and `process.exit()` orphaned it for at most the length of a turn;
- * a pooled session deliberately outlives its turn, so without this a ~320 MB
- * child (plus whatever background shell it is holding) is orphaned indefinitely.
+ * Called from the server's shutdown handler. Not a leak backstop — the SDK
+ * already SIGTERMs every child it spawned from its own `process.on('exit')`
+ * handler, so the ~320 MB process does not survive us either way. The value is
+ * in HOW it dies: a SIGTERM'd CLI never reaches the `inputClosed` branch where it
+ * reaps its own background tasks, so those shells get left behind. Closing the
+ * input stream first gives each CLI the chance to clean up after itself.
  * @returns {number} How many live sessions were closed.
  */
 function shutdownClaudeSessions() {

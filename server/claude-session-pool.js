@@ -458,9 +458,15 @@ export const claudeSessionPool = {
   },
 
   /**
-   * Closes every live session. Called on server shutdown: a live session owns a
-   * real ~320 MB `claude` child that used to die with the turn, but now outlives
-   * it — `process.exit()` without this leaves it orphaned indefinitely.
+   * Closes every live session. Called on server shutdown.
+   *
+   * Not a leak backstop: the SDK already registers one `process.on('exit')`
+   * handler that SIGTERMs every child it spawned (`V2`/`W2` in `sdk.mjs`), so an
+   * abrupt exit does not orphan the ~320 MB `claude` process. What that handler
+   * cannot do is give the CLI a chance to shut down cleanly — a SIGTERM'd CLI
+   * never reaches the `inputClosed` branch that reaps its own background tasks,
+   * so those shells are left behind for the OS to inherit. Closing the input
+   * stream here is what lets each CLI reap its own children before it dies.
    * @returns {number} How many sessions were closed.
    */
   closeAllSessions() {
