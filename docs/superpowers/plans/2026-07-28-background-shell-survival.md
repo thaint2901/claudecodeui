@@ -1431,3 +1431,29 @@ Per the scope decision, do **not** build these here:
 - `recaptureForkSession` in `server/claude-sdk.js` remaps the provider session id mid-stream. The pool is keyed on the **app** session id specifically so forks do not confuse it, but the fork path must be exercised manually before merge: fork a session, confirm the fork gets its own live session and the parent's transcript is untouched.
 - Toggling `skipPermissions` mid-session now needs `query.setPermissionMode()` (verified working), because the persistent process fixes `permissionMode` at creation. Not triggered by current usage — the a30 session ran `bypassPermissions` for all 1373 recorded hook payloads — but it is a real gap once a user flips the setting mid-conversation.
 - Independent quick win, tracked separately: raise `BASH_DEFAULT_TIMEOUT_MS` from its 120000 default so ordinary long commands finish inside the turn and never need backgrounding.
+
+---
+
+## Amendments during execution (2026-07-28)
+
+Recorded so the plan does not misdescribe what shipped. Task 1 and Task 2 code blocks were replaced
+in place (see the notes inside those tasks); these are the remaining corrections.
+
+**Task 5 — the websocket layer was not untouched.** `options.sessionId` carries the provider-native
+session id, not the app id, so an `appSessionId` had to be threaded through
+`server/modules/websocket/services/chat-websocket.service.ts` at both `spawnFn` call sites. The pool
+must be keyed on the app id because forks change the provider id mid-stream. Also: abort must NOT
+decide whether to close the session — a `task_started` still undelivered in the SDK iterator is
+invisible to any check made from outside the pool, so abort only settles the turn and the pool's
+idle timer owns the close decision. Commits `5e1491b`, `e15f9a1`.
+
+**Task 6 — Step 4's snippet ignored the frame's `status`.** As written it produced an identical
+notification for `completed`, `failed`, and `stopped`, so a reaper-killed command was
+indistinguishable from a success — breaking this plan's own Goal 3. The shipped version appends a
+well-formed `task_notification` message (explicit `.id`, following the `protocol_error` precedent in
+the same file) carrying the outcome text, the `summary`, and the `outputFile` path. Commit `c99b807`.
+
+**Test-runner correction for Task 7.** The Step 5 command list predates
+`server/claude-sdk-abort-race.test.ts`, which uses `mock.module` and therefore needs
+`--experimental-test-module-mocks`. Any aggregate command must carry that flag and include that
+file. Without the flag the file fails loudly (exit 1) rather than being skipped.
