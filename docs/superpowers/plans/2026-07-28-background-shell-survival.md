@@ -448,6 +448,20 @@ function clearIdleTimer(session) {
   }
 }
 
+/**
+ * Removes `session` from `live` only if it is still the entry stored at its
+ * own key. `destroy()` and `drain()`'s `finally` both race a superseding
+ * session created for the same `appSessionId` (e.g. `closeSession()` runs
+ * synchronously, but the old session's async generator does not actually
+ * finish until a later microtask) — an unconditional `live.delete()` would
+ * delete the NEW session's entry instead of a stale one that's already gone.
+ */
+function removeFromLiveIfCurrent(session) {
+  if (live.get(session.appSessionId) === session) {
+    live.delete(session.appSessionId);
+  }
+}
+
 function destroy(session) {
   clearIdleTimer(session);
   session.dead = true;
@@ -460,7 +474,7 @@ function destroy(session) {
       error: error instanceof Error ? error.message : String(error),
     });
   }
-  live.delete(session.appSessionId);
+  removeFromLiveIfCurrent(session);
 }
 
 /**
@@ -555,7 +569,7 @@ async function drain(session) {
     }
     session.dead = true;
     clearIdleTimer(session);
-    live.delete(session.appSessionId);
+    removeFromLiveIfCurrent(session);
   }
 }
 
@@ -640,6 +654,14 @@ export const claudeSessionPool = {
   },
 };
 ```
+
+
+> **Amended 2026-07-28.** The first draft deleted from the `live` map unconditionally in
+> `drain()`'s `finally` and in `destroy()`. Review found that close-then-recreate at the same
+> `appSessionId` let the OLD session's teardown delete the NEW session's entry, so
+> `hasLiveSession` reported false while the process was alive (~320 MB leak) and the next
+> `runTurn` spawned a third process. The code above is the shipped implementation
+> (commits 33a1d62, 74d0235) with identity-guarded removal, and is what to use.
 
 - [ ] **Step 4: Run test to verify it passes**
 
