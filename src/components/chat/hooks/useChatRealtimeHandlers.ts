@@ -199,8 +199,40 @@ export function useChatRealtimeHandlers({
 
         // A background shell settled — possibly long after the turn that
         // started it, possibly killed by the OS memory-pressure reaper. The
-        // user needs to know either way, and it is not a transcript message.
+        // raw frame has no `.id` (force-cast-unsafe, see `shouldPersist`
+        // below), so build a well-formed NormalizedMessage instead, mirroring
+        // 'protocol_error' above. `kind: 'task_notification'` is the existing
+        // compact left-aligned notification row (already used for the /fork
+        // background flow) — its `status` field drives a completed/failed dot
+        // color, and the summary text spells out which of the three outcomes
+        // this was plus the output file path, since that path is how the
+        // user retrieves the full output. `showCompletionTitleIndicator`/
+        // `playNotificationSound` take no status parameter, so they fire the
+        // same way regardless of outcome — the transcript message is what
+        // actually distinguishes success from failure from a reaped task.
         case 'background_task': {
+          if (sid) {
+            const status = msg.status === 'failed' || msg.status === 'stopped' ? msg.status : 'completed';
+            const outputFile = typeof msg.outputFile === 'string' ? msg.outputFile : undefined;
+            const summaryText = (typeof msg.summary === 'string' && msg.summary) || 'Background task finished';
+            const outcome =
+              status === 'failed'
+                ? 'failed'
+                : status === 'stopped'
+                  ? 'was stopped (likely reaped under memory pressure)'
+                  : 'completed';
+
+            sessionStore.appendRealtime(sid, {
+              id: `background_task_${(typeof msg.taskId === 'string' && msg.taskId) || Date.now()}`,
+              sessionId: sid,
+              timestamp: (typeof msg.timestamp === 'string' && msg.timestamp) || new Date().toISOString(),
+              provider,
+              kind: 'task_notification',
+              status,
+              summary: `Background task ${outcome}: ${summaryText}${outputFile ? ` — output: ${outputFile}` : ''}`,
+            } as NormalizedMessage);
+          }
+
           showCompletionTitleIndicator();
           void playNotificationSound();
           return;
