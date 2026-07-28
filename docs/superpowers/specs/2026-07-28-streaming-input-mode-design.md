@@ -241,3 +241,39 @@ turn, nor claim idle in a way that hides live work.
    today.
 4. Abort settles the run rather than hanging it.
 5. `npm run typecheck` and `npm run lint` clean; new pool tests pass.
+
+---
+
+## Amendments after implementation (2026-07-28)
+
+Three claims in this spec turned out to be wrong once the code met reality. Recorded here so the
+document does not misdescribe what shipped.
+
+**1. The WebSocket layer was NOT untouched.** This spec claimed the `spawnFn` contract would not
+change and the websocket layer would keep working as-is. In fact `options.sessionId` carries the
+**provider-native** session id, not the app session id. The pool must be keyed on the app id —
+forks change the provider id mid-stream via `recaptureForkSession`, and a brand-new session has no
+provider id until its first message. So a new `appSessionId` was threaded through
+`server/modules/websocket/services/chat-websocket.service.ts` (+11 lines) at both `spawnFn` call
+sites: the ordinary chat send and the fork send. Implemented in commit `5e1491b`.
+
+**2. The close/recreate race is the hot path, not an edge case.** Task 2's review found that an
+unguarded delete from the pool's live map let a superseded session's teardown remove the current
+session's entry, but could not tell whether the sequence was reachable. It is, and constantly:
+every turn that ends with no live background task closes the process synchronously before
+`runTurn`'s promise resolves, while the subprocess teardown is still asynchronous — so the next
+`chat.send` for the same session can start a new turn before the old drain loop's `finally` runs.
+The identity-guarded removal is load-bearing.
+
+**3. Abort must not decide whether to close.** This spec's error-handling table said abort should
+settle the in-flight turn and keep the process. That was right but insufficient: the first
+implementation also closed the session when no task appeared live. No check made from OUTSIDE the
+pool can be sound, because a `task_started` still undelivered in the SDK's async iterator is
+invisible to `getLiveTaskIds` at the moment of asking — an external check-then-close is racy by
+construction, not merely by timing. Abort now only settles the turn; the pool's idle timer owns the
+close decision and re-reads live-task state when it fires, inside the drain loop. Cost: an idle
+aborted session lingers up to 60 s instead of closing at once. Implemented in commit `e15f9a1`.
+
+**Test-runner note.** `server/claude-sdk-abort-race.test.ts` uses `mock.module`, so any aggregate
+test command must include `--experimental-test-module-mocks`. Without it the file fails loudly
+(exit 1) rather than being skipped, so a suite that checks its exit code cannot be fooled.
