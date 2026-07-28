@@ -209,6 +209,107 @@ test('interruptTurn on a missing session is a silent no-op', async () => {
 });
 
 /**
+ * Fix-round-1 finding: a synchronous `getLiveTaskIds().length === 0 ->
+ * closeSession()` check performed from OUTSIDE the drain loop (the OLD
+ * `abortClaudeSDKSession`) can only ever see a stale/incomplete snapshot — a
+ * `task_started` message the CLI already sent may not have been routed by
+ * `routeMessage` yet. The fix removes that external check entirely; abort
+ * now only calls `settleTurn`, which arms the SAME deferred idle-close timer
+ * `routeMessage`'s between-turn path already uses, so the close decision is
+ * always made `IDLE_GRACE_MS` later, from inside the drain loop's own
+ * ordering, by which point any in-flight message has certainly been routed.
+ *
+ * The full interrupt/settle race against a real (mocked-SDK) `abortClaudeSDKSession`
+ * call is exercised end-to-end in `server/claude-sdk-abort-race.test.ts` —
+ * that is the test that would have failed against the OLD code. This test
+ * instead verifies `settleTurn`'s own contribution in isolation: an aborted
+ * session with NO live task and no further messages must still eventually
+ * close (previously it would leak forever, since old `settleTurn` armed
+ * nothing), and — reusing `closeIfIdle`'s existing re-check — must not close
+ * while a task is still live even once the grace timer fires.
+ */
+test('settleTurn on an idle session arms a deferred close, so an aborted session with no background work does not leak forever', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const { factory, state } = createFakeQuery([[{ type: 'assistant', text: 'working' }]]);
+  const turnStarted = createDeferred();
+
+  const pending = claudeSessionPool.runTurn({
+    appSessionId: 'idle-abort-1',
+    userMessage: userMessage('long, then abort with nothing backgrounded'),
+    sdkOptions: {},
+    onMessage: () => turnStarted.resolve(),
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  await turnStarted.promise;
+  assert.equal(await claudeSessionPool.interruptTurn('idle-abort-1'), true);
+  assert.equal(claudeSessionPool.settleTurn('idle-abort-1', 'aborted'), true);
+  await pending;
+
+  // No live task, nothing else will ever message this session again — the
+  // OLD settleTurn armed no timer here, so this session would stay live
+  // (leak) until process shutdown. The fix arms one.
+  assert.equal(state.closed, false, 'must not close synchronously — give the grace window a chance');
+  t.mock.timers.tick(60000);
+  assert.equal(state.closed, true, 'an idle aborted session must still eventually close, not leak forever');
+
+  t.mock.timers.reset();
+});
+
+test('settleTurn\'s deferred close still respects a live task at fire time', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const state = { closed: false };
+  const releaseTaskStarted = createDeferred();
+
+  const factory = ({ prompt }) => {
+    const generator = (async function* run() {
+      for await (const _userMessage of prompt) {
+        await releaseTaskStarted.promise;
+        yield { type: 'system', subtype: 'task_started', task_id: 'racer' };
+        // No `result` — matches an interrupted turn (spike-verified).
+      }
+    })();
+    generator.interrupt = async () => { releaseTaskStarted.resolve(); };
+    generator.close = () => { state.closed = true; };
+    return generator;
+  };
+
+  const pending = claudeSessionPool.runTurn({
+    appSessionId: 'race-1',
+    userMessage: userMessage('start bg then abort'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  assert.equal(await claudeSessionPool.interruptTurn('race-1'), true);
+  assert.equal(claudeSessionPool.settleTurn('race-1', 'aborted'), true);
+  const result = await pending;
+  assert.equal(result.subtype, 'aborted');
+
+  await waitFor(() => claudeSessionPool.getLiveTaskIds('race-1').length > 0, {
+    message: 'task_started must be tracked once routed',
+  });
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('race-1'), ['racer']);
+
+  // The deferred timer armed by settleTurn fires here — closeIfIdle must
+  // re-check liveTaskIds at THIS point (not the stale snapshot from when the
+  // timer was armed) and bail.
+  t.mock.timers.tick(60000);
+  assert.equal(state.closed, false, 'must not close while the task is still live, even once the grace timer fires');
+  assert.equal(claudeSessionPool.hasLiveSession('race-1'), true);
+
+  claudeSessionPool.closeSession('race-1');
+  t.mock.timers.reset();
+});
+
+/**
  * Fake `query()` that counts how many times the factory itself is invoked
  * (i.e. how many "processes" were spawned), with a separate message script
  * per invocation. Used to prove that a superseded session's drain loop

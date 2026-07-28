@@ -115,6 +115,25 @@ function settleCurrentTurn(session, result) {
   return true;
 }
 
+/**
+ * Arms the idle-close timer if nothing is currently tracked as live and no
+ * timer is already pending. Deliberately does NOT decide anything itself —
+ * `closeIfIdle` (run only when the timer fires, `IDLE_GRACE_MS` later) is the
+ * sole place that actually closes, and it re-reads `liveTaskIds` at that
+ * later point rather than trusting the snapshot taken when the timer was
+ * armed. That distinction matters: a caller outside the drain loop (e.g.
+ * abort) can only ever see a stale/incomplete `liveTaskIds` snapshot, since a
+ * message the CLI already sent may not have been routed through
+ * `routeMessage` yet. Arming a deferred check — instead of closing on that
+ * stale snapshot — gives any in-flight message the whole grace window to
+ * arrive and register before the close decision is actually made.
+ */
+function armIdleTimerIfIdle(session) {
+  if (session.liveTaskIds.size === 0 && !session.idleTimer) {
+    session.idleTimer = setTimeout(() => closeIfIdle(session), IDLE_GRACE_MS);
+  }
+}
+
 function routeMessage(session, message) {
   trackTask(session, message);
 
@@ -133,9 +152,7 @@ function routeMessage(session, message) {
   // completion to the UI after its turn already finished.
   session.onBetweenTurnMessage(message);
 
-  if (session.liveTaskIds.size === 0 && !session.idleTimer) {
-    session.idleTimer = setTimeout(() => closeIfIdle(session), IDLE_GRACE_MS);
-  }
+  armIdleTimerIfIdle(session);
 }
 
 async function drain(session) {
@@ -220,13 +237,29 @@ export const claudeSessionPool = {
     return [...(live.get(appSessionId)?.liveTaskIds ?? [])];
   },
 
-  /** Settles an in-flight turn WITHOUT killing the process. Used by abort. */
+  /**
+   * Settles an in-flight turn WITHOUT killing the process. Used by abort.
+   *
+   * Never closes synchronously — the caller (abort) can only ever hold a
+   * stale view of `liveTaskIds`, since a message the CLI already sent (e.g.
+   * `task_started`) may still be in flight, unrouted by this session's drain
+   * loop, at the exact moment abort settles the turn. Deciding to close from
+   * outside on that stale snapshot would risk killing a background task that
+   * just registered — instead this only arms the same deferred idle-close
+   * check `routeMessage` uses between turns, which re-reads `liveTaskIds`
+   * `IDLE_GRACE_MS` later, from inside the drain loop's own ordering, by
+   * which point any in-flight message has certainly been routed.
+   */
   settleTurn(appSessionId, reason) {
     const session = live.get(appSessionId);
     if (!session) {
       return false;
     }
-    return settleCurrentTurn(session, { type: 'result', subtype: reason });
+    const settled = settleCurrentTurn(session, { type: 'result', subtype: reason });
+    if (settled) {
+      armIdleTimerIfIdle(session);
+    }
+    return settled;
   },
 
   /**

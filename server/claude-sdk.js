@@ -970,14 +970,20 @@ async function abortClaudeSDKSession(sessionId) {
     // ourselves. Keyed by `poolSessionId` (the app-level id), NOT `sessionId`
     // (the provider-native id this function receives) — those are different
     // key spaces; see the `poolSessionId` derivation in `queryClaudeSDK`.
+    //
+    // Deliberately NOT deciding here whether to close the pool session. A
+    // `task_started` the CLI already sent (but the pool's drain loop has not
+    // routed yet) is invisible to any check made from out here — `interrupt()`
+    // is awaited above, which yields the event loop, so by the time this line
+    // runs a message can be sitting in the query's async iterator, not yet
+    // reflected in `getLiveTaskIds`. Closing on that stale read would kill a
+    // background task that just started — the exact bug this plan exists to
+    // fix. `settleTurn` itself now arms the pool's own idle-close timer (see
+    // `claude-session-pool.js`), which runs inside the drain loop's ordering
+    // and re-checks `liveTaskIds` right before acting, 60s later — long
+    // enough that an in-flight message has certainly been routed by then.
     if (session.poolSessionId) {
       claudeSessionPool.settleTurn(session.poolSessionId, 'aborted');
-      // Mirrors the pool's own turn-end policy (`closeIfIdle`): only close
-      // the process if nothing is still using it. A live background task
-      // must keep the process open across this abort.
-      if (claudeSessionPool.getLiveTaskIds(session.poolSessionId).length === 0) {
-        claudeSessionPool.closeSession(session.poolSessionId);
-      }
     }
 
     // Update session status
