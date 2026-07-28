@@ -7,6 +7,13 @@
  * task reaper only sweeps when input is closed. So this object's lifetime IS
  * the lifetime of any background shell the session started.
  *
+ * `next()` can be called again before a previous call has settled (e.g. two
+ * overlapping consumers, or a drain loop racing a `return()` from the SDK
+ * tearing down the prompt iterator). Each such call gets its own resolver
+ * queued in `waiters`, FIFO. `close()` and `return()` must settle every
+ * queued resolver — not just the most recent one — or an earlier caller's
+ * `next()` promise hangs forever.
+ *
  * @returns {{
  *   push: (message: object) => void,
  *   close: () => void,
@@ -17,14 +24,15 @@
 export function createInputStream() {
   /** @type {object[]} */
   const queued = [];
-  /** @type {((result: { value: object | undefined, done: boolean }) => void) | null} */
-  let waiting = null;
+  /** @type {((result: { value: object | undefined, done: boolean }) => void)[]} */
+  const waiters = [];
   let closed = false;
 
-  const settleWaiting = (result) => {
-    const resolve = waiting;
-    waiting = null;
-    resolve(result);
+  const settleAllWaiters = (result) => {
+    while (waiters.length > 0) {
+      const resolve = waiters.shift();
+      resolve(result);
+    }
   };
 
   return {
@@ -32,8 +40,9 @@ export function createInputStream() {
       if (closed) {
         return;
       }
-      if (waiting) {
-        settleWaiting({ value: message, done: false });
+      if (waiters.length > 0) {
+        const resolve = waiters.shift();
+        resolve({ value: message, done: false });
         return;
       }
       queued.push(message);
@@ -44,9 +53,7 @@ export function createInputStream() {
         return;
       }
       closed = true;
-      if (waiting) {
-        settleWaiting({ value: undefined, done: true });
-      }
+      settleAllWaiters({ value: undefined, done: true });
     },
 
     get closed() {
@@ -63,11 +70,12 @@ export function createInputStream() {
             return Promise.resolve({ value: undefined, done: true });
           }
           return new Promise((resolve) => {
-            waiting = resolve;
+            waiters.push(resolve);
           });
         },
         return() {
           closed = true;
+          settleAllWaiters({ value: undefined, done: true });
           return Promise.resolve({ value: undefined, done: true });
         },
       };

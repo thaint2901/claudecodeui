@@ -63,3 +63,45 @@ test('push after close is ignored', async () => {
   }
   assert.deepEqual(seen, []);
 });
+
+test('two overlapping next() calls both settle, in FIFO order, when two messages are pushed', async () => {
+  const stream = createInputStream();
+  const iterator = stream[Symbol.asyncIterator]();
+
+  const first = iterator.next();
+  const second = iterator.next();
+
+  stream.push(msg('one'));
+  stream.push(msg('two'));
+
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult.done, false);
+  assert.equal(firstResult.value.message.content, 'one');
+  assert.equal(secondResult.done, false);
+  assert.equal(secondResult.value.message.content, 'two');
+});
+
+test('two overlapping next() calls both settle with done: true when close() is called', async () => {
+  const stream = createInputStream();
+  const iterator = stream[Symbol.asyncIterator]();
+
+  const first = iterator.next();
+  const second = iterator.next();
+
+  stream.close();
+
+  assert.deepEqual(await first, { value: undefined, done: true });
+  assert.deepEqual(await second, { value: undefined, done: true });
+});
+
+test('a pending next() settles when return() is called on the iterator', async () => {
+  const stream = createInputStream();
+  const iterator = stream[Symbol.asyncIterator]();
+
+  const pending = iterator.next();
+  const returnResult = await iterator.return();
+
+  assert.deepEqual(await pending, { value: undefined, done: true });
+  assert.deepEqual(returnResult, { value: undefined, done: true });
+  assert.equal(stream.closed, true);
+});
