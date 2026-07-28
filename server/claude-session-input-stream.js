@@ -8,11 +8,20 @@
  * the lifetime of any background shell the session started.
  *
  * `next()` can be called again before a previous call has settled (e.g. two
- * overlapping consumers, or a drain loop racing a `return()` from the SDK
- * tearing down the prompt iterator). Each such call gets its own resolver
- * queued in `waiters`, FIFO. `close()` and `return()` must settle every
- * queued resolver — not just the most recent one — or an earlier caller's
- * `next()` promise hangs forever.
+ * overlapping `next()` calls from the SAME consumer, or a drain loop racing
+ * a `return()` from the SDK tearing down the prompt iterator). Each such
+ * call gets its own resolver queued in `waiters`, FIFO. `close()` and
+ * `return()` must settle every queued resolver — not just the most recent
+ * one — or an earlier caller's `next()` promise hangs forever.
+ *
+ * This stream is single-consumer: `queued` and `waiters` are shared by every
+ * iterator `[Symbol.asyncIterator]()` returns, so calling it more than once
+ * does NOT give each iterator its own copy of the stream. Two concurrently
+ * driven iterators would partition the messages between them (each message
+ * goes to whichever iterator's `next()` happened to be waiting, or to
+ * whichever iterator calls `next()` next), not duplicate them to both — and
+ * neither iterator would raise an error. Callers must drive exactly one
+ * iteration (one active `next()`/`for await` loop) at a time.
  *
  * @returns {{
  *   push: (message: object) => void,
