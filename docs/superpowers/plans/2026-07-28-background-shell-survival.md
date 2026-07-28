@@ -140,6 +140,22 @@ Expected: FAIL — cannot resolve `./claude-session-input-stream.js`.
  * task reaper only sweeps when input is closed. So this object's lifetime IS
  * the lifetime of any background shell the session started.
  *
+ * `next()` can be called again before a previous call has settled (e.g. two
+ * overlapping `next()` calls from the SAME consumer, or a drain loop racing
+ * a `return()` from the SDK tearing down the prompt iterator). Each such
+ * call gets its own resolver queued in `waiters`, FIFO. `close()` and
+ * `return()` must settle every queued resolver — not just the most recent
+ * one — or an earlier caller's `next()` promise hangs forever.
+ *
+ * This stream is single-consumer: `queued` and `waiters` are shared by every
+ * iterator `[Symbol.asyncIterator]()` returns, so calling it more than once
+ * does NOT give each iterator its own copy of the stream. Two concurrently
+ * driven iterators would partition the messages between them (each message
+ * goes to whichever iterator's `next()` happened to be waiting, or to
+ * whichever iterator calls `next()` next), not duplicate them to both — and
+ * neither iterator would raise an error. Callers must drive exactly one
+ * iteration (one active `next()`/`for await` loop) at a time.
+ *
  * @returns {{
  *   push: (message: object) => void,
  *   close: () => void,
@@ -150,14 +166,15 @@ Expected: FAIL — cannot resolve `./claude-session-input-stream.js`.
 export function createInputStream() {
   /** @type {object[]} */
   const queued = [];
-  /** @type {((result: { value: object | undefined, done: boolean }) => void) | null} */
-  let waiting = null;
+  /** @type {((result: { value: object | undefined, done: boolean }) => void)[]} */
+  const waiters = [];
   let closed = false;
 
-  const settleWaiting = (result) => {
-    const resolve = waiting;
-    waiting = null;
-    resolve(result);
+  const settleAllWaiters = (result) => {
+    while (waiters.length > 0) {
+      const resolve = waiters.shift();
+      resolve(result);
+    }
   };
 
   return {
@@ -165,8 +182,9 @@ export function createInputStream() {
       if (closed) {
         return;
       }
-      if (waiting) {
-        settleWaiting({ value: message, done: false });
+      if (waiters.length > 0) {
+        const resolve = waiters.shift();
+        resolve({ value: message, done: false });
         return;
       }
       queued.push(message);
@@ -177,9 +195,7 @@ export function createInputStream() {
         return;
       }
       closed = true;
-      if (waiting) {
-        settleWaiting({ value: undefined, done: true });
-      }
+      settleAllWaiters({ value: undefined, done: true });
     },
 
     get closed() {
@@ -196,11 +212,12 @@ export function createInputStream() {
             return Promise.resolve({ value: undefined, done: true });
           }
           return new Promise((resolve) => {
-            waiting = resolve;
+            waiters.push(resolve);
           });
         },
         return() {
           closed = true;
+          settleAllWaiters({ value: undefined, done: true });
           return Promise.resolve({ value: undefined, done: true });
         },
       };
@@ -208,6 +225,13 @@ export function createInputStream() {
   };
 }
 ```
+
+
+> **Amended 2026-07-28.** The first draft of this block used a single `waiting` resolver
+> slot. Review found that a second `next()` orphaned the first caller, and that `return()`
+> never settled a pending waiter — which would hang the Task 2 drain loop on the
+> `destroy()` -> `input.close()` -> `query.close()` teardown path. The code above is the
+> shipped implementation (commits f36d11c, e3c94fb, 0fccfae) and is what to use.
 
 - [ ] **Step 4: Run test to verify it passes**
 
