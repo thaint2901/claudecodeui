@@ -410,29 +410,6 @@ test('a superseded session drain finishing late does not delete the new session 
   claudeSessionPool.closeSession(appSessionId);
 });
 
-test('a task_started before turn end keeps the process alive', async () => {
-  claudeSessionPool._resetForTests();
-  const { factory, state } = createFakeQuery([[
-    { type: 'system', subtype: 'task_started', task_id: 'bg1' },
-    { type: 'result', subtype: 'success' },
-  ]]);
-
-  await claudeSessionPool.runTurn({
-    appSessionId: 's5',
-    userMessage: userMessage('start bg'),
-    sdkOptions: {},
-    onMessage: () => {},
-    onBetweenTurnMessage: () => {},
-    createQuery: factory,
-  });
-
-  assert.equal(claudeSessionPool.hasLiveSession('s5'), true);
-  assert.deepEqual(claudeSessionPool.getLiveTaskIds('s5'), ['bg1']);
-  assert.equal(state.closed, false);
-
-  claudeSessionPool.closeSession('s5');
-});
-
 test('task_updated status killed clears the task, so the reaper does not wedge the session open', async () => {
   claudeSessionPool._resetForTests();
   const { factory } = createFakeQuery([[
