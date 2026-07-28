@@ -38,6 +38,53 @@ const userMessage = (text) => ({
   parent_tool_use_id: null,
 });
 
+/**
+ * Deterministic replacement for a wall-clock sleep when a test is really
+ * waiting for one specific event to fire (a message reaching a callback).
+ * The callback resolves this instead of the test guessing how many
+ * milliseconds that takes.
+ */
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+/**
+ * Deterministic replacement for a wall-clock sleep when a test is waiting on
+ * observable pool state to settle (e.g. a session dying) rather than on one
+ * named event. Ticks the microtask queue — everything relevant here
+ * (async-generator draining, the input stream's queued waiters) settles via
+ * microtasks, never timers — so this never needs to reach a macrotask
+ * boundary. Bounded so a genuine regression fails the assertion immediately
+ * instead of hanging the suite.
+ */
+async function waitFor(predicate, { maxTicks = 200, message = 'condition' } = {}) {
+  for (let tick = 0; tick < maxTicks; tick += 1) {
+    if (predicate()) {
+      return;
+    }
+    await Promise.resolve();
+  }
+  assert.fail(`${message} (did not become true within ${maxTicks} microtask ticks)`);
+}
+
+/**
+ * Bounded microtask flush used only where a fixed deterministic anchor exists
+ * (e.g. a fake generator's own `finally`) but the pool's *own* async-generator
+ * drain loop needs a few more microtask hops after that anchor to run its
+ * matching `finally`. Not a predicate poll: there is no pool-observable state
+ * that distinguishes "not yet" from "already ran as a guarded no-op" here, so
+ * this is a fixed, generous tick budget rather than a wall-clock guess.
+ */
+async function flushMicrotasks(ticks = 50) {
+  for (let i = 0; i < ticks; i += 1) {
+    await Promise.resolve();
+  }
+}
+
 test('resolves a turn on its result message and routes events to that turn', async () => {
   claudeSessionPool._resetForTests();
   const { factory } = createFakeQuery([
@@ -107,17 +154,20 @@ test('settleTurn resolves an in-flight turn without closing the process', async 
   claudeSessionPool._resetForTests();
   // Turn one never emits a result — this is what an interrupted turn looks like.
   const { factory, state } = createFakeQuery([[{ type: 'assistant', text: 'working' }]]);
+  const turnStarted = createDeferred();
 
   const pending = claudeSessionPool.runTurn({
     appSessionId: 's4',
     userMessage: userMessage('long'),
     sdkOptions: {},
-    onMessage: () => {},
+    onMessage: () => turnStarted.resolve(),
     onBetweenTurnMessage: () => {},
     createQuery: factory,
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Wait for the turn to actually be mid-stream (the 'assistant' message
+  // routed) before interrupting it, instead of guessing a wall-clock delay.
+  await turnStarted.promise;
   assert.equal(claudeSessionPool.settleTurn('s4', 'aborted'), true);
 
   const result = await pending;
@@ -138,18 +188,27 @@ function createCountingFakeQuery(scriptPerInvocation) {
 
   const factory = ({ prompt }) => {
     const invocationIndex = invocations.length;
-    const record = { closed: false, interrupted: false, turns: 0 };
+    const finished = createDeferred();
+    const record = { closed: false, interrupted: false, turns: 0, finished: finished.promise };
     invocations.push(record);
 
     const generator = (async function* run() {
-      for await (const userMessage of prompt) {
-        void userMessage;
-        const turns = scriptPerInvocation[invocationIndex] ?? [];
-        const script = turns[record.turns] ?? [{ type: 'result', subtype: 'success' }];
-        record.turns += 1;
-        for (const message of script) {
-          yield message;
+      try {
+        for await (const userMessage of prompt) {
+          void userMessage;
+          const turns = scriptPerInvocation[invocationIndex] ?? [];
+          const script = turns[record.turns] ?? [{ type: 'result', subtype: 'success' }];
+          record.turns += 1;
+          for (const message of script) {
+            yield message;
+          }
         }
+      } finally {
+        // Resolves once THIS generator's own body has fully unwound (its
+        // prompt was closed and its `for await` returned). The pool's own
+        // drain loop finishes its matching `finally` a few more microtask
+        // hops after this — see `flushMicrotasks` at the call site.
+        finished.resolve();
       }
     })();
 
@@ -198,10 +257,15 @@ test('a superseded session drain finishing late does not delete the new session 
   assert.equal(claudeSessionPool.hasLiveSession(appSessionId), true, 'B must be registered');
   assert.deepEqual(claudeSessionPool.getLiveTaskIds(appSessionId), ['t2'], 'B\'s live task must be tracked');
 
-  // Give A's drain loop plenty of time to finish its `finally` — if the
-  // delete there were unguarded, it would remove B's entry from the map
-  // right about now.
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Wait for A's own generator body to fully unwind (deterministic: it
+  // resolves in the fake's own `finally`, not on a wall-clock guess), then
+  // flush a bounded number of extra microtask ticks so the pool's own drain
+  // loop — which finishes its matching `finally` a few hops after the
+  // generator itself returns — has run its course. If the identity guard in
+  // `removeFromLiveIfCurrent` were missing, this is exactly where it would
+  // clobber B's entry.
+  await invocations[0].finished;
+  await flushMicrotasks();
 
   assert.equal(claudeSessionPool.hasLiveSession(appSessionId), true, 'B must still be registered after A fully unwinds');
   assert.deepEqual(claudeSessionPool.getLiveTaskIds(appSessionId), ['t2'], 'B\'s live task must still be tracked');
@@ -285,16 +349,24 @@ test('a task_notification arriving after turn end goes to the between-turn sink'
 
   const betweenTurn = [];
   const inTurn = [];
+  const notificationReceived = createDeferred();
   await claudeSessionPool.runTurn({
     appSessionId: 's7',
     userMessage: userMessage('start bg'),
     sdkOptions: {},
     onMessage: (m) => inTurn.push(m),
-    onBetweenTurnMessage: (m) => betweenTurn.push(m),
+    onBetweenTurnMessage: (m) => {
+      betweenTurn.push(m);
+      notificationReceived.resolve();
+    },
     createQuery: factory,
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // The notification is yielded by the fake generator on the SAME turn but
+  // after the `result` that already resolved `runTurn`'s promise above, so
+  // it is routed on a later microtask. Wait for the actual event (the sink
+  // callback firing) instead of guessing a wall-clock delay.
+  await notificationReceived.promise;
 
   assert.deepEqual(inTurn.map((m) => m.subtype), ['task_started']);
   assert.deepEqual(betweenTurn.map((m) => m.subtype), ['task_notification']);
@@ -328,7 +400,14 @@ test('a dead process is replaced on the next turn instead of reused', async () =
   };
 
   await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('one') });
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // `runTurn` resolves as soon as the `result` message settles the turn, but
+  // task `t1` is still live at that instant (closeIfIdle keeps the session
+  // open) — the generator's `return` (ending the process) is only reached on
+  // the drain loop's NEXT tick. Poll the actual state instead of guessing how
+  // long that takes; the predicate is genuinely false at tick 0.
+  await waitFor(() => !claudeSessionPool.hasLiveSession('s8'), {
+    message: 'session s8 should have gone dead once its generator returned',
+  });
   assert.equal(claudeSessionPool.hasLiveSession('s8'), false, 'generator ended, session is dead');
 
   await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('two') });
