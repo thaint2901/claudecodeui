@@ -61,7 +61,15 @@ terminated approximately five seconds after Claude returns its final result."*
 3. When the OS memory-pressure reaper kills a task, the user is told. Losses become visible, never
    silent.
 4. No change to the `spawnFn` contract, so the WebSocket layer and run registry keep working.
-5. No RAM regression for sessions that never use background work.
+5. No RAM regression for a session that completes its turns normally and never
+   uses background work: it spawns and exits exactly one process per turn, as today.
+   **One bounded exception, added post-implementation:** an *aborted* turn leaves its
+   process alive for up to the idle grace period (60 s) even with no background work,
+   because no close decision made from outside the pool's drain loop can be sound —
+   see amendment 3. So the honest statement of this goal is "no *unbounded* RAM
+   regression, and none at all for turns that complete": the worst case for a
+   background-work-free session is one ~320 MB process held for 60 s after an abort,
+   released automatically, never accumulating.
 
 ## Non-goals
 
@@ -272,7 +280,23 @@ pool can be sound, because a `task_started` still undelivered in the SDK's async
 invisible to `getLiveTaskIds` at the moment of asking — an external check-then-close is racy by
 construction, not merely by timing. Abort now only settles the turn; the pool's idle timer owns the
 close decision and re-reads live-task state when it fires, inside the drain loop. Cost: an idle
-aborted session lingers up to 60 s instead of closing at once. Implemented in commit `e15f9a1`.
+aborted session lingers up to 60 s instead of closing at once — goal 5 above has been amended to
+state that bound explicitly rather than leave it contradicted. Implemented in commit `e15f9a1`.
+
+**4. A reused process needed active option reconciliation, not just a fresh options object.** The
+risk note above ("toggling it mid-session must call `setPermissionMode()`") was correct but was not
+implemented in the first pass: `sdkOptions` reached only `createLiveSession`, so turn 2+ of a reused
+session ran against turn 1's options *and* turn 1's captured `canUseTool` closure — a user switching
+off `bypassPermissions` or unchecking a tool was still evaluated against the settings they had just
+abandoned, and the resulting `permission_request` was written into the already-completed run's event
+log. `runTurn` now compares the turn's options against the live process and either recreates it
+(when there is no background work to protect — which is what the old code did at turn end anyway) or
+reconfigures it in place: `setPermissionMode()` / `setModel()` control requests, plus a per-session
+mutable `turnContext` the captured callbacks read for the writer and the allow/deny lists. One
+residual gap, stated rather than hidden: the CLI also holds its spawn-time allowlist and
+auto-approves against it without consulting our callback, so a tool *removed* from `allowedTools`
+mid-session stays auto-approved inside the CLI until the process closes. Tightening via
+`disallowedTools` does take effect. Implemented in the final-review fix round.
 
 **Test-runner note.** `server/claude-sdk-abort-race.test.ts` uses `mock.module`, so any aggregate
 test command must include `--experimental-test-module-mocks`. Without it the file fails loudly
