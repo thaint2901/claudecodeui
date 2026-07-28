@@ -126,3 +126,90 @@ test('settleTurn resolves an in-flight turn without closing the process', async 
 
   claudeSessionPool.closeSession('s4');
 });
+
+/**
+ * Fake `query()` that counts how many times the factory itself is invoked
+ * (i.e. how many "processes" were spawned), with a separate message script
+ * per invocation. Used to prove that a superseded session's drain loop
+ * finishing late does not cause a spurious extra process to be spawned.
+ */
+function createCountingFakeQuery(scriptPerInvocation) {
+  const invocations = [];
+
+  const factory = ({ prompt }) => {
+    const invocationIndex = invocations.length;
+    const record = { closed: false, interrupted: false, turns: 0 };
+    invocations.push(record);
+
+    const generator = (async function* run() {
+      for await (const userMessage of prompt) {
+        void userMessage;
+        const turns = scriptPerInvocation[invocationIndex] ?? [];
+        const script = turns[record.turns] ?? [{ type: 'result', subtype: 'success' }];
+        record.turns += 1;
+        for (const message of script) {
+          yield message;
+        }
+      }
+    })();
+
+    generator.interrupt = async () => { record.interrupted = true; };
+    generator.close = () => { record.closed = true; };
+    return generator;
+  };
+
+  return { factory, invocations };
+}
+
+test('a superseded session drain finishing late does not delete the new session (race regression)', async () => {
+  claudeSessionPool._resetForTests();
+
+  const { factory, invocations } = createCountingFakeQuery([
+    // Invocation 0 ("session A"): turn 0 starts a background task, so A is
+    // still registered afterwards — we then force-close it explicitly.
+    [[{ type: 'system', subtype: 'task_started', task_id: 't1' }, { type: 'result', subtype: 'success' }]],
+    // Invocation 1 ("session B"): turn 0 starts its own background task, so
+    // B stays registered too, then turn 1 clears it out.
+    [
+      [{ type: 'assistant', text: 'from-b' }, { type: 'system', subtype: 'task_started', task_id: 't2' }, { type: 'result', subtype: 'success' }],
+      [{ type: 'system', subtype: 'task_updated', task_id: 't2', patch: { status: 'completed' } }, { type: 'result', subtype: 'success' }],
+    ],
+  ]);
+
+  const appSessionId = 's5';
+  const common = { appSessionId, sdkOptions: {}, onMessage: () => {}, onBetweenTurnMessage: () => {}, createQuery: factory };
+
+  // Turn 0 on session A: leaves a live task, so A is not auto-closed.
+  await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('a-one') });
+  assert.equal(claudeSessionPool.hasLiveSession(appSessionId), true);
+  assert.equal(invocations.length, 1);
+
+  // Force-close A. This synchronously deletes A's entry from the pool's map,
+  // but A's fake generator (like the real CLI) does not actually finish
+  // until a later microtask — that gap is exactly what the race needs.
+  claudeSessionPool.closeSession(appSessionId);
+  assert.equal(claudeSessionPool.hasLiveSession(appSessionId), false);
+
+  // Immediately (same tick, no await in between) start a new turn for the
+  // same appSessionId — this creates session B before A's drain loop has
+  // had a chance to run its `finally`.
+  await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('b-one') });
+  assert.equal(invocations.length, 2, 'must have spawned exactly one new process for B');
+  assert.equal(claudeSessionPool.hasLiveSession(appSessionId), true, 'B must be registered');
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds(appSessionId), ['t2'], 'B\'s live task must be tracked');
+
+  // Give A's drain loop plenty of time to finish its `finally` — if the
+  // delete there were unguarded, it would remove B's entry from the map
+  // right about now.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.equal(claudeSessionPool.hasLiveSession(appSessionId), true, 'B must still be registered after A fully unwinds');
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds(appSessionId), ['t2'], 'B\'s live task must still be tracked');
+
+  // A subsequent turn must reuse B, not spawn a third process.
+  await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('b-two') });
+  assert.equal(invocations.length, 2, 'must not have spawned a third process');
+  assert.equal(claudeSessionPool.hasLiveSession(appSessionId), false, 'B closes once its task completes and no turn is in flight');
+
+  claudeSessionPool.closeSession(appSessionId);
+});

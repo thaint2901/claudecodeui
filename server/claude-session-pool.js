@@ -38,6 +38,20 @@ function clearIdleTimer(session) {
   }
 }
 
+/**
+ * Removes `session` from `live` only if it is still the entry stored at its
+ * own key. `destroy()` and `drain()`'s `finally` both race a superseding
+ * session created for the same `appSessionId` (e.g. `closeSession()` runs
+ * synchronously, but the old session's async generator does not actually
+ * finish until a later microtask) — an unconditional `live.delete()` would
+ * delete the NEW session's entry instead of a stale one that's already gone.
+ */
+function removeFromLiveIfCurrent(session) {
+  if (live.get(session.appSessionId) === session) {
+    live.delete(session.appSessionId);
+  }
+}
+
 function destroy(session) {
   clearIdleTimer(session);
   session.dead = true;
@@ -50,7 +64,7 @@ function destroy(session) {
       error: error instanceof Error ? error.message : String(error),
     });
   }
-  live.delete(session.appSessionId);
+  removeFromLiveIfCurrent(session);
 }
 
 /**
@@ -145,7 +159,7 @@ async function drain(session) {
     }
     session.dead = true;
     clearIdleTimer(session);
-    live.delete(session.appSessionId);
+    removeFromLiveIfCurrent(session);
   }
 }
 
