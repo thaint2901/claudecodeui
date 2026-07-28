@@ -291,12 +291,77 @@ off `bypassPermissions` or unchecking a tool was still evaluated against the set
 abandoned, and the resulting `permission_request` was written into the already-completed run's event
 log. `runTurn` now compares the turn's options against the live process and either recreates it
 (when there is no background work to protect — which is what the old code did at turn end anyway) or
-reconfigures it in place: `setPermissionMode()` / `setModel()` control requests, plus a per-session
-mutable `turnContext` the captured callbacks read for the writer and the allow/deny lists. One
-residual gap, stated rather than hidden: the CLI also holds its spawn-time allowlist and
-auto-approves against it without consulting our callback, so a tool *removed* from `allowedTools`
-mid-session stays auto-approved inside the CLI until the process closes. Tightening via
-`disallowedTools` does take effect. Implemented in the final-review fix round.
+reconfigures it in place.
+
+Reconfiguring in place needs two distinct mechanisms, because refreshing our own state can only ever
+*loosen*:
+
+- **Loosening** — a tool the user has just *checked* — needs nothing from the CLI. It is not in the
+  spawn-time allowlist, so the CLI asks us, and the per-session mutable `turnContext` (which the
+  captured `canUseTool` reads for the writer and the allow/deny lists) answers with the current
+  settings.
+- **Tightening** — a tool the user has just *un-checked or disallowed* — cannot be done that way at
+  all. The CLI holds the `--allowedTools` list it was spawned with and auto-approves from it
+  **without ever calling `canUseTool`**, so our callback is not in the decision path. This is pushed
+  into the CLI's own permission engine with the `applyFlagSettings()` control request, alongside
+  `setPermissionMode()` / `setModel()`.
+
+Measured against the real CLI 2.1.220 + SDK 0.3.165 in `spikes/streaming-input-mode/live-deny.mjs`,
+with a background shell live throughout so the session was protected from recreation exactly as in
+production:
+
+| Step | Observed |
+|---|---|
+| Bash in the spawn allowlist, no rule pushed | `canUseTool consulted: 0` — auto-approved. This is the hole. |
+| `applyFlagSettings({permissions:{ask:['Bash']}})`, then Bash | `canUseTool consulted: 1 ["Bash"]` — PROMPTED |
+| `applyFlagSettings({permissions:{deny:['Bash']}})`, then Bash | `tool_result: is_error, "Permission to use Bash has been denied."` — DENIED by the CLI |
+| `backgroundTasks()` afterwards | `true` — none of it killed the protected task |
+
+The mapping ships to reproduce a freshly spawned process, which is what every turn used to get:
+un-checked → `ask` (so the user keeps the ability to approve on demand, exactly as `canUseTool`'s
+"on neither list" branch does); `disallowedTools` → `deny`. Both are sent as one complete
+`permissions` object every time, because successive `applyFlagSettings` calls replace that object
+rather than merging into it, and the layer is cleared with `permissions: null` — not `{}` — once
+there is nothing left to restrict, so a re-checked tool becomes usable again instead of being stuck
+for the life of a long-held process.
+
+**Fail-closed rejection is the fallback, and applies to both permission-carrying fields.** If
+`applyFlagSettings()` is missing (older SDK) or throws, and the desired layer adds a restriction the
+process is not already under, the turn is **rejected** rather than run — the error reaches the user
+as a `kind: 'error'` frame naming the session and telling them to let the background task finish or
+stop it and retry. Same treatment as a `permissionMode` change that cannot be applied. A failure to
+*relax* is logged and the turn proceeds: the only consequence is being asked when one need not have
+been, which exposes nothing.
+
+Two claims in an earlier revision of this amendment were wrong and are retracted: that "tightening
+via `disallowedTools` does take effect" (false for a tool already in turn 1's spawn allowlist — the
+CLI decides before consulting us, as the table's first row shows) and that closing and recreating the
+process is the only complete fix (`applyFlagSettings()` exists in this SDK and is verified to
+enforce). Implemented in the final-review fix round.
+
+## Accepted risks
+
+**Unbounded retention while a background task never terminates.** Decided deliberately, not
+deferred: the pool has **no cap on the number of held sessions and no maximum hold time**. A session
+is held for exactly as long as it has a live task, plus the 60 s idle grace period. A task that
+never terminates on its own — `tail -f`, a dev server, a `while true` watcher — therefore holds its
+~320 MB `claude` process for as long as the server runs. On a shared box like a30 several such
+sessions could add up to real memory.
+
+This is accepted because every alternative is worse for the user. An LRU cap or a maximum hold time
+would evict by **killing the user's running work** — which is precisely the bug this whole design
+exists to fix, reintroduced through the memory-saving path. Silently discarding a long-running task
+because a timer expired is not a safer failure than using memory; it is the same silent loss in new
+clothing.
+
+Two things already bound the blast radius: the OS memory-pressure reaper stays enabled (see *Policy
+decisions*), so a genuinely memory-starved box sheds tasks and the loss is reported through the
+`background_task` frame rather than hidden; and the user can stop a task deliberately
+(`stopTask()` — verified working, exposed by a UI that is an explicit non-goal here).
+
+The agreed follow-up is to **warn**, not evict: surface to the user when a session has been held for
+a long time, so they can decide whether the task is still wanted. Tracked separately; the decision
+recorded here is that eviction is off the table.
 
 **Test-runner note.** `server/claude-sdk-abort-race.test.ts` uses `mock.module`, so any aggregate
 test command must include `--experimental-test-module-mocks`. Without it the file fails loudly
