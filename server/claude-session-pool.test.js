@@ -9,8 +9,8 @@ import { claudeSessionPool } from './claude-session-pool.js';
  * queues per turn. Mirrors the real SDK shape — an AsyncGenerator with control
  * methods — without spawning a CLI.
  */
-function createFakeQuery(scriptPerTurn) {
-  const state = { closed: false, interrupted: false, turns: 0, prompts: [] };
+function createFakeQuery(scriptPerTurn, { omitSetPermissionMode = false } = {}) {
+  const state = { closed: false, interrupted: false, turns: 0, prompts: [], permissionModes: [], models: [] };
 
   const factory = ({ prompt }) => {
     const generator = (async function* run() {
@@ -26,6 +26,12 @@ function createFakeQuery(scriptPerTurn) {
 
     generator.interrupt = async () => { state.interrupted = true; };
     generator.close = () => { state.closed = true; };
+    // The two real streaming-input-only control requests the pool uses to
+    // reconfigure a process it must not close.
+    if (!omitSetPermissionMode) {
+      generator.setPermissionMode = async (mode) => { state.permissionModes.push(mode); };
+    }
+    generator.setModel = async (model) => { state.models.push(model); };
     return generator;
   };
 
@@ -521,4 +527,261 @@ test('a dead process is replaced on the next turn instead of reused', async () =
 
   await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('two') });
   assert.equal(built, 2, 'a fresh query must be created');
+});
+
+/**
+ * Final-review CRITICAL: a reused live process kept running turn 1's options.
+ * The SDK holds the options object `query()` was constructed with — including
+ * the `canUseTool` closure that reads `permissionMode` / `allowedTools` /
+ * `disallowedTools` — so a user who switched from `bypassPermissions` to
+ * `default`, or unchecked a tool, was still evaluated against the settings they
+ * had abandoned. The four tests below pin both halves of the fix: recreate when
+ * nothing is at stake, reconfigure in place when a background task must survive.
+ */
+test('a live session with NO background task is recreated when the turn\'s options changed', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, invocations } = createCountingFakeQuery([
+    // Invocation 0: turn 0 emits no `result` — what an interrupted turn looks
+    // like. Settling it leaves the session live with nothing to protect, which
+    // is the only way a task-free session survives a turn boundary.
+    [[{ type: 'assistant', text: 'working' }]],
+    [[{ type: 'result', subtype: 'success' }]],
+  ]);
+
+  const turnOneStarted = createDeferred();
+  const pending = claudeSessionPool.runTurn({
+    appSessionId: 'opts-idle',
+    userMessage: userMessage('one'),
+    sdkOptions: { permissionMode: 'bypassPermissions', allowedTools: ['Bash'], disallowedTools: [] },
+    onMessage: () => turnOneStarted.resolve(),
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  await turnOneStarted.promise;
+  assert.equal(claudeSessionPool.settleTurn('opts-idle', 'aborted'), true);
+  await pending;
+
+  assert.equal(claudeSessionPool.hasLiveSession('opts-idle'), true, 'the abort grace window keeps it live');
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('opts-idle'), [], 'and there is nothing to protect');
+
+  await claudeSessionPool.runTurn({
+    appSessionId: 'opts-idle',
+    userMessage: userMessage('two'),
+    sdkOptions: { permissionMode: 'default', allowedTools: [], disallowedTools: ['Bash'] },
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    // These fakes expose no setPermissionMode(), so an attempt to reconfigure
+    // in place here would throw — the recreate path is the only one that passes.
+    createQuery: factory,
+  });
+
+  assert.equal(invocations.length, 2, 'a stale-options session must be closed and recreated');
+  assert.equal(invocations[0].closed, true, 'the process carrying the stale options must actually be closed');
+
+  claudeSessionPool.closeSession('opts-idle');
+});
+
+test('a live session WITH a background task keeps its process and is reconfigured in place', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, state } = createFakeQuery([
+    [{ type: 'system', subtype: 'task_started', task_id: 'survivor' }, { type: 'result', subtype: 'success' }],
+    [{ type: 'result', subtype: 'success' }],
+  ]);
+
+  // Stands in for the object `claude-sdk.js` hands over: the SDK captures this
+  // exact reference on turn 1, so the pool must update it IN PLACE rather than
+  // swap it, or the captured approval callback keeps reading turn 1's values.
+  const capturedContext = {
+    ws: 'writer-for-turn-1',
+    permissionMode: 'bypassPermissions',
+    allowedTools: ['Bash'],
+    disallowedTools: [],
+  };
+
+  await claudeSessionPool.runTurn({
+    appSessionId: 'opts-live',
+    userMessage: userMessage('start a long shell'),
+    sdkOptions: { permissionMode: 'bypassPermissions', allowedTools: ['Bash'], disallowedTools: [], model: 'sonnet' },
+    turnContext: capturedContext,
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('opts-live'), ['survivor']);
+
+  await claudeSessionPool.runTurn({
+    appSessionId: 'opts-live',
+    userMessage: userMessage('now with tightened settings'),
+    sdkOptions: { permissionMode: 'default', allowedTools: [], disallowedTools: ['Bash'], model: 'opus' },
+    turnContext: {
+      ws: 'writer-for-turn-2',
+      permissionMode: 'default',
+      allowedTools: [],
+      disallowedTools: ['Bash'],
+    },
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  assert.equal(state.turns, 2, 'both turns must run on the same process');
+  assert.equal(state.closed, false, 'closing to apply new options would kill the background shell');
+  assert.deepEqual(state.permissionModes, ['default'], 'the mode change must reach the live process');
+  assert.deepEqual(state.models, ['opus'], 'the model change must reach the live process');
+  assert.deepEqual(
+    capturedContext,
+    { ws: 'writer-for-turn-2', permissionMode: 'default', allowedTools: [], disallowedTools: ['Bash'] },
+    'the captured context must now describe turn 2 — writer included, so this turn\'s frames go to this turn\'s writer',
+  );
+
+  claudeSessionPool.closeSession('opts-live');
+});
+
+test('unchanged options on a reused session issue no control requests', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, state } = createFakeQuery([
+    [{ type: 'system', subtype: 'task_started', task_id: 'survivor' }, { type: 'result', subtype: 'success' }],
+    [{ type: 'result', subtype: 'success' }],
+  ]);
+
+  const common = {
+    appSessionId: 'opts-same',
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    sdkOptions: { permissionMode: 'default', allowedTools: ['Agent', 'Task'], disallowedTools: [] },
+  });
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('two'),
+    // Same values, different object and different list order: not a change.
+    sdkOptions: { permissionMode: 'default', allowedTools: ['Task', 'Agent'], disallowedTools: [] },
+  });
+
+  assert.equal(state.turns, 2);
+  assert.deepEqual(state.permissionModes, []);
+  assert.deepEqual(state.models, []);
+
+  claudeSessionPool.closeSession('opts-same');
+});
+
+test('a permission-mode change that cannot be applied to a protected process rejects the turn', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, state } = createFakeQuery(
+    [
+      [{ type: 'system', subtype: 'task_started', task_id: 'survivor' }, { type: 'result', subtype: 'success' }],
+      [{ type: 'result', subtype: 'success' }],
+    ],
+    { omitSetPermissionMode: true },
+  );
+
+  const common = {
+    appSessionId: 'opts-no-control',
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    sdkOptions: { permissionMode: 'bypassPermissions' },
+  });
+
+  // Fail closed: running the turn anyway would auto-approve against the mode
+  // the user just left behind, and closing the process would kill the task.
+  await assert.rejects(
+    () => claudeSessionPool.runTurn({
+      ...common,
+      userMessage: userMessage('two'),
+      sdkOptions: { permissionMode: 'default' },
+    }),
+    /setPermissionMode/,
+  );
+
+  assert.equal(state.closed, false, 'the background task must survive the refusal');
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('opts-no-control'), ['survivor']);
+
+  claudeSessionPool.closeSession('opts-no-control');
+});
+
+/**
+ * Final-review IMPORTANT 2: a task settling while a LATER turn is in flight was
+ * routed only to that turn, where the role-keyed normalizer
+ * (claude-sessions.provider.ts) turns a `system`/`task_notification` frame into
+ * `[]` — so a completion, and worse a reaper kill (`status: 'stopped'`), was
+ * silently lost. Goal 3 of the design forbids exactly that.
+ */
+test('a task_notification arriving DURING a later turn still reaches the session sink', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory } = createFakeQuery([
+    [{ type: 'system', subtype: 'task_started', task_id: 'reaped' }, { type: 'result', subtype: 'success' }],
+    [
+      { type: 'system', subtype: 'task_notification', task_id: 'reaped', status: 'stopped', output_file: '/tmp/reaped.output', summary: 'killed under memory pressure' },
+      { type: 'result', subtype: 'success' },
+    ],
+  ]);
+
+  const common = {
+    appSessionId: 'mid-turn-settle',
+    sdkOptions: {},
+    createQuery: factory,
+  };
+
+  await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('one'), onMessage: () => {}, onBetweenTurnMessage: () => {} });
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('mid-turn-settle'), ['reaped']);
+
+  const sink = [];
+  const inTurn = [];
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('two'),
+    onMessage: (m) => inTurn.push(m),
+    onBetweenTurnMessage: (m) => sink.push(m),
+  });
+
+  assert.deepEqual(sink.map((m) => m.subtype), ['task_notification'], 'the settlement must reach the sink even mid-turn');
+  assert.equal(sink[0].status, 'stopped');
+  assert.equal(sink[0].output_file, '/tmp/reaped.output');
+  assert.deepEqual(inTurn.map((m) => m.subtype), ['task_notification'], 'and still pass through the turn, as before');
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('mid-turn-settle'), [], 'the task is no longer live');
+});
+
+/**
+ * Final-review IMPORTANT 4: `server/index.js` exits via `process.exit(0)`. A
+ * pooled process deliberately outlives its turn, so without an explicit close
+ * a ~320 MB `claude` child is orphaned indefinitely rather than for the
+ * seconds-wide window per-turn processes used to have.
+ */
+test('closeAllSessions closes every live process, so shutdown cannot orphan one', async () => {
+  claudeSessionPool._resetForTests();
+  const first = createFakeQuery([[{ type: 'system', subtype: 'task_started', task_id: 'a' }, { type: 'result', subtype: 'success' }]]);
+  const second = createFakeQuery([[{ type: 'system', subtype: 'task_started', task_id: 'b' }, { type: 'result', subtype: 'success' }]]);
+
+  for (const [appSessionId, fake] of [['shutdown-1', first], ['shutdown-2', second]]) {
+    await claudeSessionPool.runTurn({
+      appSessionId,
+      userMessage: userMessage('start bg'),
+      sdkOptions: {},
+      onMessage: () => {},
+      onBetweenTurnMessage: () => {},
+      createQuery: fake.factory,
+    });
+  }
+
+  assert.equal(claudeSessionPool.hasLiveSession('shutdown-1'), true);
+  assert.equal(claudeSessionPool.hasLiveSession('shutdown-2'), true);
+
+  assert.equal(claudeSessionPool.closeAllSessions(), 2);
+  assert.equal(first.state.closed, true);
+  assert.equal(second.state.closed, true);
+  assert.equal(claudeSessionPool.hasLiveSession('shutdown-1'), false);
+  assert.equal(claudeSessionPool.hasLiveSession('shutdown-2'), false);
 });

@@ -613,10 +613,29 @@ async function queryClaudeSDK(command, options = {}, ws) {
   // own signature/tests, which only know about a 3-arg `addSession` callback.
   const addSessionForPool = (id, instance, writer) => addSession(id, instance, writer, poolSessionId);
 
+  // Everything a callback the SDK CAPTURES must resolve at call time rather than
+  // at construction time.
+  //
+  // A live process keeps the `canUseTool` / hook functions it was constructed
+  // with, so on turn 2+ of a reused session the SDK still calls TURN 1's
+  // closures. Reading the writer and the permission lists off this object —
+  // which the pool refreshes in place on every turn (see `runTurn`) — is what
+  // makes those stale closures behave like current ones: frames go to the turn
+  // that is actually running, and approvals are decided against the settings
+  // the user has right now, not the ones they had when the process spawned.
+  const turnContext = {
+    ws,
+    sessionSummary,
+    getSessionId: () => capturedSessionId || sessionId || null,
+    permissionMode: 'default',
+    allowedTools: [],
+    disallowedTools: [],
+  };
+
   const emitNotification = (event) => {
     notifyUserIfEnabled({
-      userId: ws?.userId || null,
-      writer: ws,
+      userId: turnContext.ws?.userId || null,
+      writer: turnContext.ws,
       event
     });
   };
@@ -645,20 +664,28 @@ async function queryClaudeSDK(command, options = {}, ws) {
       sdkOptions.mcpServers = mcpServers;
     }
 
+    // Publish this turn's permission view onto the shared context. The pool
+    // copies it over the live session's context, so a captured `canUseTool`
+    // reads these values and not the ones it closed over.
+    turnContext.permissionMode = sdkOptions.permissionMode || 'default';
+    turnContext.allowedTools = [...(sdkOptions.allowedTools || [])];
+    turnContext.disallowedTools = [...(sdkOptions.disallowedTools || [])];
+
     sdkOptions.hooks = {
       Notification: [{
         matcher: '',
         hooks: [async (input) => {
           const message = typeof input?.message === 'string' ? input.message : 'Claude requires your attention.';
+          const sid = turnContext.getSessionId();
           emitNotification(createNotificationEvent({
             provider: 'claude',
-            sessionId: capturedSessionId || sessionId || null,
+            sessionId: sid,
             kind: 'action_required',
             code: 'agent.notification',
-            meta: { message, sessionName: sessionSummary },
+            meta: { message, sessionName: turnContext.sessionSummary },
             severity: 'warning',
             requiresUserAction: true,
-            dedupeKey: `claude:hook:notification:${capturedSessionId || sessionId || 'none'}:${message}`
+            dedupeKey: `claude:hook:notification:${sid || 'none'}:${message}`
           }));
           return {};
         }]
@@ -671,22 +698,29 @@ async function queryClaudeSDK(command, options = {}, ws) {
     // auto-approves them and the model acts on a generated answer. Move these
     // tools to a PreToolUse hook (runs before the mode check) if we need them
     // to work in those modes.
+    //
+    // Every read below goes through `turnContext`, never through `sdkOptions`
+    // or the enclosing `ws`/`capturedSessionId` bindings: on a reused live
+    // process this function IS turn 1's closure, and those bindings describe a
+    // run that has already completed.
     sdkOptions.canUseTool = async (toolName, input, context) => {
       const requiresInteraction = TOOLS_REQUIRING_INTERACTION.has(toolName);
+      const activeWs = turnContext.ws;
+      const sid = turnContext.getSessionId();
 
       if (!requiresInteraction) {
-        if (sdkOptions.permissionMode === 'bypassPermissions') {
+        if (turnContext.permissionMode === 'bypassPermissions') {
           return { behavior: 'allow', updatedInput: input };
         }
 
-        const isDisallowed = (sdkOptions.disallowedTools || []).some(entry =>
+        const isDisallowed = (turnContext.disallowedTools || []).some(entry =>
           matchesToolPermission(entry, toolName, input)
         );
         if (isDisallowed) {
           return { behavior: 'deny', message: 'Tool disallowed by settings' };
         }
 
-        const isAllowed = (sdkOptions.allowedTools || []).some(entry =>
+        const isAllowed = (turnContext.allowedTools || []).some(entry =>
           matchesToolPermission(entry, toolName, input)
         );
         if (isAllowed) {
@@ -695,29 +729,29 @@ async function queryClaudeSDK(command, options = {}, ws) {
       }
 
       const requestId = createRequestId();
-      ws.send(createNormalizedMessage({ kind: 'permission_request', requestId, toolName, input, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
+      activeWs.send(createNormalizedMessage({ kind: 'permission_request', requestId, toolName, input, sessionId: sid, provider: 'claude' }));
       emitNotification(createNotificationEvent({
         provider: 'claude',
-        sessionId: capturedSessionId || sessionId || null,
+        sessionId: sid,
         kind: 'action_required',
         code: 'permission.required',
-        meta: { toolName, sessionName: sessionSummary },
+        meta: { toolName, sessionName: turnContext.sessionSummary },
         severity: 'warning',
         requiresUserAction: true,
-        dedupeKey: `claude:permission:${capturedSessionId || sessionId || 'none'}:${requestId}`
+        dedupeKey: `claude:permission:${sid || 'none'}:${requestId}`
       }));
 
       const decision = await waitForToolApproval(requestId, {
         timeoutMs: requiresInteraction ? 0 : undefined,
         signal: context?.signal,
         metadata: {
-          _sessionId: capturedSessionId || sessionId || null,
+          _sessionId: sid,
           _toolName: toolName,
           _input: input,
           _receivedAt: new Date(),
         },
         onCancel: (reason) => {
-          ws.send(createNormalizedMessage({ kind: 'permission_cancelled', requestId, reason, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
+          turnContext.ws.send(createNormalizedMessage({ kind: 'permission_cancelled', requestId, reason, sessionId: turnContext.getSessionId(), provider: 'claude' }));
         }
       });
       if (!decision) {
@@ -730,11 +764,14 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
       if (decision.allow) {
         if (decision.rememberEntry && typeof decision.rememberEntry === 'string') {
-          if (!sdkOptions.allowedTools.includes(decision.rememberEntry)) {
-            sdkOptions.allowedTools.push(decision.rememberEntry);
+          // Remembered for the rest of THIS turn, on the same object the next
+          // turn overwrites — matching the pre-pool lifetime, where the entry
+          // died with the per-turn process and the client re-sent its settings.
+          if (!turnContext.allowedTools.includes(decision.rememberEntry)) {
+            turnContext.allowedTools.push(decision.rememberEntry);
           }
-          if (Array.isArray(sdkOptions.disallowedTools)) {
-            sdkOptions.disallowedTools = sdkOptions.disallowedTools.filter(entry => entry !== decision.rememberEntry);
+          if (Array.isArray(turnContext.disallowedTools)) {
+            turnContext.disallowedTools = turnContext.disallowedTools.filter(entry => entry !== decision.rememberEntry);
           }
         }
         return { behavior: 'allow', updatedInput: decision.updatedInput ?? input };
@@ -753,6 +790,27 @@ async function queryClaudeSDK(command, options = {}, ws) {
         console.warn('Failed to initialize Claude query with hooks, retrying without hooks:', hookError?.message || hookError);
         const { hooks: _dropped, ...optionsWithoutHooks } = params.options;
         return query({ ...params, options: optionsWithoutHooks });
+      }
+    };
+
+    // The Query constructor reads CLAUDE_CODE_STREAM_CLOSE_TIMEOUT
+    // synchronously, so the variable only needs to be set across that one
+    // synchronous call. `process.env` is global: holding it for the whole turn
+    // (as this did while construction moved into the pool) means two overlapping
+    // turns interleave their set/restore and leave it permanently set. There is
+    // no `await` between the set and the restore below, so no other turn can
+    // observe or clobber the window.
+    const createQueryWithStreamCloseTimeout = (params) => {
+      const prevStreamTimeout = process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
+      process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = '300000';
+      try {
+        return createQueryWithHookFallback(params);
+      } finally {
+        if (prevStreamTimeout !== undefined) {
+          process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = prevStreamTimeout;
+        } else {
+          delete process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
+        }
       }
     };
 
@@ -834,11 +892,19 @@ async function queryClaudeSDK(command, options = {}, ws) {
       }
     };
 
-    // Only background-task settlement is meaningful with no turn in flight —
-    // it is the path that carries a background task's completion to the UI
-    // after the turn that started it already ended.
+    // Carries a background task's settlement to the UI. Reached whenever a
+    // `task_notification` arrives — with no turn in flight (the task outlived
+    // the turn that started it) and also from inside a later turn, where the
+    // frame would otherwise be dropped by the role-keyed normalizer.
     const forwardBetweenTurnMessage = (message) => {
       if (message?.type !== 'system' || message.subtype !== 'task_notification') {
+        return;
+      }
+      // `skip_transcript` marks ambient housekeeping tasks. The pool still
+      // TRACKS them (closing the process would kill them too), but they are
+      // deliberately excluded from the transcript — surfacing them would put
+      // rows the user never asked for into the conversation.
+      if (message.skip_transcript === true) {
         return;
       }
       emitBackgroundTaskEvent({
@@ -852,29 +918,15 @@ async function queryClaudeSDK(command, options = {}, ws) {
       });
     };
 
-    // Query constructor reads this synchronously; kept set for the whole turn
-    // because construction now happens lazily inside the pool (only when a
-    // NEW process is actually spun up, not on every turn of a reused session).
-    const prevStreamTimeout = process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
-    process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = '300000';
-
-    let turnResult;
-    try {
-      turnResult = await claudeSessionPool.runTurn({
-        appSessionId: poolSessionId,
-        userMessage: await buildPromptPayload(command, options.images, options.cwd),
-        sdkOptions,
-        onMessage: handleSdkMessage,
-        onBetweenTurnMessage: forwardBetweenTurnMessage,
-        createQuery: createQueryWithHookFallback,
-      });
-    } finally {
-      if (prevStreamTimeout !== undefined) {
-        process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = prevStreamTimeout;
-      } else {
-        delete process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT;
-      }
-    }
+    const turnResult = await claudeSessionPool.runTurn({
+      appSessionId: poolSessionId,
+      userMessage: await buildPromptPayload(command, options.images, options.cwd),
+      sdkOptions,
+      turnContext,
+      onMessage: handleSdkMessage,
+      onBetweenTurnMessage: forwardBetweenTurnMessage,
+      createQuery: createQueryWithStreamCloseTimeout,
+    });
 
     // The pool intercepts `result` messages entirely (they end a turn and
     // never reach `handleSdkMessage`) — but a SDKResultMessage still carries
@@ -1002,6 +1054,19 @@ async function abortClaudeSDKSession(sessionId) {
 }
 
 /**
+ * Closes every live pooled `claude` process.
+ *
+ * Called from the server's shutdown handler. Before the pool, a turn owned its
+ * subprocess and `process.exit()` orphaned it for at most the length of a turn;
+ * a pooled session deliberately outlives its turn, so without this a ~320 MB
+ * child (plus whatever background shell it is holding) is orphaned indefinitely.
+ * @returns {number} How many live sessions were closed.
+ */
+function shutdownClaudeSessions() {
+  return claudeSessionPool.closeAllSessions();
+}
+
+/**
  * Checks if an SDK session is currently active
  * @param {string} sessionId - Session identifier
  * @returns {boolean} True if session is active
@@ -1060,6 +1125,7 @@ function reconnectSessionWriter(sessionId, newRawWs) {
 export {
   queryClaudeSDK,
   abortClaudeSDKSession,
+  shutdownClaudeSessions,
   isClaudeSDKSessionActive,
   getActiveClaudeSDKSessions,
   resolveToolApproval,

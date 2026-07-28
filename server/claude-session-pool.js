@@ -16,6 +16,35 @@ import { createInputStream } from './claude-session-input-stream.js';
 
 const IDLE_GRACE_MS = 60000;
 
+/**
+ * Option fields whose value must match the live process for a turn to be
+ * allowed to reuse it, split by whether a RUNNING process can be reconfigured.
+ *
+ * `LIVE_APPLICABLE_*` have a real mid-session mechanism: `setPermissionMode()`
+ * and `setModel()` are SDK control requests (streaming-input-only — which is
+ * exactly the mode this pool put us in), and the allow/deny lists reach our own
+ * approval callback through the shared `turnContext` object rather than through
+ * the closure the SDK captured on turn 1.
+ *
+ * `RECREATE_ONLY_*` can only be honoured by a fresh `query()`: `cwd` and
+ * `effort` are fixed at spawn, and a fork needs its own process (there is no
+ * fork-mid-stream control request). When background work is live we refuse to
+ * close, so those changes are reported and skipped rather than silently
+ * pretended-applied.
+ *
+ * Deliberately NOT relevant:
+ * - `resume`: an artifact of process creation, not a behaviour knob. A live
+ *   process is by definition already on its session, and turn 2 of a brand-new
+ *   session always gains a `resume` value that turn 1 lacked — treating that as
+ *   a change would recreate (or warn) on every such turn for no benefit.
+ * - `env` / `mcpServers` / `hooks` / `canUseTool`: rebuilt per turn by
+ *   `mapCliOptionsToSDK`, so they differ by identity every time; MCP-server
+ *   parity across turns is an explicit non-goal of the design spec.
+ */
+const LIVE_APPLICABLE_OPTION_FIELDS = ['permissionMode', 'model', 'allowedTools', 'disallowedTools'];
+const RECREATE_ONLY_OPTION_FIELDS = ['cwd', 'effort', 'forkSession', 'resumeSessionAt'];
+const RELEVANT_OPTION_FIELDS = [...LIVE_APPLICABLE_OPTION_FIELDS, ...RECREATE_ONLY_OPTION_FIELDS];
+
 /** @type {Map<string, LiveSession>} */
 const live = new Map();
 
@@ -27,9 +56,87 @@ const live = new Map();
  * @property {Set<string>} liveTaskIds
  * @property {{ onMessage: Function, resolve: Function, reject: Function } | null} currentTurn
  * @property {Function} onBetweenTurnMessage
+ * @property {object} optionSnapshot - Normalized `RELEVANT_OPTION_FIELDS` as
+ *   currently in force on this process (creation values, amended by whatever
+ *   control requests have since been applied).
+ * @property {object | null} turnContext - Mutable object the caller's captured
+ *   callbacks (`canUseTool`, hooks) read from. Updated IN PLACE on reuse so
+ *   turn 1's captured closures act on turn N's writer and settings.
  * @property {NodeJS.Timeout | null} idleTimer
  * @property {boolean} dead
  */
+
+/** Order-insensitive for lists, so a reshuffled allowlist is not a "change". */
+function normalizeOptionValue(value) {
+  if (Array.isArray(value)) {
+    return [...value].map(String).sort();
+  }
+  return value === undefined ? null : value;
+}
+
+function snapshotOptions(sdkOptions) {
+  /** @type {Record<string, unknown>} */
+  const snapshot = {};
+  for (const field of RELEVANT_OPTION_FIELDS) {
+    snapshot[field] = normalizeOptionValue(sdkOptions?.[field]);
+  }
+  return snapshot;
+}
+
+function differingFields(fields, current, next) {
+  return fields.filter((field) => JSON.stringify(current[field]) !== JSON.stringify(next[field]));
+}
+
+/**
+ * Reconfigures a RUNNING process to the new turn's options.
+ *
+ * Only reached when the session has live background work, i.e. when closing and
+ * recreating would kill the very task this pool exists to protect. A failure to
+ * apply `permissionMode` rejects the turn instead of running it: the mode is a
+ * safety boundary (`bypassPermissions` skips the approval callback entirely
+ * inside the CLI), so silently proceeding under the previous mode would let a
+ * user who just tightened their settings be auto-approved against the old ones.
+ * `model` is not a safety boundary, so a failure there is logged and the turn
+ * proceeds.
+ */
+async function applyLiveOptionChanges(session, nextSnapshot) {
+  const changed = differingFields(LIVE_APPLICABLE_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
+
+  if (changed.includes('permissionMode')) {
+    const mode = nextSnapshot.permissionMode ?? 'default';
+    if (typeof session.query.setPermissionMode !== 'function') {
+      throw new Error(
+        `Cannot switch the live Claude session "${session.appSessionId}" to permission mode "${mode}": `
+        + 'this SDK build exposes no setPermissionMode() control request, and the process must stay '
+        + 'alive for its background work. Refusing to run the turn under the previous mode.',
+      );
+    }
+    await session.query.setPermissionMode(mode);
+  }
+
+  if (changed.includes('model')) {
+    try {
+      await session.query.setModel?.(nextSnapshot.model ?? undefined);
+    } catch (error) {
+      console.warn('[ClaudeSessionPool] setModel() failed; the live session keeps its previous model', {
+        appSessionId: session.appSessionId,
+        model: nextSnapshot.model,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  // `allowedTools` / `disallowedTools` need no control request: they are read
+  // per invocation from `session.turnContext`, which the caller refreshes on
+  // every turn. Caveat, recorded honestly: the CLI ALSO holds the spawn-time
+  // allowlist and auto-approves against it without consulting our callback, so
+  // a tool REMOVED from `allowedTools` mid-session stays auto-approved inside
+  // the CLI until the process is recreated. Tightening via `disallowedTools`
+  // does take effect, because those tools reach our callback.
+  for (const field of changed) {
+    session.optionSnapshot[field] = nextSnapshot[field];
+  }
+}
 
 function clearIdleTimer(session) {
   if (session.idleTimer) {
@@ -134,6 +241,10 @@ function armIdleTimerIfIdle(session) {
   }
 }
 
+function isTaskNotification(message) {
+  return message?.type === 'system' && message?.subtype === 'task_notification';
+}
+
 function routeMessage(session, message) {
   trackTask(session, message);
 
@@ -144,6 +255,15 @@ function routeMessage(session, message) {
   }
 
   if (session.currentTurn) {
+    // A task settling while a LATER turn is in flight must still reach the
+    // session sink. The in-turn path normalizes SDK messages by `message.role`
+    // (claude-sessions.provider.ts), so a `system`/`task_notification` frame
+    // normalizes to nothing — routing it only to the turn would make a
+    // completion, a failure, or a reaper kill vanish silently, which is exactly
+    // what goal 3 of the design forbids.
+    if (isTaskNotification(message)) {
+      session.onBetweenTurnMessage(message);
+    }
     session.currentTurn.onMessage(message);
     return;
   }
@@ -180,7 +300,7 @@ async function drain(session) {
   }
 }
 
-function createLiveSession({ appSessionId, sdkOptions, onBetweenTurnMessage, createQuery }) {
+function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, createQuery }) {
   const input = createInputStream();
   const query = createQuery({ prompt: input, options: sdkOptions });
 
@@ -192,6 +312,8 @@ function createLiveSession({ appSessionId, sdkOptions, onBetweenTurnMessage, cre
     liveTaskIds: new Set(),
     currentTurn: null,
     onBetweenTurnMessage,
+    optionSnapshot: snapshotOptions(sdkOptions),
+    turnContext: turnContext ?? null,
     idleTimer: null,
     dead: false,
   };
@@ -205,22 +327,65 @@ export const claudeSessionPool = {
   /**
    * Runs one turn, reusing the session's live process when there is one.
    * Resolves with that turn's SDK `result` message.
+   *
+   * A reused process must never keep running turn 1's options: the SDK holds
+   * the `query()` options it was constructed with, so a user who switches
+   * permission mode or unchecks a tool would otherwise be silently evaluated
+   * against the settings they just abandoned. Reconciliation happens before the
+   * prompt is pushed — recreate when nothing is at stake, reconfigure in place
+   * when background work must survive.
    */
-  async runTurn({ appSessionId, userMessage, sdkOptions, onMessage, onBetweenTurnMessage, createQuery }) {
+  async runTurn({ appSessionId, userMessage, sdkOptions, turnContext, onMessage, onBetweenTurnMessage, createQuery }) {
     let session = live.get(appSessionId);
-    if (!session || session.dead) {
-      session = createLiveSession({ appSessionId, sdkOptions, onBetweenTurnMessage, createQuery });
-    } else {
+    if (session?.dead) {
+      session = undefined;
+    }
+
+    if (session) {
+      if (session.currentTurn) {
+        throw new Error(`Session "${appSessionId}" already has a turn in flight`);
+      }
+
+      const nextSnapshot = snapshotOptions(sdkOptions);
+      const changed = differingFields(RELEVANT_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
+
+      if (changed.length > 0 && session.liveTaskIds.size === 0) {
+        // Nothing to protect. The pre-pool behaviour closed at turn end anyway,
+        // so a clean recreate costs nothing and is the only way to honour EVERY
+        // option — including the ones no control request can change.
+        destroy(session);
+        session = undefined;
+      } else if (changed.length > 0) {
+        const unappliable = differingFields(RECREATE_ONLY_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
+        if (unappliable.length > 0) {
+          console.warn('[ClaudeSessionPool] keeping the live process for its background work, so these option changes cannot take effect until it closes', {
+            appSessionId,
+            fields: unappliable,
+          });
+        }
+        await applyLiveOptionChanges(session, nextSnapshot);
+        // Applying a control request yields the event loop; the process can die
+        // in that window.
+        if (session.dead) {
+          session = undefined;
+        }
+      }
+    }
+
+    if (session) {
       // Keep the sink pointed at the newest caller so between-turn events reach
-      // whoever is currently watching.
+      // whoever is currently watching, and refresh the shared turn context IN
+      // PLACE so the approval callback the SDK captured on turn 1 resolves this
+      // turn's writer and this turn's allow/deny lists.
       session.onBetweenTurnMessage = onBetweenTurnMessage;
+      if (session.turnContext && turnContext) {
+        Object.assign(session.turnContext, turnContext);
+      }
+    } else {
+      session = createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, createQuery });
     }
 
     clearIdleTimer(session);
-
-    if (session.currentTurn) {
-      throw new Error(`Session "${appSessionId}" already has a turn in flight`);
-    }
 
     return new Promise((resolve, reject) => {
       session.currentTurn = { onMessage, resolve, reject };
@@ -292,10 +457,22 @@ export const claudeSessionPool = {
     }
   },
 
-  _resetForTests() {
-    for (const session of [...live.values()]) {
+  /**
+   * Closes every live session. Called on server shutdown: a live session owns a
+   * real ~320 MB `claude` child that used to die with the turn, but now outlives
+   * it — `process.exit()` without this leaves it orphaned indefinitely.
+   * @returns {number} How many sessions were closed.
+   */
+  closeAllSessions() {
+    const sessions = [...live.values()];
+    for (const session of sessions) {
       destroy(session);
     }
     live.clear();
+    return sessions.length;
+  },
+
+  _resetForTests() {
+    claudeSessionPool.closeAllSessions();
   },
 };
