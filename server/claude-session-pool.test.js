@@ -213,3 +213,124 @@ test('a superseded session drain finishing late does not delete the new session 
 
   claudeSessionPool.closeSession(appSessionId);
 });
+
+test('a task_started before turn end keeps the process alive', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, state } = createFakeQuery([[
+    { type: 'system', subtype: 'task_started', task_id: 'bg1' },
+    { type: 'result', subtype: 'success' },
+  ]]);
+
+  await claudeSessionPool.runTurn({
+    appSessionId: 's5',
+    userMessage: userMessage('start bg'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  assert.equal(claudeSessionPool.hasLiveSession('s5'), true);
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('s5'), ['bg1']);
+  assert.equal(state.closed, false);
+
+  claudeSessionPool.closeSession('s5');
+});
+
+test('task_updated status killed clears the task, so the reaper does not wedge the session open', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory } = createFakeQuery([[
+    { type: 'system', subtype: 'task_started', task_id: 'bg2' },
+    { type: 'system', subtype: 'task_updated', task_id: 'bg2', patch: { status: 'killed' } },
+    { type: 'result', subtype: 'success' },
+  ]]);
+
+  await claudeSessionPool.runTurn({
+    appSessionId: 's6',
+    userMessage: userMessage('start bg'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('s6'), []);
+  assert.equal(claudeSessionPool.hasLiveSession('s6'), false);
+});
+
+test('a task_notification arriving after turn end goes to the between-turn sink', async () => {
+  claudeSessionPool._resetForTests();
+
+  // Emitted only after the turn's result, i.e. with no turn in flight.
+  const notification = {
+    type: 'system',
+    subtype: 'task_notification',
+    task_id: 'bg3',
+    status: 'completed',
+    output_file: '/tmp/bg3.output',
+    summary: 'sonar finished',
+  };
+
+  const factory = ({ prompt }) => {
+    const generator = (async function* run() {
+      for await (const _message of prompt) {
+        yield { type: 'system', subtype: 'task_started', task_id: 'bg3' };
+        yield { type: 'result', subtype: 'success' };
+        yield notification;
+      }
+    })();
+    generator.close = () => {};
+    return generator;
+  };
+
+  const betweenTurn = [];
+  const inTurn = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 's7',
+    userMessage: userMessage('start bg'),
+    sdkOptions: {},
+    onMessage: (m) => inTurn.push(m),
+    onBetweenTurnMessage: (m) => betweenTurn.push(m),
+    createQuery: factory,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.deepEqual(inTurn.map((m) => m.subtype), ['task_started']);
+  assert.deepEqual(betweenTurn.map((m) => m.subtype), ['task_notification']);
+  assert.equal(betweenTurn[0].output_file, '/tmp/bg3.output');
+
+  claudeSessionPool.closeSession('s7');
+});
+
+test('a dead process is replaced on the next turn instead of reused', async () => {
+  claudeSessionPool._resetForTests();
+  let built = 0;
+  const factory = ({ prompt }) => {
+    built += 1;
+    const generator = (async function* run() {
+      for await (const _message of prompt) {
+        yield { type: 'system', subtype: 'task_started', task_id: `t${built}` };
+        yield { type: 'result', subtype: 'success' };
+        return; // generator ends -> process gone
+      }
+    })();
+    generator.close = () => {};
+    return generator;
+  };
+
+  const common = {
+    appSessionId: 's8',
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('one') });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(claudeSessionPool.hasLiveSession('s8'), false, 'generator ended, session is dead');
+
+  await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('two') });
+  assert.equal(built, 2, 'a fresh query must be created');
+});
