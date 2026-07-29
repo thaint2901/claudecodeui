@@ -202,6 +202,7 @@ built on `_probe-lib.mjs`, which makes it mandatory.
 | `approval-per-turn.mjs` | Is a tool approval per turn or per session on a held process? | per **turn** — H1 retracted |
 | `interrupt-result.mjs` | Does an interrupted turn emit a terminator? | yes, `error_during_execution` in ms — H2 retracted |
 | `task-classification.mjs` | Which tracked tasks can outlive their turn? | see below |
+| `task-settlement-frames.mjs` | Which frames announce a settlement, and in what order? | **both**, `task_updated` first, notification 0 ms later — see below |
 
 `_probe-lib.mjs` encodes three rules, each of which exists because breaking it produced a wrong
 finding that reached a spec: **(1)** neutralise env at BOTH layers (`options.env` *and*
@@ -234,3 +235,41 @@ And there is no ground-truth query to reconcile against: `backgroundTasks(toolUs
 `task_started` (failing toward holding) stays the right default, and the real gap to close is that a
 task whose terminal frame never arrives holds the process **unobservably** — the fix is a long-hold
 warning, not a narrower filter and not eviction.
+
+### Settlement frame shape and order (`task-settlement-frames.mjs`)
+
+Run twice, identical both times (a backgrounded Bash and a subagent):
+
+```
+   #1 <task> task_started
+   #2 <task> task_updated{{"status":"completed","end_time":…}}
+   #3 <task> task_notification{status:completed,output_file:true}   ← 0 ms after #2
+
+tasks emitting BOTH             : 2
+  ...notification first in all  : false
+  ...notification lag (ms)      : 0, 0
+tasks emitting only task_updated: 0
+```
+
+Neither fact is in `sdk.d.ts`, and both are load-bearing for how a settlement is reported:
+
+- **A settlement is announced twice.** So forwarding every settling frame puts two transcript rows in
+  for one background command.
+- **`task_updated` comes FIRST.** So "report the first frame, suppress the second" — the obvious dedup
+  rule — is wrong: only `task_notification` carries `output_file` and `summary`, and that path is how
+  the user retrieves the output, so it would downgrade every ordinary task's row to a lean one derived
+  from a status patch.
+
+The design that follows: the notification stays primary, and a terminal `task_updated` is held as a
+**fallback** for `SETTLEMENT_NOTIFICATION_GRACE_MS` (2 s, against a measured 0 ms — margin for a
+notification split across stdout chunks, not a guess at an unknown latency), reported only if no
+notification supersedes it. That fallback is the only route by which a task reaped under memory
+pressure reaches a user at all: `patch.status: 'killed'` has no notification behind it.
+
+This probe also uncovered a shipped defect it was not looking for. Because the status patch removes
+the task record and the notification lands 0 ms later, the notification found nothing tracked and
+reported a **null owner** — which `emitBackgroundTaskEvent` broadcasts. Every ordinary background
+task's summary and absolute host output path was therefore going to every connected client, defeating
+the owner scoping entirely; the existing owner tests passed only because their fake CLI emitted a
+notification with no preceding `task_updated`. Worth noting as a methodological point: a fake whose
+frame order differs from the real one is not a weaker test, it is a test of a different system.

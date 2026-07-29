@@ -130,6 +130,22 @@ The pool keeps a `Set<task_id>` per live session, driven by typed `SDKMessage` v
 | `SDKTaskNotificationMessage` | `subtype:'task_notification'`, `task_id`, `status: 'completed' \| 'failed' \| 'stopped'`, `output_file`, `summary` | remove |
 | `SDKTaskUpdatedMessage` | `subtype:'task_updated'`, `task_id`, `patch.status` | remove on `completed \| failed \| killed`; `killed` is the memory-pressure reaper's signal |
 
+A settling task announces itself **twice**, and `task_updated` comes **first** — measured, and not
+inferable from `sdk.d.ts` (`spikes/streaming-input-mode/task-settlement-frames.mjs`): `task_started`,
+then `task_updated{status:'completed'}`, then `task_notification{status:'completed', output_file}` 0 ms
+later. Two consequences the pool has to honour:
+
+- **One settlement, one row.** Forwarding both frames would put two transcript rows in for one
+  command; forwarding only the first would replace every ordinary task's rich notification row (the
+  only frame carrying `output_file`, which is how the user retrieves the output) with a lean one. So
+  the notification stays primary and a terminal `task_updated` is held as a **fallback** for
+  `SETTLEMENT_NOTIFICATION_GRACE_MS`, reported only if no notification supersedes it. That fallback is
+  what makes a reaped (`killed`) task visible at all — it has no notification to wait for.
+- **The owner survives the pair.** Because the status patch removes the task record, the notification
+  arriving 0 ms later must read the owner from the settlement still inside its grace window, not from
+  the live-task map. Reading only the live map returned a null owner for every ordinary background
+  task, and a null owner broadcasts.
+
 An empty set is the only signal that closing is safe. Track every `task_id`, including subagent and
 workflow tasks — they are equally killable. `skip_transcript: true` marks ambient housekeeping
 tasks: exclude those from UI display, but still track them for lifetime, since closing the process
@@ -143,9 +159,17 @@ would kill them too.
 which the pool pushes. `queryClaudeSDK()` delegates to `claudeSessionPool.runTurn()` and keeps its
 existing signature, so `chat-websocket.service.ts:503` is untouched.
 
-`abortClaudeSDKSession()` gains one requirement: after `interrupt()`, settle the in-flight turn
-promise itself. The spike showed an interrupted turn emits **no `result`** while the session stays
-usable — so without this, `spawnFn` never resolves. `interrupt()` must not close the process.
+`abortClaudeSDKSession()` gains one requirement: after `interrupt()`, make sure the in-flight turn
+promise settles — but **not** by settling it itself. An early draft of this section claimed the
+spike had shown an interrupted turn emits *no* `result`; a later correction probe
+(`spikes/streaming-input-mode/interrupt-result.mjs`) measured the opposite: the CLI terminates the
+interrupted turn on its own with a `result` whose `subtype` is `error_during_execution`, within
+milliseconds. So the aborted turn keeps the pool's turn slot until that terminator arrives and
+routes to the right turn, with a timed fallback (`ABORT_SETTLE_FALLBACK_MS`) for the unmeasured case
+of a CLI that acknowledges the interrupt and then emits nothing. Settling from the abort path as
+well would vacate the slot before the terminator lands, and `SDKResultMessage` carries no
+turn-correlation field, so that frame could then never be attributed back. `interrupt()` must not
+close the process.
 
 **Session event sink** (small addition to the websocket module)
 
@@ -195,6 +219,12 @@ Disabling the OS-pressure safety valve there would be antisocial. Instead, reap 
 surfaced through the same `background_task` frame, so a loss is always visible. This is a stated
 assumption, cheap to reverse by setting the variable.
 
+Worth stating plainly because it was false for a while: a reap announces itself only as
+`task_updated{patch.status:'killed'}` with no `task_notification` behind it, and the first
+implementation forwarded notifications only — so the reaper's own signal cleared the pool's tracking
+and reached nobody, which is exactly the silence goal 3 forbids. The fallback described above the
+event table is what makes this sentence true rather than aspirational.
+
 **`CLAUDE_CODE_BG_TASKS_REPORT_RUNNING`** governs whether a session reports itself as running while
 background tasks are alive. Implementation must confirm that ccui's session status stays correct
 after a turn ends with a task still running — the UI must not show "processing" for a completed
@@ -205,7 +235,7 @@ turn, nor claim idle in a way that hides live work.
 | Failure | Behaviour |
 |---|---|
 | Live process dies mid-session | Drain loop sees the generator end or throw. Mark the session dead; reject any in-flight turn promise so `spawnFn` settles and the existing safety net at `chat-websocket.service.ts:513` fires. Next turn falls back to one-shot `query({ resume })`. |
-| Interrupt / abort | Settle the in-flight turn ourselves; keep the process. Existing `abortedSessionIds` handling still emits the aborted terminal event. |
+| Interrupt / abort | Keep the process, keep the turn slot, and let the CLI's **own** terminator (`result` / `error_during_execution`, measured to arrive in ms) settle the turn; a timed fallback settles it if none comes. Do not settle from the abort path. Existing `abortedSessionIds` handling still emits the aborted terminal event. |
 | Task reaped under memory pressure | Surface via `background_task`; do not retry automatically. |
 | Pool cannot create a live session | Fall back to the one-shot path and log. Background shells are lost as they are today — no worse than the status quo. |
 | Server restart | Live processes die with the server. On the next turn the session resumes from disk, as today. Any background task is gone; the next `task_notification` will report `stopped`, which is honest. |
@@ -284,7 +314,9 @@ every turn that ends with no live background task closes the process synchronous
 The identity-guarded removal is load-bearing.
 
 **3. Abort must not decide whether to close.** This spec's error-handling table said abort should
-settle the in-flight turn and keep the process. That was right but insufficient: the first
+settle the in-flight turn and keep the process. Keeping the process was right; settling the turn was
+later disproved outright (see the amended table entry above and the `abortClaudeSDKSession()`
+paragraph). The first
 implementation also closed the session when no task appeared live. No check made from OUTSIDE the
 pool can be sound, because a `task_started` still undelivered in the SDK's async iterator is
 invisible to `getLiveTaskIds` at the moment of asking — an external check-then-close is racy by
@@ -488,6 +520,28 @@ warnings instead of one. Zero delivered frames is the discriminator because `inc
 means a turn the CLI is really answering streams deltas long before its terminator. Residual, disclosed:
 a chain that begins with a *partial* truncation clears the ledger at that first line, so a later blank
 turn in that particular chain is not reported.
+
+**A `background_task` frame is fire-and-forget: no `seq`, no replay buffer, no persistence, no web
+push.** It is delivered to whichever of the owner's connections happen to be open at the moment it is
+emitted, and to nothing else. A user who closed the tab — or whose socket was mid-reconnect — when a
+background task settled never learns the outcome from ccui at all; the task's output file is still on
+disk, but nothing points them at it, and the transcript row that would have said so was never
+persisted. This is the one gap in goal 3 that remains by choice rather than by oversight: closing it
+needs sequence numbers and a per-session replay buffer (or a `background_task` row written to the
+sessions store, plus a push path through `notification-orchestrator`), which is infrastructure this
+design does not have and should not grow sideways into. Recorded here so it is a known limitation
+rather than a surprise.
+
+**`emitBackgroundTaskEvent` hand-rolls its wire frame.** It `JSON.stringify`s an object literal
+(`server/modules/websocket/services/chat-session-events.service.ts`) instead of going through
+`createNormalizedMessage` like every other outbound frame, so the frame has **no `.id`**. That is why
+the frontend's no-`.id` allowlist (`NON_TRANSCRIPT_KINDS` plus the early `return` in
+`useChatRealtimeHandlers`) is *structurally necessary* for this kind and not merely defensive: the
+generic routing path force-casts anything it does not explicitly exclude into a `NormalizedMessage`,
+and an `.id`-less frame reaching `appendRealtime` corrupts that session's store and crashes every
+later merge. The frontend deliberately builds its own well-formed row for this kind instead. Left as
+is because the frame is not a chat message and giving it a message id would invite exactly the
+force-cast it must avoid — but the coupling is real, so the two sides must be changed together.
 
 **Unmeasured interaction with the user's own `settings.json`.** ccui spawns with
 `settingSources = ['project', 'user', 'local']` (`server/claude-sdk.js:262`), so a freshly spawned
