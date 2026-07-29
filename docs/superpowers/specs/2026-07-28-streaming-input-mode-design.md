@@ -368,16 +368,26 @@ background shell refused with the drift sentence** ("has moved on to a branch of
 while the same session with no background work silently recreated its process on every single turn.
 Check this assumption first if those refusals ever appear.
 
-**Attributing a background task to a user is fail-ACTIVE, deliberately.** A task is stamped with the
-owner of the turn that started it, and when the abort backstop has already vacated the turn slot the
-owner is taken from the oldest outstanding terminator debt (`ownerForNewlyStartedTask`) — the turn
-still unwinding inside the CLI, since a single-conversation CLI serialises turns. That is the same
-invariant the swallow branch in `routeMessage` uses, but read in the opposite direction: swallowing
-shows a frame to nobody, whereas this asserts an owner who is then handed the task's summary and its
-absolute output path. The safer-looking alternative — record `null` (unknown owner) whenever a debt
-stands — was rejected because `null` reaches nobody, so the aborted user would lose the notification
-for the background shell their own turn started: the bug attribution exists to fix, in the milder form
-of silence instead of misdirection.
+**Attributing a background task to a user is fail-ACTIVE, deliberately.** A task is stamped, for its
+whole life, with `session.taskOwner` as it stood when its `task_started` frame was routed — the owner
+of the turn the CLI is running, or between turns of the last turn that ran, since that field is
+refreshed per turn and never cleared. That covers the case the field exists for at no cost: after the
+abort backstop vacates the slot, a task announced by the aborted turn's tail is still attributed to
+the user who started it, because nobody has pushed a prompt since.
+
+It is a guess in exactly one window — that tail announcing a task *after* the next prompt was pushed —
+and there is no correlation field to settle it with, so all three candidate answers are wrong some of
+the time. The running turn is taken because it is the turn the CLI is actually executing and so the
+overwhelmingly likelier source of a `task_started`; the window logs the fact that it guessed.
+`null` ("unknown owner") is not the cautious choice but the worst one: `emitBackgroundTaskEvent`
+**broadcasts** an unknown owner's task, its summary and the absolute host path of its output to every
+connected client, so declaring uncertainty exposes more, not less.
+
+*Superseded:* a previous revision took the owner from the oldest outstanding **terminator debt**
+instead. Whole-round review found that a debt, once armed, could stand forever — so every task the
+running turn started while it stood was reported to the user who had already left. Same leak, aimed
+at the common case instead of the rare one. The debt itself is gone; see the *Accepted risks* entry
+below.
 
 ## Accepted risks
 
@@ -425,6 +435,37 @@ inside the drain loop's own ordering. The cost is one ~320 MB process held for u
 abort, released automatically and never accumulating. **Document it; do not change it** — shortening
 or removing the grace reopens exactly the race this design closed, in which abort kills a background
 task that had just started.
+
+**An abandoned turn's terminator can truncate the next turn's answer.** `ABORT_SETTLE_FALLBACK_MS`
+settles an aborted turn five seconds after an acknowledged interrupt that produced nothing, so its
+premise is that no terminator is coming. It is a guess, and when it is wrong the CLI's real terminator
+arrives while the *next* turn is live — indistinguishable from that turn's own, because no SDK message
+carries a turn-correlation field (`SDKResultMessage` has `uuid`, `session_id`, `num_turns`). The rule
+adopted is that **the first `result` always settles whatever turn holds the slot**, so the cost of a
+wrong guess is one turn's answer truncated (or, if it had emitted nothing yet, lost) and its run
+reported complete.
+
+Accepted after ranking it against the alternative that was tried and removed. That alternative — a
+terminator "debt" plus a swallow branch, built on the premise that the terminator *is* still coming —
+took the opposite premise at the same moment: whenever the fallback's own premise held, the debt was
+never repaid, and nothing expired it. The next turn was swallowed whole with no log line, its `result`
+was consumed as the repayment so its promise never settled and the slot was never vacated, and every
+later message on that session was refused. Pressing Stop settled the hung turn and armed a fresh debt,
+so the turn after that was swallowed too. That is a bricked session traded for a rare truncation, and
+it is the wrong direction: **a dead turn's tail leaking into a live turn is far less bad than a live
+turn being swallowed**, and the second one must be impossible rather than merely unlikely.
+
+What remains of the debt is an observation, `owedTerminator` — one nullable record, armed only by the
+fallback, cleared by the first `result` the session sees afterwards or with the session itself. It
+never withholds a frame or a terminator from a live turn. It is read for two things only: to absorb a
+terminator arriving *between* turns, the one window where "this is not the live turn's result" is a
+fact rather than a guess (and where forwarding it would destroy, `IDLE_GRACE_MS` early, a process the
+user may be about to re-use); and to make both remaining guesses observable — one `console.warn` when
+a turn is settled while a terminator was outstanding, carrying the `appSessionId` and how many frames
+that turn had delivered (zero = total loss, non-zero = partial), and one when a task is attributed in
+the ambiguous window. By measurement the whole branch is the rare one: an interrupted turn terminates
+within milliseconds (`spikes/streaming-input-mode/interrupt-result.mjs`), so the fallback fires only in
+the unmeasured slow-unwind case.
 
 **Unmeasured interaction with the user's own `settings.json`.** ccui spawns with
 `settingSources = ['project', 'user', 'local']` (`server/claude-sdk.js:262`), so a freshly spawned

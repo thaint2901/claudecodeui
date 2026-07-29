@@ -1383,126 +1383,439 @@ test('a turn sent while an aborted turn is still settling waits for it instead o
 });
 
 /**
- * Fix-round-2. The abort fallback reintroduced Task A's own bug in a 5s-narrower
- * window: it settles a turn the CLI may simply not have finished unwinding yet
- * (an interrupt it acked but needs longer than ABORT_SETTLE_FALLBACK_MS to
- * honour, e.g. a foreground tool call it will not abandon). The slot was then
- * vacant, so a re-sent turn claimed it and inherited turn 1's tail: its frames
- * were delivered to turn 2's caller and turn 1's `error_during_execution`
- * settled turn 2 before turn 2 had emitted anything.
+ * ─── The outstanding-terminator ledger ─────────────────────────────────────────
  *
- * The pool cannot tell "emitted nothing" from "has not emitted yet", and it has
- * no correlation field to key on — so instead of guessing, a fallback settle
- * records that one terminator is still OWED, and everything up to and including
- * the next `result` is swallowed. Task-lifecycle frames are exempt: they are
- * session-scoped, not turn-scoped, and they are what keeps a background shell's
- * process alive.
+ * Whole-round review found a Critical here that six task-scoped reviews missed,
+ * and the reason it was missed is a property of the FAKE, not of the reviews: the
+ * fake above emits turn N's script from inside `for await (const m of prompt)`,
+ * so turn N+1's prompt is not even consumed until turn N's script has finished.
+ * The bug lives in the one state that shape cannot express — a turn running while
+ * an EARLIER turn is still unwinding — so a test built on it asserts the
+ * serialisation assumption rather than testing it.
+ *
+ * `createInterleavableQuery` fixes that: it reads its input stream in a loop of
+ * its own and emits whatever the test says, in whatever order the test says, so
+ * BOTH interleavings are expressible and the two tests below take one each.
+ *
+ * The bug: the abort fallback settled turn 1 and recorded a terminator "debt";
+ * `routeMessage` then swallowed every frame until that debt was repaid. But the
+ * fallback only fires when the CLI acked the interrupt and emitted nothing, so
+ * whenever its premise held the debt was never repaid — turn 2 was swallowed
+ * whole, its `result` was consumed as the repayment so its promise never settled
+ * and the slot was never vacated, and every message after that was refused.
  */
-test('a fallback-settled turn\'s tail is swallowed instead of being attributed to the next turn', async (t) => {
-  claudeSessionPool._resetForTests();
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+function createInterleavableQuery() {
+  const state = { prompts: [], closed: false, interrupted: false };
+  /** @type {object[]} */
+  const outbox = [];
+  /** @type {Function | null} */
+  let wake = null;
 
-  const tailGate = createDeferred();
-  let turns = 0;
+  const nudge = () => {
+    const resume = wake;
+    wake = null;
+    resume?.();
+  };
+
+  /** Queue a frame for the pool's drain loop, whichever turn it belongs to. */
+  const emit = (message) => {
+    outbox.push(message);
+    nudge();
+  };
 
   const factory = ({ prompt }) => {
-    const generator = (async function* run() {
-      for await (const _message of prompt) {
-        turns += 1;
-        if (turns === 1) {
-          yield { type: 'system', subtype: 'task_started', task_id: 'survivor' };
-          yield { type: 'assistant', text: 'before-stop' };
-          // The CLI acked the interrupt but keeps unwinding well past the
-          // fallback window; turn 2's prompt queues behind this, exactly as a
-          // single-conversation CLI would serialise it.
-          await tailGate.promise;
-          yield { type: 'system', subtype: 'task_notification', task_id: 'survivor', status: 'completed', output_file: '/tmp/survivor.out' };
-          yield { type: 'system', subtype: 'task_started', task_id: 'late-task' };
-          yield { type: 'assistant', text: 'turn-1 tail' };
-          yield { type: 'result', subtype: 'error_during_execution' };
-        } else {
-          yield { type: 'assistant', text: 'turn-2 answer' };
-          yield { type: 'result', subtype: 'success' };
-        }
+    // Consumed in its own loop, independently of emission: the real CLI does not
+    // wait for turn N's output to finish before reading turn N+1's prompt.
+    void (async () => {
+      for await (const message of prompt) {
+        state.prompts.push(message.message.content);
       }
     })();
-    generator.interrupt = async () => {};
-    generator.close = () => {};
+
+    const generator = (async function* run() {
+      while (!state.closed) {
+        while (outbox.length > 0) {
+          yield outbox.shift();
+        }
+        if (state.closed) {
+          return;
+        }
+        await new Promise((resolve) => { wake = resolve; });
+      }
+    })();
+
+    generator.interrupt = async () => { state.interrupted = true; };
+    generator.close = () => {
+      state.closed = true;
+      nudge();
+    };
     return generator;
   };
 
+  return { factory, state, emit };
+}
+
+test('a turn that runs while an aborted turn\'s terminator is still outstanding is delivered and settles', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const logged = captureConsoleWarnings(t);
+  const { factory, state, emit } = createInterleavableQuery();
+
   const sink = [];
   const common = {
-    appSessionId: 'fallback-debt',
+    appSessionId: 'ledger-critical',
     sdkOptions: {},
     onBetweenTurnMessage: (m) => sink.push(m),
     createQuery: factory,
   };
 
-  const turnStarted = createDeferred();
   const firstFrames = [];
   const first = claudeSessionPool.runTurn({
     ...common,
     userMessage: userMessage('one'),
-    onMessage: (m) => {
-      firstFrames.push(m);
-      // Stop only once the user has actually seen some of turn 1, so the
-      // suppression under test is the TAIL, not the whole turn.
-      if (m.type === 'assistant') {
-        turnStarted.resolve();
-      }
-    },
+    onMessage: (m) => firstFrames.push(m),
   });
+  emit({ type: 'system', subtype: 'task_started', task_id: 'survivor' });
+  emit({ type: 'assistant', text: 'before-stop' });
+  await waitFor(() => firstFrames.length === 2, { message: 'turn 1 must be streaming before the Stop' });
 
-  await turnStarted.promise;
-  assert.equal(await claudeSessionPool.interruptTurn('fallback-debt'), true);
+  assert.equal(await claudeSessionPool.interruptTurn('ledger-critical'), true);
 
-  // No terminator within the window: the fallback settles turn 1 and takes on a
-  // debt for the terminator that is still coming.
+  // The CLI acked the interrupt and then emits NOTHING — the case the fallback
+  // exists for, and the case in which a debt could never be repaid.
   t.mock.timers.tick(5000);
   await flushMicrotasks();
   assert.equal((await first).subtype, 'aborted');
 
-  // The user re-sends. Turn 2 claims the now-free slot.
+  // The user re-sends. Turn 2 is an entirely ordinary turn.
   const secondFrames = [];
+  let secondSettled = null;
   const second = claudeSessionPool.runTurn({
     ...common,
     userMessage: userMessage('two'),
     onMessage: (m) => secondFrames.push(m),
   });
+  // Recorded rather than awaited, so the regression FAILS the assertion below
+  // instead of hanging the suite on a promise that never settles.
+  second.then((result) => { secondSettled = result; }, (error) => { secondSettled = error; });
+  await waitFor(() => state.prompts.length === 2, { message: 'turn 2\'s prompt must reach the process' });
+
+  emit({ type: 'assistant', text: 'turn-2 answer' });
+  emit({ type: 'result', subtype: 'success' });
   await flushMicrotasks();
 
-  // Only now does turn 1 finish unwinding.
-  tailGate.resolve();
-
-  const result = await second;
-  assert.equal(
-    result.subtype,
-    'success',
-    'turn 1\'s terminator must not settle turn 2 — that is the misattribution this whole task exists to prevent',
-  );
   assert.deepEqual(
-    secondFrames.map((m) => m.text ?? m.subtype),
+    secondFrames.map((m) => m.text),
     ['turn-2 answer'],
-    'turn 1\'s tail must not appear in turn 2\'s transcript',
+    'turn 2\'s own frames must reach turn 2 — swallowing them left an empty transcript with no log line',
   );
-  assert.deepEqual(firstFrames.map((m) => m.text ?? m.subtype), ['task_started', 'before-stop']);
+  assert.equal(
+    secondSettled?.subtype,
+    'success',
+    'and its promise must settle, or the slot is never vacated and every later message is refused',
+  );
+  await second;
 
-  // The exemption that matters: task lifecycle keeps flowing through the debt
-  // window, or the pool loses track of what is keeping the process alive.
+  // Turn 2's settlement is reported as POSSIBLY foreign, because the pool cannot
+  // know that turn 1's terminator was never coming — the fallback's premise is
+  // itself a guess, so the report has to be conditional rather than confident.
+  // What makes the line useful anyway is the frame count: 1 says turn 2 had
+  // already delivered its own answer, so nothing was lost. Zero is the total-loss
+  // case, and the next test pins it.
+  assert.equal(logged.staleTerminator().length, 1, 'reported once, at the settlement — never once per frame');
+  assert.equal(logged.staleTerminator()[0][1].framesDeliveredToTurn, 1);
+
+  // Not bricked: the very next message still runs, and runs clean.
+  const thirdFrames = [];
+  const third = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('three'),
+    onMessage: (m) => thirdFrames.push(m),
+  });
+  await waitFor(() => state.prompts.length === 3, { message: 'turn 3 must not be refused' });
+  emit({ type: 'assistant', text: 'turn-3 answer' });
+  emit({ type: 'result', subtype: 'success' });
+  assert.equal((await third).subtype, 'success');
+  assert.deepEqual(thirdFrames.map((m) => m.text), ['turn-3 answer']);
+  assert.equal(logged.staleTerminator().length, 1, 'the ledger was cleared by turn 2\'s result, so turn 3 reports nothing');
+
+  claudeSessionPool.closeSession('ledger-critical');
+  t.mock.timers.reset();
+});
+
+/**
+ * The other interleaving, and the harm this design accepts on purpose: the
+ * abandoned turn WAS still unwinding, and its terminator arrives while turn 2 is
+ * live. There is no turn-correlation field on any SDK message, so the pool cannot
+ * tell that frame from turn 2's own — and the ranked choice is that a `result`
+ * always settles whatever turn holds the slot. The cost is one truncated answer;
+ * the alternative (withholding it) cost the whole session.
+ */
+test('a stale terminator settles the live turn and says so, rather than being withheld from it', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const logged = captureConsoleWarnings(t);
+  const { factory, state, emit } = createInterleavableQuery();
+
+  const sink = [];
+  const common = {
+    appSessionId: 'ledger-degraded',
+    sdkOptions: {},
+    onBetweenTurnMessage: (m) => sink.push(m),
+    createQuery: factory,
+  };
+
+  const firstFrames = [];
+  const first = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    onMessage: (m) => firstFrames.push(m),
+  });
+  emit({ type: 'system', subtype: 'task_started', task_id: 'survivor' });
+  // A second shell that never settles, so this session's process is still being
+  // held for background work when the last assertion re-uses it. Without it the
+  // settled `survivor` would leave nothing tracked and the turn-end close would
+  // (correctly) destroy the process, which is a different test.
+  emit({ type: 'system', subtype: 'task_started', task_id: 'long-runner' });
+  emit({ type: 'assistant', text: 'before-stop' });
+  await waitFor(() => firstFrames.length === 3, { message: 'turn 1 must be streaming before the Stop' });
+
+  assert.equal(await claudeSessionPool.interruptTurn('ledger-degraded'), true);
+  t.mock.timers.tick(5000);
+  await flushMicrotasks();
+  assert.equal((await first).subtype, 'aborted');
+  assert.deepEqual(firstFrames.map((m) => m.text ?? m.subtype), ['task_started', 'task_started', 'before-stop']);
+
+  const secondFrames = [];
+  let secondSettled = null;
+  const second = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('two'),
+    onMessage: (m) => secondFrames.push(m),
+  });
+  // Recorded rather than awaited, for the same reason as in the previous test: a
+  // design that withholds this result never settles turn 2, and that must fail an
+  // assertion rather than hang the suite.
+  second.then((result) => { secondSettled = result; }, (error) => { secondSettled = error; });
+  await waitFor(() => state.prompts.length === 2, { message: 'turn 2\'s prompt must reach the process' });
+
+  // Now turn 1 finishes unwinding, after turn 2 has started.
+  emit({ type: 'system', subtype: 'task_notification', task_id: 'survivor', status: 'completed', output_file: '/tmp/survivor.out' });
+  emit({ type: 'result', subtype: 'error_during_execution' });
+  await flushMicrotasks();
+
+  assert.equal(
+    secondSettled?.subtype,
+    'error_during_execution',
+    'the accepted harm: turn 2 is settled by turn 1\'s terminator, because a result is never withheld',
+  );
+  await second;
+  assert.equal(logged.staleTerminator().length, 1, 'and it is reported exactly once, not silently');
+  assert.equal(logged.staleTerminator()[0][1].appSessionId, 'ledger-degraded');
+  assert.equal(
+    logged.staleTerminator()[0][1].framesDeliveredToTurn,
+    1,
+    'the task_notification is all turn 2 had delivered — the count is what tells an operator how much was lost',
+  );
+
+  // The task that settled inside that window still reached the session sink with
+  // its output path: a background shell's fate is never turn-scoped.
   assert.deepEqual(
     sink.filter((m) => m.subtype === 'task_notification').map((m) => m.output_file),
     ['/tmp/survivor.out'],
-    'a background task settling inside the debt window must still reach the session sink',
-  );
-  assert.deepEqual(
-    claudeSessionPool.getLiveTaskIds('fallback-debt'),
-    ['late-task'],
-    'and task tracking must stay accurate, or the process is closed under a live shell',
   );
 
-  claudeSessionPool.closeSession('fallback-debt');
+  // And the session is usable immediately: a truncated answer, not a dead session.
+  const thirdFrames = [];
+  const third = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('three'),
+    onMessage: (m) => thirdFrames.push(m),
+  });
+  await waitFor(() => state.prompts.length === 3, { message: 'turn 3 must not be refused' });
+  emit({ type: 'assistant', text: 'turn-3 answer' });
+  emit({ type: 'result', subtype: 'success' });
+  assert.equal((await third).subtype, 'success');
+  assert.deepEqual(thirdFrames.map((m) => m.text), ['turn-3 answer']);
+  assert.equal(logged.staleTerminator().length, 1, 'the ledger is cleared by that first result, so turn 3 is clean');
+
+  claudeSessionPool.closeSession('ledger-degraded');
   t.mock.timers.reset();
+});
+
+/**
+ * Finding 3. Both exits from the old debt branch `return`ed before
+ * `armIdleTimerIfIdle`/`closeIfIdle`, and those are the only two places that can
+ * ever schedule a close. So a session whose LAST live task settled inside the
+ * debt window was left with no turn, no tasks and no timer — the ~320 MB process
+ * held for the life of the server.
+ */
+test('a session whose last task settles while a terminator is outstanding can still close', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { factory, state, emit } = createInterleavableQuery();
+
+  const common = {
+    appSessionId: 'ledger-close',
+    sdkOptions: {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  const frames = [];
+  const first = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    onMessage: (m) => frames.push(m),
+  });
+  emit({ type: 'system', subtype: 'task_started', task_id: 'survivor' });
+  emit({ type: 'assistant', text: 'before-stop' });
+  await waitFor(() => frames.length === 2, { message: 'turn 1 must be streaming before the Stop' });
+
+  assert.equal(await claudeSessionPool.interruptTurn('ledger-close'), true);
+  t.mock.timers.tick(5000);
+  await flushMicrotasks();
+  assert.equal((await first).subtype, 'aborted');
+
+  // The last thing keeping the process alive settles, with the terminator still
+  // outstanding and no turn in the slot.
+  emit({ type: 'system', subtype: 'task_notification', task_id: 'survivor', status: 'completed', output_file: '/tmp/survivor.out' });
+  await flushMicrotasks();
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('ledger-close'), []);
+  assert.equal(state.closed, false, 'not synchronously — the idle grace still applies');
+
+  t.mock.timers.tick(60000);
+  assert.equal(state.closed, true, 'the close path must still be reachable from inside the ledger window');
+  assert.equal(claudeSessionPool.hasLiveSession('ledger-close'), false);
+
+  t.mock.timers.reset();
+});
+
+test('an outstanding terminator arriving between turns is absorbed, and still leaves the session closable', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const logged = captureConsoleWarnings(t);
+  const { factory, state, emit } = createInterleavableQuery();
+
+  const common = {
+    appSessionId: 'ledger-absorb',
+    sdkOptions: {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  const frames = [];
+  const first = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    onMessage: (m) => frames.push(m),
+  });
+  emit({ type: 'assistant', text: 'before-stop' });
+  await waitFor(() => frames.length === 1, { message: 'turn 1 must be streaming before the Stop' });
+
+  assert.equal(await claudeSessionPool.interruptTurn('ledger-absorb'), true);
+  t.mock.timers.tick(5000);
+  await flushMicrotasks();
+  assert.equal((await first).subtype, 'aborted');
+
+  // The abandoned turn's terminator turns up between turns — the one window where
+  // "this is not the live turn's result" is a fact, because there is no live turn.
+  emit({ type: 'result', subtype: 'error_during_execution' });
+  await flushMicrotasks();
+  assert.equal(
+    state.closed,
+    false,
+    'absorbed, not forwarded: forwarding it reaches closeIfIdle and destroys a process the user may be about to re-use',
+  );
+  assert.deepEqual(logged.staleTerminator(), [], 'nothing was truncated, so nothing is reported');
+
+  t.mock.timers.tick(60000);
+  assert.equal(state.closed, true, 'and the deferred close still happens on its own schedule');
+
+  t.mock.timers.reset();
+});
+
+/**
+ * Finding 4. `markSessionDead` cancelled both SESSION timers but not the current
+ * turn's abort-settle timer, so `closeSession()`/`closeAllSessions()` with a Stop
+ * still settling left a live 5 s `setTimeout` (not `unref`'d) pointed at a dead
+ * session. Nothing incorrect happened when it fired — every downstream callback
+ * re-checks `dead` — but cancelling it is the whole reason that helper exists.
+ */
+function trackPendingTimeouts() {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const pending = new Set();
+
+  globalThis.setTimeout = (callback, ms, ...rest) => {
+    const handle = originalSetTimeout((...args) => {
+      pending.delete(handle);
+      callback(...args);
+    }, ms, ...rest);
+    pending.add(handle);
+    return handle;
+  };
+  globalThis.clearTimeout = (handle) => {
+    pending.delete(handle);
+    return originalClearTimeout(handle);
+  };
+
+  return {
+    count: () => pending.size,
+    restore: () => {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+      for (const handle of pending) {
+        originalClearTimeout(handle);
+      }
+    },
+  };
+}
+
+test('closing a session with an aborted turn in the slot leaves no timer pointed at it', async () => {
+  claudeSessionPool._resetForTests();
+  const timers = trackPendingTimeouts();
+
+  try {
+    const sessions = ['dead-timer-a', 'dead-timer-b'];
+    /** @type {Promise<unknown>[]} */
+    const pendingTurns = [];
+
+    for (const appSessionId of sessions) {
+      const { factory, emit } = createInterleavableQuery();
+      const frames = [];
+      const turn = claudeSessionPool.runTurn({
+        appSessionId,
+        userMessage: userMessage('one'),
+        sdkOptions: {},
+        onMessage: (m) => frames.push(m),
+        onBetweenTurnMessage: () => {},
+        createQuery: factory,
+      });
+      // Attached immediately: closing the process rejects the turn, and an
+      // unhandled rejection would fail the run for the wrong reason.
+      pendingTurns.push(turn.then(() => {}, () => {}));
+      // A live task, so no idle timer can be armed — the only pending timeout in
+      // this test is the abort-settle fallback itself.
+      emit({ type: 'system', subtype: 'task_started', task_id: 'survivor' });
+      emit({ type: 'assistant', text: 'before-stop' });
+      await waitFor(() => frames.length === 2, { message: `${appSessionId} must be streaming before the Stop` });
+      assert.equal(await claudeSessionPool.interruptTurn(appSessionId), true);
+    }
+
+    assert.equal(timers.count(), 2, 'both aborted turns are waiting on their own fallback');
+
+    claudeSessionPool.closeSession('dead-timer-a');
+    assert.equal(timers.count(), 1, 'closeSession must take its session\'s abort-settle timer with it');
+
+    assert.equal(claudeSessionPool.closeAllSessions(), 1);
+    assert.equal(timers.count(), 0, 'and so must shutdown');
+
+    await Promise.all(pendingTurns);
+    await flushMicrotasks();
+  } finally {
+    timers.restore();
+  }
 });
 
 /**
@@ -2046,6 +2359,10 @@ function captureConsoleWarnings(t) {
   return {
     unappliable: () => calls.filter((args) => String(args[0]).includes('cannot take effect')),
     held: () => calls.filter((args) => String(args[0]).includes('still holding')),
+    // The two lines that make the ledger's accepted degradation observable (see
+    // `routeMessage` and `ownerForNewlyStartedTask`).
+    staleTerminator: () => calls.filter((args) => String(args[0]).includes('still owed by an aborted turn')),
+    guessedTaskOwner: () => calls.filter((args) => String(args[0]).includes('attributing a new background task')),
     all: calls,
   };
 }
@@ -2558,55 +2875,33 @@ test('a session with no background task never arms the hold check at all', async
 });
 
 /**
- * Fix-round-2 finding 2. A task's owner is stamped when its `task_started` frame
- * is ROUTED, from a per-turn field — but the abort backstop deliberately frees
- * the slot while the aborted turn is still unwinding inside the CLI, and task
- * lifecycle frames are exempt from the swallow. So a `task_started` announced by
- * that tail arrived while a DIFFERENT user's turn held the field, and its
- * eventual output path went to that user instead of the one who started it.
+ * Attribution across an abort, in both windows — the property fix-round-2 bought
+ * and the regression whole-round review found in the mechanism it used.
  *
- * The debt is what resolves it: a single-conversation CLI serialises turns, so
- * everything up to and including the owed terminator belongs to the turn that
- * owes it — the same invariant the swallow branch is already built on, not a
- * guess. So while a terminator is owed, a newly announced task is attributed to
- * the owner of the turn that owes it.
+ * A task is stamped with an owner when its `task_started` frame is routed, and
+ * the abort backstop frees the slot while the aborted turn may still be unwinding.
+ * So there are two windows, and the old fake could only produce the second:
+ *
+ * - BETWEEN turns (nobody has pushed a prompt since the abort): the aborted turn's
+ *   owner is still `session.taskOwner`, so the task is attributed to the user who
+ *   started it, for free and with no guess.
+ * - While a NEW turn is running: the mechanism that read the owner off the
+ *   outstanding debt gave every task the running turn started to the user who had
+ *   left — the same leak as before, aimed at the common case instead of the rare
+ *   one, and with no end, since the debt could stand forever (finding 2). The
+ *   running turn is the likelier emitter and the answer taken here; where it is a
+ *   guess, it is logged.
  */
-test('a task announced by a fallback-settled turn\'s tail belongs to that turn\'s owner, not to whoever took the slot', async (t) => {
+test('a task announced between turns belongs to the aborted turn\'s owner, and one from the running turn belongs to it', async (t) => {
   claudeSessionPool._resetForTests();
   t.mock.timers.enable({ apis: ['setTimeout'] });
-
-  const tailGate = createDeferred();
-  let turns = 0;
-
-  const factory = ({ prompt }) => {
-    const generator = (async function* run() {
-      for await (const _message of prompt) {
-        turns += 1;
-        if (turns === 1) {
-          yield { type: 'assistant', text: 'before-stop' };
-          // Acked the interrupt, still unwinding well past the fallback window.
-          await tailGate.promise;
-          // Announced by turn 1's tail, while turn 2 holds the slot.
-          yield { type: 'system', subtype: 'task_started', task_id: 'alices-task', description: 'Alice\'s build' };
-          yield { type: 'result', subtype: 'error_during_execution' };
-        } else {
-          // Turn 2's own task, after the debt cleared: still turn 2's.
-          yield { type: 'system', subtype: 'task_started', task_id: 'bobs-task', description: 'Bob\'s build' };
-          yield { type: 'system', subtype: 'task_notification', task_id: 'alices-task', status: 'completed', output_file: '/tmp/alices.out' };
-          yield { type: 'system', subtype: 'task_notification', task_id: 'bobs-task', status: 'completed', output_file: '/tmp/bobs.out' };
-          yield { type: 'result', subtype: 'success' };
-        }
-      }
-    })();
-    generator.interrupt = async () => {};
-    generator.close = () => {};
-    return generator;
-  };
+  const logged = captureConsoleWarnings(t);
+  const { factory, state, emit } = createInterleavableQuery();
 
   /** @type {Array<{ taskId: unknown, taskOwner: unknown }>} */
   const settlements = [];
   const common = {
-    appSessionId: 'debt-owner',
+    appSessionId: 'ledger-owner',
     sdkOptions: {},
     onBetweenTurnMessage: (message, meta) => {
       if (message?.subtype === 'task_notification') {
@@ -2616,37 +2911,47 @@ test('a task announced by a fallback-settled turn\'s tail belongs to that turn\'
     createQuery: factory,
   };
 
-  const turnStarted = createDeferred();
+  const firstFrames = [];
   const first = claudeSessionPool.runTurn({
     ...common,
     userMessage: userMessage('start a long build'),
     taskOwner: 'alice',
-    onMessage: (m) => {
-      if (m.type === 'assistant') {
-        turnStarted.resolve();
-      }
-    },
+    onMessage: (m) => firstFrames.push(m),
   });
+  emit({ type: 'assistant', text: 'before-stop' });
+  await waitFor(() => firstFrames.length === 1, { message: 'turn 1 must be streaming before the Stop' });
 
-  await turnStarted.promise;
-  assert.equal(await claudeSessionPool.interruptTurn('debt-owner'), true);
-
+  assert.equal(await claudeSessionPool.interruptTurn('ledger-owner'), true);
   t.mock.timers.tick(5000);
   await flushMicrotasks();
   assert.equal((await first).subtype, 'aborted');
 
-  // Someone else sends the next message on this shared session.
+  // Window 1: Alice's turn announces a task from its tail, with the slot empty.
+  emit({ type: 'system', subtype: 'task_started', task_id: 'alices-task', description: 'Alice\'s build' });
+  await flushMicrotasks();
+  assert.deepEqual(logged.guessedTaskOwner(), [], 'between turns the owner is known, so nothing is guessed');
+
+  // Window 2: someone else sends the next message on this shared session, and the
+  // turn the CLI is now executing starts a task of its own.
+  let secondSettled = null;
   const second = claudeSessionPool.runTurn({
     ...common,
     userMessage: userMessage('unrelated follow-up'),
     taskOwner: 'bob',
     onMessage: () => {},
   });
-  await flushMicrotasks();
+  // Recorded, not awaited: a design that withholds turn 2's terminator never
+  // settles this, and the point of these tests is to fail rather than hang.
+  second.then((result) => { secondSettled = result; }, (error) => { secondSettled = error; });
+  await waitFor(() => state.prompts.length === 2, { message: 'turn 2\'s prompt must reach the process' });
 
-  tailGate.resolve();
-  assert.equal((await second).subtype, 'success');
+  emit({ type: 'system', subtype: 'task_started', task_id: 'bobs-task', description: 'Bob\'s build' });
+  emit({ type: 'system', subtype: 'task_notification', task_id: 'alices-task', status: 'completed', output_file: '/tmp/alices.out' });
+  emit({ type: 'system', subtype: 'task_notification', task_id: 'bobs-task', status: 'completed', output_file: '/tmp/bobs.out' });
+  emit({ type: 'result', subtype: 'success' });
   await flushMicrotasks();
+  assert.equal(secondSettled?.subtype, 'success');
+  await second;
 
   assert.deepEqual(
     settlements,
@@ -2654,9 +2959,14 @@ test('a task announced by a fallback-settled turn\'s tail belongs to that turn\'
       { taskId: 'alices-task', taskOwner: 'alice' },
       { taskId: 'bobs-task', taskOwner: 'bob' },
     ],
-    'the tail\'s task belongs to the turn that owed the terminator; the new turn\'s own task still belongs to it',
+    'each task\'s summary and absolute output path goes to the user whose turn started it',
+  );
+  assert.equal(logged.guessedTaskOwner().length, 1, 'the one attribution that WAS a guess is reported');
+  assert.deepEqual(
+    { appSessionId: logged.guessedTaskOwner()[0][1].appSessionId, taskId: logged.guessedTaskOwner()[0][1].taskId },
+    { appSessionId: 'ledger-owner', taskId: 'bobs-task' },
   );
 
-  claudeSessionPool.closeSession('debt-owner');
+  claudeSessionPool.closeSession('ledger-owner');
   t.mock.timers.reset();
 });

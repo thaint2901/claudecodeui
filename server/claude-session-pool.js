@@ -57,6 +57,11 @@ const HOLD_WARN_AFTER_MS = 600000;
  * reading is: a rejected `interrupt()` never marks the turn (see
  * `interruptTurn`), so it never arms this timer — the stop did not happen, the
  * run is still the user's run, and it terminates itself normally.
+ *
+ * Read the `owedTerminator` note in `routeMessage` before building anything else
+ * on top of this timer: firing it is a GUESS that no terminator is coming, and
+ * the one previous mechanism that answered that guess by assuming the opposite
+ * (a terminator "debt" the next turn had to pay off) bricked sessions outright.
  */
 const ABORT_SETTLE_FALLBACK_MS = 5000;
 
@@ -182,9 +187,10 @@ const live = new Map();
  * @property {boolean} promptSent - False while the turn has only RESERVED the
  *   slot (claimed before reconciliation, which may still reject or recreate the
  *   process). Nothing may be routed to, or settled on, a reserved turn.
- * @property {unknown} taskOwner - This turn's opaque owner token, kept on the
- *   turn as well as on the session so that a task announced by this turn's TAIL
- *   — after the abort backstop vacated the slot — can still be attributed to it.
+ * @property {number} frameCount - How many frames have been forwarded to
+ *   `onMessage`. Diagnostic only: it is what tells an operator, in the one log
+ *   line this file cannot make certain, whether a turn settled by a possibly
+ *   foreign `result` had shown the user anything at all (see `routeMessage`).
  */
 
 /**
@@ -237,25 +243,20 @@ const live = new Map();
  *   that outlives its session is the same class of defect as the slot that
  *   outlived its turn.
  * @property {boolean} dead
- * @property {unknown[]} owedTerminators - One entry per `result` message still
- *   expected for a turn the abort fallback settled without one, holding that
- *   turn's `taskOwner`, oldest first. A queue rather than a flag: a second
- *   fallback can fire while a debt is outstanding (turn 2 aborted too), and a
- *   flag would silently drop one debt, letting exactly the frame it was meant to
- *   swallow through. It carries the owner rather than being a bare count because
- *   a single-conversation CLI serialises turns, so everything up to and including
- *   the owed terminator belongs to the turn that owes it — which is what lets a
- *   task announced by that tail be attributed correctly (see
- *   `ownerForNewlyStartedTask`). Same invariant `routeMessage`'s swallow branch
- *   already relies on, not a second guess about it.
+ * @property {{ armedAt: number } | null} owedTerminator - Set when the abort
+ *   fallback settled a turn WITHOUT the `result` the CLI still owed it, and
+ *   cleared by the first `result` this session sees afterwards, whichever turn
+ *   that one belongs to. A LEDGER, not a gate: it is read to absorb a terminator
+ *   that arrives between turns and to say out loud when a settlement or an
+ *   attribution was a guess — never to withhold a frame or a terminator from a
+ *   live turn. `routeMessage` explains why that distinction is the whole point
+ *   of this field, and `ABORT_SETTLE_FALLBACK_MS` why it can only ever be armed
+ *   by a guess in the first place.
  *
- *   The two readers of that one invariant fail in OPPOSITE directions, which is
- *   what to keep in mind before relaxing it. `routeMessage`'s swallow branch is
- *   fail-SAFE: "this frame may belong to the dead turn, so show it to nobody."
- *   `ownerForNewlyStartedTask` is fail-ACTIVE: it asserts an owner, and that
- *   owner is later handed the task's summary and its absolute output path. If the
- *   invariant broke there the cost is not a missing row — it is one user's
- *   background work, and the path to its output, described to a different user.
+ *   Its bound is structural rather than timed: at most one entry (a scalar
+ *   cannot be over-drawn), armed only by the fallback, cleared by the next
+ *   `result` or with the session itself. Nothing waits on it, so nothing can
+ *   wait on it forever — which is exactly what the queue it replaced could do.
  */
 
 /**
@@ -680,6 +681,19 @@ function markSessionDead(session) {
   session.dead = true;
   clearIdleTimer(session);
   clearHoldCheckTimer(session);
+  // The third timer, and the one this helper's own contract ("cancel both of its
+  // timers") used to miss: an aborted turn still holding the slot has a pending
+  // abort-settle fallback, which is not `unref`'d and is reachable from both
+  // callers — `closeAllSessions()` at shutdown and `closeSession()` while a Stop
+  // is settling. Left armed it would fire against a dead session, settle a turn
+  // on it and arm a 60 s idle timer on it; every downstream callback re-checks
+  // `dead`, so nothing incorrect happens today, but "a timer that outlives its
+  // session" is this file's oldest defect shape and closing that gap is exactly
+  // why this helper exists. The slot itself is left set on purpose: `drain`'s
+  // `finally` still has to find the turn there to reject its caller.
+  if (session.currentTurn) {
+    clearAbortSettleFallback(session.currentTurn);
+  }
   removeFromLiveIfCurrent(session);
 }
 
@@ -720,42 +734,46 @@ function trackTask(session, message) {
  * a settling task belonged to could no longer look it up.
  */
 /**
- * Who a task announced RIGHT NOW belongs to.
+ * Who a task announced RIGHT NOW belongs to: the owner of the turn that is
+ * running, or — between turns — of the last turn that ran, which is the same
+ * field. `session.taskOwner` is refreshed per turn and never cleared, so it
+ * still names the aborted turn's owner after the abort backstop vacated the
+ * slot, and the case per-task ownership was introduced for costs nothing: a
+ * `task_started` from that turn's tail, arriving with the slot empty because
+ * nobody has pushed a prompt since, is attributed to the turn that started it.
  *
- * Normally the turn in the slot — `session.taskOwner`. But the abort backstop
- * vacates the slot while the aborted turn is still unwinding inside the CLI, and
- * task lifecycle frames are deliberately exempt from the swallow that covers the
- * rest of that tail (they are session-scoped, and dropping one would let the pool
- * close a process with a live shell in it). So a `task_started` can arrive from a
- * turn that no longer holds the slot, and reading the current field would hand
- * one user's background shell — its summary and its absolute output path — to
- * whoever happened to send the next message.
+ * It is a GUESS in exactly one window — an abandoned turn's tail announcing a
+ * task AFTER the next prompt has been pushed — and no correlation field exists
+ * to settle it (`SDKResultMessage` carries `uuid`, `session_id`, `num_turns`;
+ * none of them tie a frame to a turn). All three candidate answers are wrong
+ * some of the time, so this picks the one that is wrong least often and least
+ * badly:
  *
- * The outstanding debt resolves it without any new guess: a single-conversation
- * CLI serialises turns, so everything up to and including the owed terminator
- * belongs to the turn that owes it. That is the same invariant `routeMessage`'s
- * swallow branch is built on. Oldest debt first, for the same reason.
+ * - The RUNNING turn (this): wrong only if the interrupted turn started NEW
+ *   background work while unwinding — while the running turn is the one the CLI
+ *   is actually executing, and the overwhelmingly likelier source of a
+ *   `task_started`.
+ * - The turn that OWES a terminator: what an earlier fix chose, on the ground
+ *   that a single-conversation CLI serialises turns. It is the same leak aimed
+ *   at the common case instead of the rare one — with a debt outstanding, EVERY
+ *   task the running turn started was reported to the user who had left (found
+ *   by whole-round review, finding 2). Worse, that debt could stand forever, so
+ *   the misattribution had no end.
+ * - `null` ("unknown owner"): looks like the cautious choice and is the worst
+ *   one. The caller BROADCASTS an unknown owner's task — its summary and the
+ *   absolute host path of its output — to every connected client
+ *   (`emitBackgroundTaskEvent`), so declaring uncertainty exposes more, not less.
  *
- * But read in the FAIL-ACTIVE direction, unlike that swallow branch. Swallowing
- * shows a frame to nobody; this ASSERTS an owner, who is then handed the task's
- * summary and its absolute output path (`forwardBetweenTurnMessage` →
- * `emitBackgroundTaskEvent`, addressed to `ownerUserId`). A wrong answer here is
- * therefore not a missing notification but a misdirected one — one user's
- * background work described to another, which is the exact exposure per-task
- * ownership was introduced to close.
- *
- * The apparently safer alternative — record `null` whenever a debt stands, so an
- * uncertain owner is nobody's — was considered and rejected: `null` means
- * "unknown owner", which the caller broadcasts to nobody, so the ABORTED user
- * would lose the notification for the background shell their own turn started.
- * That is the very bug attribution exists to fix, in a milder form: silence
- * instead of misdirection. The debt is not an uncertain owner, it is a KNOWN one
- * (the turn that owes the terminator), so recording it is the accurate answer,
- * not the risky one.
+ * A guess is therefore unavoidable here; being silent about it is not, so the
+ * one window where this is a guess logs it (requirement: no silent degradation).
  */
-function ownerForNewlyStartedTask(session) {
-  if (session.owedTerminators.length > 0) {
-    return session.owedTerminators[0];
+function ownerForNewlyStartedTask(session, taskId) {
+  if (session.owedTerminator && session.currentTurn?.promptSent) {
+    console.warn('[ClaudeSessionPool] attributing a new background task to the running turn while an aborted turn\'s terminator is still outstanding; if the task came from that turn\'s tail, this owner is wrong', {
+      appSessionId: session.appSessionId,
+      taskId,
+      owedForMs: Date.now() - session.owedTerminator.armedAt,
+    });
   }
   return session.taskOwner ?? null;
 }
@@ -778,7 +796,7 @@ function applyTaskLifecycle(session, message) {
       // its settlement reports a null owner — the caller's documented
       // unknown-owner path, and deliberately NOT a guess at the current turn's
       // user, which is the mistake this field removes.
-      owner: ownerForNewlyStartedTask(session),
+      owner: ownerForNewlyStartedTask(session, message.task_id),
     });
     return null;
   }
@@ -816,7 +834,7 @@ function closeIfIdle(session) {
  * `runTurn` claim the slot BEFORE its first `await` instead of inside the
  * executor several awaits later.
  */
-function createTurn(onMessage, taskOwner) {
+function createTurn(onMessage) {
   let resolve;
   let reject;
   const promise = new Promise((res, rej) => {
@@ -837,7 +855,7 @@ function createTurn(onMessage, taskOwner) {
     aborted: false,
     abortSettleTimer: null,
     promptSent: false,
-    taskOwner: taskOwner ?? null,
+    frameCount: 0,
   };
 }
 
@@ -893,11 +911,11 @@ function armAbortSettleFallback(session, turn) {
     }
     if (settleCurrentTurn(session, { type: 'result', subtype: 'aborted' })) {
       // We just guessed that nothing more is coming for this turn, and the pool
-      // cannot tell "emitted nothing" from "has not emitted yet". Record the
-      // terminator we settled without — with the turn's owner, so a task its tail
-      // announces is attributed to it — so that if the guess was wrong the tail is
-      // swallowed rather than misattributed to whoever claims the slot next.
-      session.owedTerminators.push(turn.taskOwner ?? null);
+      // cannot tell "emitted nothing" from "has not emitted yet". Record that a
+      // terminator is outstanding — as a note, not as a claim on anything the
+      // next turn needs. `routeMessage` is where that restraint is spelled out,
+      // and why the version of this line that DID hold a claim bricked sessions.
+      session.owedTerminator = { armedAt: Date.now() };
     }
     armIdleTimerIfIdle(session);
   }, ABORT_SETTLE_FALLBACK_MS);
@@ -946,19 +964,6 @@ function isTaskNotification(message) {
 }
 
 /**
- * The frames `trackTask` keys off. Session-scoped, not turn-scoped: they say
- * what the PROCESS is still doing, which is why they are exempt from every
- * turn-level suppression rule in `routeMessage`. Dropping one would let the pool
- * close a process with a live shell in it — the thing this pool exists to stop.
- */
-function isTaskLifecycle(message) {
-  return message?.type === 'system'
-    && (message.subtype === 'task_started'
-      || message.subtype === 'task_notification'
-      || message.subtype === 'task_updated');
-}
-
-/**
  * Records which provider conversation the process is CURRENTLY on, from the
  * `session_id` the SDK stamps on its messages.
  *
@@ -980,30 +985,78 @@ function trackProviderSessionId(session, message) {
 
 function routeMessage(session, message) {
   trackProviderSessionId(session, message);
-  // Captured here, not at the sinks: tracking runs first (lifecycle is exempt
-  // from every suppression rule below), so by the time a sink sees the message
-  // the settling task's record has already been removed.
+  // Unconditionally, and before any routing decision below: task lifecycle is
+  // session-scoped, not turn-scoped — it says what the PROCESS is still doing, so
+  // no turn-level rule may suppress it. Missing one would let the pool close a
+  // process with a live shell in it, which is the thing this pool exists to stop.
+  //
+  // The owner is captured here rather than at the sinks for the same ordering
+  // reason: by the time a sink sees the message, the settling task's record has
+  // already been removed.
   const settledTaskOwner = trackTask(session, message);
   const sinkMeta = { taskOwner: settledTaskOwner };
 
-  if (session.owedTerminators.length > 0) {
-    // A turn the abort fallback settled early is still unwinding inside the CLI.
-    // Its tail cannot be told apart from the current turn's output — there is no
-    // turn-correlation field on any SDK message — so everything up to and
-    // including its terminator is swallowed, and the debt is cleared by that
-    // terminator. Task lifecycle is exempt (see `isTaskLifecycle`) and still
-    // reaches the session sink, which is where between-turn task events belong.
-    if (isTaskLifecycle(message)) {
-      session.onBetweenTurnMessage(message, sinkMeta);
+  if (message?.type === 'result') {
+    /*
+     * THE CONTRADICTION THIS BRANCH RESOLVES — do not re-introduce the other side.
+     *
+     * `ABORT_SETTLE_FALLBACK_MS` fires only when the CLI acked an interrupt and
+     * then emitted nothing for five seconds: its premise is that the terminator
+     * is NOT coming. An earlier fix took the opposite premise at the very same
+     * moment — it recorded a terminator "debt" and swallowed every later frame
+     * until that terminator arrived. Whenever the fallback's own premise was the
+     * true one the debt was never repaid, and nothing anywhere expired it: the
+     * NEXT turn was swallowed whole (no frames, no log line), its `result` was
+     * consumed as the repayment so `runTurn`'s promise never settled and the slot
+     * was never vacated, and every message after that was refused with a
+     * turn-in-flight error. Pressing Stop settled the hung turn but armed a fresh
+     * debt, so the turn after that was swallowed too. A rare truncation had been
+     * traded for a permanently bricked session.
+     *
+     * So the ledger never withholds anything a live turn needs. The rule is
+     * absolute and is the invariant to preserve if this code is touched again:
+     * THE FIRST `result` ALWAYS SETTLES WHATEVER TURN HOLDS THE SLOT. Withholding
+     * is only safe for a mechanism that knows when to stop, and no such knowledge
+     * exists in here — there is no turn-correlation field on any SDK message
+     * (`SDKResultMessage` carries `uuid`, `session_id`, `num_turns`), which is why
+     * every option available here is a heuristic and why the deciding question is
+     * which one fails least badly.
+     *
+     * The harm that buys, accepted knowingly: an abandoned turn that IS still
+     * unwinding can settle the live turn early and truncate its answer. It costs
+     * one turn; the swallow cost the session — and by measurement it is also the
+     * rarer branch, since an interrupted turn terminates within milliseconds
+     * (`spikes/streaming-input-mode/interrupt-result.mjs`), so the fallback only
+     * fires at all in the unmeasured slow-unwind case. It is logged rather than
+     * hidden, because silence is what this whole change set exists to remove.
+     */
+    const owed = session.owedTerminator;
+    const liveTurn = session.currentTurn?.promptSent ? session.currentTurn : null;
+
+    if (owed && !liveTurn) {
+      // The abandoned turn's terminator arrived between turns — the one window
+      // where "this is not the live turn's result" is a fact rather than a guess,
+      // because there is no live turn to be wrong about. Absorbing it costs
+      // nobody anything and keeps `closeIfIdle` from destroying, IDLE_GRACE_MS
+      // early, a process the user may be about to re-use. Still arms the deferred
+      // close, so this exit leaves the close path reachable like every other one.
+      session.owedTerminator = null;
+      armIdleTimerIfIdle(session);
       return;
     }
-    if (message?.type === 'result') {
-      session.owedTerminators.shift();
-    }
-    return;
-  }
 
-  if (message?.type === 'result') {
+    if (owed) {
+      session.owedTerminator = null;
+      console.warn('[ClaudeSessionPool] settling this turn on a `result` the session was still owed by an aborted turn; if this frame was that turn\'s, this turn\'s answer is truncated', {
+        appSessionId: session.appSessionId,
+        owedForMs: Date.now() - owed.armedAt,
+        // Zero means the live turn had shown the user nothing when this arrived,
+        // which is the strong signal that the frame belonged to the abandoned
+        // turn rather than to this one. Non-zero is the milder truncation.
+        framesDeliveredToTurn: liveTurn.frameCount,
+      });
+    }
+
     settleCurrentTurn(session, message);
     closeIfIdle(session);
     return;
@@ -1021,6 +1074,7 @@ function routeMessage(session, message) {
     if (isTaskNotification(message)) {
       session.onBetweenTurnMessage(message, sinkMeta);
     }
+    turn.frameCount += 1;
     turn.onMessage(message);
     return;
   }
@@ -1152,7 +1206,7 @@ function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTur
     idleTimer: null,
     holdCheckTimer: null,
     dead: false,
-    owedTerminators: [],
+    owedTerminator: null,
   };
 
   live.set(appSessionId, session);
@@ -1199,7 +1253,7 @@ export const claudeSessionPool = {
       }
     }
 
-    const turn = createTurn(onMessage, taskOwner);
+    const turn = createTurn(onMessage);
 
     if (session) {
       // Claim the slot SYNCHRONOUSLY, before the first `await` below. The guard
