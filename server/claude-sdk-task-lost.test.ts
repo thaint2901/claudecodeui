@@ -145,3 +145,77 @@ test('a background task lost with the CLI process reaches the client as a failed
     claudeSessionPool._resetForTests();
   }
 });
+
+// Same boundary argument as the test above, for the other report the pool
+// cannot deliver itself: the pool proves it calls `onHoldWarning`, which is not
+// the same claim as "the user is told". A missing `onHoldWarning:` line in
+// `queryClaudeSDK` would leave every pool test green and production silent, and
+// this is also the only place the advisory's `status` value on the wire can be
+// pinned down — the frontend fails an unrecognised status toward "not a
+// success", so the two sides have to agree here or a still-running task renders
+// as a failure.
+test('a task still holding the CLI process open past ten minutes reaches the client as an advisory, not an outcome', async (t) => {
+  claudeSessionPool._resetForTests();
+  // Only the two APIs the hold check itself uses. `setTimeout`/`setImmediate`
+  // stay real so the run's own fs I/O and the pool's async draining behave
+  // normally, and `now` starts at the real clock so nothing under test sees a
+  // 1970 timestamp.
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() });
+  const ws = createFakeWs();
+
+  const frames: Frame[] = [];
+  const client = {
+    readyState: WS_OPEN_STATE,
+    send: (data: string) => { frames.push(JSON.parse(data) as Frame); },
+  };
+  connectedClients.add(client);
+
+  frameScripts.push(async function* script() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-held-provider-1', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'task-held-1',
+      description: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+    // No death and no notification: the process is simply held, which is the
+    // state that used to last for the life of the server, unobserved.
+  });
+
+  try {
+    await queryClaudeSDK(
+      'start something in the background',
+      { appSessionId: 'task-held-app-1', cwd: os.tmpdir(), images: [], permissionMode: 'bypassPermissions' },
+      ws,
+    );
+
+    assert.deepEqual(claudeSessionPool.getLiveTaskIds('task-held-app-1'), ['task-held-1']);
+    for (let i = 0; i < 10; i += 1) {
+      t.mock.timers.tick(60000);
+    }
+
+    const frame = frames.find((f) => f.kind === 'background_task') as Frame;
+    assert.ok(frame, 'the advisory must actually reach a connected client');
+    assert.equal(frame.sessionId, 'task-held-app-1', 'the app session id, never the provider-native one');
+    assert.equal(frame.taskId, 'task-held-1');
+    assert.equal(
+      frame.status,
+      'running',
+      'the task has not completed, failed or been stopped — reusing any of those would be a lie',
+    );
+    assert.match(String(frame.summary), /Echo t1-t10 with delays/, 'the row must say WHICH command');
+    assert.match(String(frame.summary), /10 minutes/, 'and how long it has been running');
+    assert.match(String(frame.summary), /holding a Claude CLI process open/, 'and what that is costing');
+    assert.match(String(frame.summary), /Nothing will stop it automatically/, 'and that nobody will end it');
+    assert.equal(Object.hasOwn(frame, 'outputFile'), false, 'a running task has written no result file');
+
+    // Report-only, end to end: the advisory must not have ended the hold.
+    assert.equal(claudeSessionPool.hasLiveSession('task-held-app-1'), true);
+    assert.deepEqual(claudeSessionPool.getLiveTaskIds('task-held-app-1'), ['task-held-1']);
+  } finally {
+    connectedClients.delete(client);
+    claudeSessionPool._resetForTests();
+    t.mock.timers.reset();
+  }
+});

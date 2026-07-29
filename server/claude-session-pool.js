@@ -10,11 +10,36 @@ import { createInputStream } from './claude-session-input-stream.js';
  * stream open while background work is live and closes it otherwise. A session
  * that never starts background work therefore behaves exactly as before.
  *
+ * That hold is deliberately unbounded — nothing here ever ends a user's running
+ * task — so it is instead REPORTED once it gets long: see
+ * `HOLD_WARN_AFTER_MS`/`reportLongHeldTasks`.
+ *
  * Deliberately knows nothing about normalized messages or websockets: callers
  * pass `onMessage` / `onBetweenTurnMessage` and keep translation to themselves.
  */
 
 const IDLE_GRACE_MS = 60000;
+
+/**
+ * How often a session that is holding its process open for background work
+ * re-examines that hold, and how long one task may hold it before the operator
+ * and the user are told.
+ *
+ * This check exists ONLY to report. It never closes, evicts, recreates or
+ * re-times anything, by an explicit ruling: every eviction rule — an LRU cap, a
+ * maximum hold time — kills the user's running work, which is the exact bug this
+ * pool was built to fix. So an unbounded hold stays an accepted risk, and the
+ * gap being closed here is that it used to be an INVISIBLE one.
+ *
+ * Why a periodic check is needed at all rather than a one-shot timer: nothing
+ * else ever reconsiders a hold. `closeIfIdle` CLEARS the idle timer while tasks
+ * are tracked and only `armIdleTimerIfIdle` re-arms it, which requires the set
+ * to become empty — so a task that never emits a terminal frame (wedged, killed
+ * out of band, or a shape we mis-track) left the process held with no mechanism
+ * scheduled to notice, for the life of the server. An operator found out at OOM.
+ */
+const HOLD_CHECK_INTERVAL_MS = 60000;
+const HOLD_WARN_AFTER_MS = 600000;
 
 /**
  * How long an aborted turn may keep the slot without a terminator.
@@ -140,6 +165,10 @@ const live = new Map();
  * @property {Function | null} onTaskLost - Told about each task that died with
  *   the process. Refreshed per turn like `onBetweenTurnMessage`, so the report
  *   reaches whoever is currently watching this session.
+ * @property {Function | null} onHoldWarning - Told once about each task that has
+ *   held this process open past `HOLD_WARN_AFTER_MS`. Refreshed per turn for the
+ *   same reason as `onTaskLost`. Advisory only: the pool takes no action on the
+ *   hold before or after calling it.
  * @property {string | null} providerSessionId - The provider-native session id
  *   the process is currently on, as last announced in its own message stream.
  *   Null until it announces one. The pool otherwise knows nothing about provider
@@ -157,6 +186,11 @@ const live = new Map();
  *   callbacks (`canUseTool`, hooks) read from. Updated IN PLACE on reuse so
  *   turn 1's captured closures act on turn N's writer and settings.
  * @property {NodeJS.Timeout | null} idleTimer
+ * @property {NodeJS.Timeout | null} holdCheckTimer - Exists exactly while this
+ *   session is holding its process open for tracked tasks. Kept in sync from one
+ *   place (`syncHoldCheckTimer`) and cleared on every death path, because a timer
+ *   that outlives its session is the same class of defect as the slot that
+ *   outlived its turn.
  * @property {boolean} dead
  * @property {number} owedTerminators - How many `result` messages are still
  *   expected for turns the abort fallback settled without one. A counter, not a
@@ -174,6 +208,13 @@ const live = new Map();
  * @property {boolean} skipTranscript - The task is ambient housekeeping. Still
  *   tracked (closing the process would kill it too) but deliberately kept out of
  *   the transcript, exactly as its `task_notification` already is.
+ * @property {number} startedAt - `Date.now()` when its `task_started` frame was
+ *   routed. The only clock available: no SDK frame carries the task's own start
+ *   time, and the hold that matters is how long WE have been keeping the process
+ *   alive for it.
+ * @property {boolean} holdReported - This task's long-hold advisory has already
+ *   gone out. Per task, not per session and not per check: a warning that repeats
+ *   every minute is noise, and noise is how the previous silent failure hid.
  */
 
 /** Order-insensitive for lists, so a reshuffled allowlist is not a "change". */
@@ -425,6 +466,103 @@ function clearIdleTimer(session) {
   }
 }
 
+function clearHoldCheckTimer(session) {
+  if (session.holdCheckTimer) {
+    clearInterval(session.holdCheckTimer);
+    session.holdCheckTimer = null;
+  }
+}
+
+/**
+ * Reports any task that has now held this process open past the threshold, and
+ * does nothing else. Read this as a pure observer: it must not close, destroy,
+ * recreate or re-time the session it is describing.
+ */
+function reportLongHeldTasks(session) {
+  if (session.dead) {
+    // Belt and braces. Every death path clears this timer, but "a timer fired
+    // for a session that no longer exists" is this file's oldest defect shape,
+    // so the callback refuses a dead session as well as being cancelled by one —
+    // and `drain` deliberately leaves `liveTaskIds` populated on death, so a
+    // leaked interval would otherwise report a hold on a process that is gone.
+    clearHoldCheckTimer(session);
+    return;
+  }
+
+  const now = Date.now();
+  /** @type {Array<[string, LiveTask]>} */
+  const due = [];
+  let oldestStartedAt = now;
+  for (const [taskId, task] of session.liveTaskIds) {
+    oldestStartedAt = Math.min(oldestStartedAt, task.startedAt);
+    if (!task.holdReported && now - task.startedAt >= HOLD_WARN_AFTER_MS) {
+      task.holdReported = true;
+      due.push([taskId, task]);
+    }
+  }
+
+  if (due.length === 0) {
+    return;
+  }
+
+  console.warn('[ClaudeSessionPool] this session is still holding a Claude CLI process open for background work; nothing will end it automatically', {
+    appSessionId: session.appSessionId,
+    heldTaskCount: session.liveTaskIds.size,
+    oldestHeldForMs: now - oldestStartedAt,
+    // Every held task, not just the newly-due ones: the question an operator is
+    // actually asking is "what is keeping this subprocess alive", and a list
+    // filtered to whatever crossed the line this minute answers a different one.
+    tasks: [...session.liveTaskIds].map(([taskId, task]) => ({
+      taskId,
+      description: task.description,
+      heldForMs: now - task.startedAt,
+    })),
+  });
+
+  for (const [taskId, task] of due) {
+    // Same rule `reportLostTasks` applies: ambient housekeeping is counted for
+    // the operator but never put in the conversation, since the user did not ask
+    // for it and cannot act on it.
+    if (task.skipTranscript) {
+      continue;
+    }
+    try {
+      session.onHoldWarning?.({ taskId, description: task.description, heldForMs: now - task.startedAt });
+    } catch (reportError) {
+      // One sink throwing must not cost the remaining tasks their advisory, for
+      // the same reason `reportLostTasks` guards each call: the caller's callback
+      // reaches a websocket fan-out.
+      console.error('[ClaudeSessionPool] failed to report a long-held background task', {
+        appSessionId: session.appSessionId,
+        taskId,
+        error: reportError instanceof Error ? reportError.message : String(reportError),
+      });
+    }
+  }
+}
+
+/**
+ * Makes the hold check exist exactly while this session has tracked tasks.
+ *
+ * One place rather than an arm/clear call beside each mutation of
+ * `liveTaskIds`: three separate call sites is how that invariant drifts, and the
+ * cost of re-deriving it is a `Map.size` read.
+ */
+function syncHoldCheckTimer(session) {
+  if (session.dead || session.liveTaskIds.size === 0) {
+    clearHoldCheckTimer(session);
+    return;
+  }
+  if (session.holdCheckTimer) {
+    return;
+  }
+  session.holdCheckTimer = setInterval(() => reportLongHeldTasks(session), HOLD_CHECK_INTERVAL_MS);
+  // A repeating timer keeps the event loop alive by itself, so a missed clear
+  // would stop the server from ever exiting. `unref` makes the worst case a
+  // stale timer instead of a hung process; the clears are still what cancel it.
+  session.holdCheckTimer.unref?.();
+}
+
 /**
  * Removes `session` from `live` only if it is still the entry stored at its
  * own key. `destroy()` and `drain()`'s `finally` both race a superseding
@@ -441,6 +579,7 @@ function removeFromLiveIfCurrent(session) {
 
 function destroy(session) {
   clearIdleTimer(session);
+  clearHoldCheckTimer(session);
   session.dead = true;
   session.input.close();
   try {
@@ -461,6 +600,14 @@ function destroy(session) {
  * depend on string matching.
  */
 function trackTask(session, message) {
+  applyTaskLifecycle(session, message);
+  // The hold check's lifetime follows `liveTaskIds`, so it is re-derived
+  // wherever that map is touched — arming when the first task registers and
+  // clearing when the last one settles.
+  syncHoldCheckTimer(session);
+}
+
+function applyTaskLifecycle(session, message) {
   if (message?.type !== 'system') {
     return;
   }
@@ -471,6 +618,8 @@ function trackTask(session, message) {
     session.liveTaskIds.set(message.task_id, {
       description: typeof message.description === 'string' && message.description ? message.description : null,
       skipTranscript: message.skip_transcript === true,
+      startedAt: Date.now(),
+      holdReported: false,
     });
     return;
   }
@@ -794,6 +943,9 @@ async function drain(session) {
     rejectCurrentTurn(session, new Error('Claude session process ended before the turn completed'));
     session.dead = true;
     clearIdleTimer(session);
+    // Cleared here as well as in `destroy`: this is the path a process that died
+    // on its OWN takes, and it never goes through `destroy`.
+    clearHoldCheckTimer(session);
     removeFromLiveIfCurrent(session);
 
     // Last, deliberately: teardown correctness outranks reporting, so nothing
@@ -806,7 +958,7 @@ async function drain(session) {
   }
 }
 
-function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, onTaskLost, createQuery }) {
+function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, onTaskLost, onHoldWarning, createQuery }) {
   const input = createInputStream();
   const query = createQuery({ prompt: input, options: sdkOptions });
 
@@ -820,6 +972,7 @@ function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTur
     currentTurn: null,
     onBetweenTurnMessage,
     onTaskLost: onTaskLost ?? null,
+    onHoldWarning: onHoldWarning ?? null,
     optionSnapshot: creationSnapshot(sdkOptions),
     // The allowlist the CLI was SPAWNED with — the set it will auto-approve from
     // for the whole life of the process, regardless of what `optionSnapshot`
@@ -829,6 +982,7 @@ function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTur
     appliedPermissions: null,
     turnContext: turnContext ?? null,
     idleTimer: null,
+    holdCheckTimer: null,
     dead: false,
     owedTerminators: 0,
   };
@@ -850,7 +1004,7 @@ export const claudeSessionPool = {
    * prompt is pushed — recreate when nothing is at stake, reconfigure in place
    * when background work must survive.
    */
-  async runTurn({ appSessionId, userMessage, sdkOptions, turnContext, onMessage, onBetweenTurnMessage, onTaskLost, createQuery }) {
+  async runTurn({ appSessionId, userMessage, sdkOptions, turnContext, onMessage, onBetweenTurnMessage, onTaskLost, onHoldWarning, createQuery }) {
     let session = live.get(appSessionId);
     if (session?.dead) {
       session = undefined;
@@ -958,11 +1112,12 @@ export const claudeSessionPool = {
       // turn's writer and this turn's allow/deny lists.
       session.onBetweenTurnMessage = onBetweenTurnMessage;
       session.onTaskLost = onTaskLost ?? null;
+      session.onHoldWarning = onHoldWarning ?? null;
       if (session.turnContext && turnContext) {
         Object.assign(session.turnContext, turnContext);
       }
     } else {
-      session = createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, onTaskLost, createQuery });
+      session = createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, onTaskLost, onHoldWarning, createQuery });
     }
 
     clearIdleTimer(session);

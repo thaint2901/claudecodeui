@@ -20,7 +20,7 @@ test('real chat message kinds remain transcript-bound', () => {
 });
 
 test('a background task only reads as a success when it explicitly says so', () => {
-  assert.deepEqual(resolveBackgroundTaskOutcome('completed'), { status: 'completed', outcome: 'completed' });
+  assert.deepEqual(resolveBackgroundTaskOutcome('completed'), { status: 'completed', outcome: 'completed', advisory: false });
   assert.equal(resolveBackgroundTaskOutcome('failed').status, 'failed');
   assert.equal(resolveBackgroundTaskOutcome('stopped').status, 'stopped');
 });
@@ -56,4 +56,36 @@ test('a background task frame with no summary at all still reads as a sentence',
     buildBackgroundTaskSummary('failed', undefined, ''),
     'Background task failed: Background task finished',
   );
+});
+
+test('a still-running advisory renders as an advisory, not as an outcome', () => {
+  const resolved = resolveBackgroundTaskOutcome('running');
+  assert.equal(resolved.status, 'running', 'the row must not borrow a settled outcome\'s status');
+  assert.equal(resolved.advisory, true, 'so the caller can keep completion signals off it');
+  assert.doesNotMatch(resolved.outcome, /completed|failed|stopped|did not report success/);
+});
+
+test('a settled outcome is never classified as an advisory', () => {
+  for (const status of ['completed', 'failed', 'stopped', undefined, 'timed_out']) {
+    assert.equal(
+      resolveBackgroundTaskOutcome(status).advisory,
+      false,
+      `status ${JSON.stringify(status)} is an outcome, not an advisory`,
+    );
+  }
+});
+
+test('the advisory row says it is still running, holding a process, and will not be stopped for you', () => {
+  const { outcome } = resolveBackgroundTaskOutcome('running');
+  const summary = buildBackgroundTaskSummary(
+    outcome,
+    'Echo t1-t10 with delays — 10 minutes so far, holding a Claude CLI process open for this session. '
+    + 'Nothing will stop it automatically.',
+    undefined,
+  );
+  assert.match(summary, /still running/, 'the command has not finished');
+  assert.match(summary, /holding a Claude CLI process open/, 'and that is what the hold costs');
+  assert.match(summary, /Nothing will stop it automatically/, 'and nobody is going to end it for the user');
+  assert.doesNotMatch(summary, /failed|did not report success/, 'an advisory is not a failure');
+  assert.doesNotMatch(summary, /undefined/);
 });

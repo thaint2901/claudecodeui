@@ -3,7 +3,22 @@ import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/we
 export interface BackgroundTaskEvent {
   sessionId: string;
   taskId: string;
-  status: 'completed' | 'failed' | 'stopped';
+  /**
+   * A settled outcome, or `'running'`.
+   *
+   * `'running'` is an ADVISORY, not an outcome: the task is still going, and the
+   * event exists to say that it is holding a CLI process open with nothing
+   * scheduled to end it. It gets its own value rather than borrowing a settled
+   * one because every consumer treats these as terminal — `'completed'` would
+   * claim work that has not finished, and `'failed'`/`'stopped'` would report a
+   * failure that has not happened, which is the mirror image of the bug this
+   * pool exists to fix.
+   *
+   * The frontend fails an UNRECOGNISED status toward "not a success"
+   * (`resolveBackgroundTaskOutcome`), so any value added here needs a matching
+   * branch there or it renders as a failure.
+   */
+  status: 'completed' | 'failed' | 'stopped' | 'running';
   /**
    * Where the task's output was written — omitted when there is no such file.
    *

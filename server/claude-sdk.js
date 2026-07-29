@@ -1104,6 +1104,26 @@ async function queryClaudeSDK(command, options = {}, ws) {
       });
     };
 
+    // Reached when a task has held the pooled CLI process open past the pool's
+    // warn threshold. Advisory only, by ruling: nothing here (or in the pool)
+    // ends the hold — an eviction rule would kill the user's running work, which
+    // is the bug this pool exists to fix. What was missing was any way to SEE it.
+    const reportHeldBackgroundTask = ({ taskId, description, heldForMs }) => {
+      const minutes = Math.max(1, Math.round(heldForMs / 60000));
+      emitBackgroundTaskEvent({
+        sessionId: poolSessionId,
+        taskId,
+        // Deliberately not one of the three settled outcomes: the task has not
+        // completed, failed, or been stopped.
+        status: 'running',
+        // No `outputFile`: a task that is still running has not written its
+        // result file, and `task_started` carries no path anyway (measured —
+        // `spikes/streaming-input-mode/task-classification.mjs`).
+        summary: `${description ?? 'A background task'} — ${minutes} minute${minutes === 1 ? '' : 's'} so far, `
+          + 'holding a Claude CLI process open for this session. Nothing will stop it automatically.',
+      });
+    };
+
     const turnResult = await claudeSessionPool.runTurn({
       appSessionId: poolSessionId,
       userMessage: await buildPromptPayload(command, options.images, options.cwd),
@@ -1112,6 +1132,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
       onMessage: handleSdkMessage,
       onBetweenTurnMessage: forwardBetweenTurnMessage,
       onTaskLost: reportLostBackgroundTask,
+      onHoldWarning: reportHeldBackgroundTask,
       createQuery: createQueryWithHookFallback,
     });
 

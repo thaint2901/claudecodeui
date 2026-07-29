@@ -212,13 +212,18 @@ export function useChatRealtimeHandlers({
         // same way regardless of outcome — the transcript message is what
         // actually distinguishes success from failure from a reaped task.
         case 'background_task': {
-          if (sid) {
-            // Fails toward "not a success" for an unrecognised status — see
-            // `resolveBackgroundTaskOutcome`.
-            const { status, outcome } = resolveBackgroundTaskOutcome(msg.status);
+          // Fails toward "not a success" for an unrecognised status, and flags
+          // the one status that is not an outcome at all — see
+          // `resolveBackgroundTaskOutcome`.
+          const { status, outcome, advisory } = resolveBackgroundTaskOutcome(msg.status);
 
+          if (sid) {
             sessionStore.appendRealtime(sid, {
-              id: `background_task_${(typeof msg.taskId === 'string' && msg.taskId) || Date.now()}`,
+              // An advisory and the SAME task's eventual settlement are two rows
+              // about one task id, so the advisory namespaces its own. Duplicate
+              // ids are not deduped within `realtimeMessages` — they would give
+              // React two rows under one key.
+              id: `background_task_${advisory ? 'holding_' : ''}${(typeof msg.taskId === 'string' && msg.taskId) || Date.now()}`,
               sessionId: sid,
               timestamp: (typeof msg.timestamp === 'string' && msg.timestamp) || new Date().toISOString(),
               provider,
@@ -228,8 +233,14 @@ export function useChatRealtimeHandlers({
             } as NormalizedMessage);
           }
 
-          showCompletionTitleIndicator();
-          void playNotificationSound();
+          // Both of these say "the thing you were waiting for is done" — the tab
+          // title indicator literally, the chime by being the same sound every
+          // completion makes. An advisory about work that is STILL RUNNING must
+          // not claim that; its transcript row is the whole notification.
+          if (!advisory) {
+            showCompletionTitleIndicator();
+            void playNotificationSound();
+          }
           return;
         }
 

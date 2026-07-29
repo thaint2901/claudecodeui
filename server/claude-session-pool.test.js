@@ -2001,6 +2001,7 @@ function captureConsoleWarnings(t) {
   t.mock.method(console, 'warn', (...args) => { calls.push(args); });
   return {
     unappliable: () => calls.filter((args) => String(args[0]).includes('cannot take effect')),
+    held: () => calls.filter((args) => String(args[0]).includes('still holding')),
     all: calls,
   };
 }
@@ -2225,4 +2226,289 @@ test('a session that is NOT forked still recreates when a fork is requested', as
   assert.equal(invocations[0].closed, true);
 
   claudeSessionPool.closeSession('fork-request');
+});
+
+/* ------------------------------------------------------------------------- */
+/*  Making a long-held process visible (report-only — never evict)            */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * A fake process that starts `tasks`, finishes its turn, and then stays alive
+ * exactly the way a genuinely held one does: its generator parks on the input
+ * stream waiting for a prompt that never comes, and nothing ever settles the
+ * tasks. That is the wedged / killed-out-of-band / mis-tracked shape the hold
+ * check exists to notice, and before it existed nothing in the process ever
+ * reconsidered the hold again.
+ *
+ * `settleSignal`, when given, lets a test decide WHEN the tasks report back:
+ * the generator waits on it after the turn's `result` and then yields whatever
+ * notifications the test resolved it with.
+ */
+function createHoldingQuery(tasks, { settleSignal = null } = {}) {
+  const state = { closed: false, invocations: 0 };
+
+  const factory = ({ prompt }) => {
+    state.invocations += 1;
+    const generator = (async function* run() {
+      for await (const _userMessage of prompt) {
+        void _userMessage;
+        for (const task of tasks) {
+          yield { type: 'system', subtype: 'task_started', ...task };
+        }
+        yield { type: 'result', subtype: 'success' };
+        if (settleSignal) {
+          const notifications = await settleSignal.promise;
+          for (const notification of notifications) {
+            yield { type: 'system', subtype: 'task_notification', ...notification };
+          }
+        }
+      }
+    })();
+    generator.interrupt = async () => {};
+    generator.close = () => { state.closed = true; };
+    return generator;
+  };
+
+  return { factory, state };
+}
+
+/**
+ * Advances mocked time one hold-check interval at a time.
+ *
+ * NOT the same as one `tick(n * 60000)`: node's MockTimers moves the mocked
+ * clock to the END of the tick before running the timers that came due inside
+ * it, so a single big tick makes every fire read the same final `Date.now()`.
+ * Stepping keeps each check's view of elapsed time honest, which is the whole
+ * quantity under test here.
+ */
+function tickHoldChecks(t, intervals) {
+  for (let i = 0; i < intervals; i += 1) {
+    t.mock.timers.tick(60000);
+  }
+}
+
+test('a task holding the process past the warn threshold is reported once — not once per check', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const warnings = captureConsoleWarnings(t);
+
+  const { factory, state } = createHoldingQuery([
+    { task_id: 'held-1', description: 'Echo t1-t10 with delays' },
+  ]);
+
+  const advisories = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 'held-one',
+    userMessage: userMessage('start a background shell'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onHoldWarning: (event) => advisories.push(event),
+    createQuery: factory,
+  });
+
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('held-one'), ['held-1']);
+
+  // Nine checks: the hold is real, but a normal long build is not news.
+  tickHoldChecks(t, 9);
+  assert.equal(warnings.held().length, 0, 'nine minutes of holding must stay quiet');
+  assert.deepEqual(advisories, [], 'and must not put an advisory in the transcript either');
+
+  tickHoldChecks(t, 1);
+  assert.equal(warnings.held().length, 1, 'the operator is told once the hold passes ten minutes');
+  assert.equal(warnings.held()[0][1].appSessionId, 'held-one');
+  assert.equal(warnings.held()[0][1].heldTaskCount, 1);
+  assert.equal(warnings.held()[0][1].oldestHeldForMs, 600000);
+  assert.deepEqual(
+    advisories,
+    [{ taskId: 'held-1', description: 'Echo t1-t10 with delays', heldForMs: 600000 }],
+    'and the user gets exactly one advisory naming the task and how long it has run',
+  );
+
+  // Once per task, not once per check: a line that repeats every minute is
+  // noise, and noise is how the previous silent failure stayed hidden.
+  tickHoldChecks(t, 2);
+  assert.equal(warnings.held().length, 1, 'a second and third check must add nothing');
+  assert.equal(advisories.length, 1);
+
+  // Report-only. This is the load-bearing assertion of the whole task: the
+  // check may never end the hold it is describing.
+  assert.equal(state.closed, false, 'the check must never close the process');
+  assert.equal(state.invocations, 1, 'and must never recreate it');
+  assert.equal(claudeSessionPool.hasLiveSession('held-one'), true);
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('held-one'), ['held-1'], 'the task stays tracked');
+
+  claudeSessionPool.closeSession('held-one');
+  t.mock.timers.reset();
+});
+
+test('two tasks held past the threshold each get their own advisory, named', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const warnings = captureConsoleWarnings(t);
+
+  const { factory } = createHoldingQuery([
+    { task_id: 'held-a', description: 'Echo t1-t10 with delays' },
+    { task_id: 'held-b', description: 'Tail the build log' },
+  ]);
+
+  const advisories = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 'held-two',
+    userMessage: userMessage('start two background shells'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onHoldWarning: (event) => advisories.push(event),
+    createQuery: factory,
+  });
+
+  tickHoldChecks(t, 10);
+
+  assert.equal(warnings.held().length, 1, 'one operator line for the session, not one per task');
+  const logged = warnings.held()[0][1];
+  assert.equal(logged.heldTaskCount, 2);
+  assert.deepEqual(
+    logged.tasks.map((task) => task.description),
+    ['Echo t1-t10 with delays', 'Tail the build log'],
+    'the operator must be able to see WHICH commands are holding the process',
+  );
+  assert.deepEqual(advisories, [
+    { taskId: 'held-a', description: 'Echo t1-t10 with delays', heldForMs: 600000 },
+    { taskId: 'held-b', description: 'Tail the build log', heldForMs: 600000 },
+  ], 'each held task gets its own row, naming itself');
+
+  claudeSessionPool.closeSession('held-two');
+  t.mock.timers.reset();
+});
+
+test('a task that settles before the threshold is never reported as a long hold', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const warnings = captureConsoleWarnings(t);
+
+  const settle = createDeferred();
+  const { factory } = createHoldingQuery(
+    [{ task_id: 'quick-1', description: 'Short shell' }],
+    { settleSignal: settle },
+  );
+
+  const advisories = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 'held-quick',
+    userMessage: userMessage('start something short'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onHoldWarning: (event) => advisories.push(event),
+    createQuery: factory,
+  });
+
+  tickHoldChecks(t, 5);
+  settle.resolve([{ task_id: 'quick-1', status: 'completed', output_file: '/tmp/quick-1.output', summary: 'done' }]);
+  await waitFor(() => claudeSessionPool.getLiveTaskIds('held-quick').length === 0, {
+    message: 'the notification should clear the task',
+  });
+
+  // Half an hour later: the hold is over, so there is nothing to report — and
+  // the check that would have reported it must no longer exist.
+  tickHoldChecks(t, 30);
+  assert.equal(warnings.held().length, 0, 'a task that finished in five minutes is not a stuck hold');
+  assert.deepEqual(advisories, []);
+
+  t.mock.timers.reset();
+});
+
+test('an ambient skip_transcript task is named in the operator log but gets no advisory row', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const warnings = captureConsoleWarnings(t);
+
+  const { factory } = createHoldingQuery([
+    { task_id: 'ambient-1', description: 'Ambient housekeeping', skip_transcript: true },
+  ]);
+
+  const advisories = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 'held-ambient',
+    userMessage: userMessage('do something that spawns housekeeping'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onHoldWarning: (event) => advisories.push(event),
+    createQuery: factory,
+  });
+
+  tickHoldChecks(t, 10);
+
+  // Same rule the lost-task report follows: the operator needs to know what is
+  // holding a ~320 MB subprocess open, but the user never asked for this task
+  // and cannot act on it, so it stays out of the conversation.
+  assert.equal(warnings.held().length, 1);
+  assert.equal(warnings.held()[0][1].heldTaskCount, 1);
+  assert.deepEqual(advisories, [], 'ambient housekeeping must not appear in the transcript');
+
+  claudeSessionPool.closeSession('held-ambient');
+  t.mock.timers.reset();
+});
+
+test('the hold check dies with its session — a dead process produces no further reports', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const warnings = captureConsoleWarnings(t);
+  captureConsoleErrors(t);
+
+  const advisories = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 'held-dead',
+    userMessage: userMessage('start a background shell, then crash'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onHoldWarning: (event) => advisories.push(event),
+    onTaskLost: () => {},
+    createQuery: createDyingQuery({ tasks: [{ task_id: 'doomed-1', description: 'Echo t1-t10 with delays' }] }),
+  });
+
+  await waitFor(() => !claudeSessionPool.hasLiveSession('held-dead'), {
+    message: 'the session should be dead once its generator threw',
+  });
+
+  // `drain` deliberately leaves `liveTaskIds` populated on a dead session, so a
+  // leaked interval would happily keep "reporting" a hold on a process that no
+  // longer exists — and would call back into a session nobody is watching.
+  tickHoldChecks(t, 30);
+  assert.equal(warnings.held().length, 0, 'a dead process is not holding anything');
+  assert.deepEqual(advisories, [], 'and its tasks were already reported lost, not as still held');
+
+  t.mock.timers.reset();
+});
+
+test('a session with no background task never arms the hold check at all', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const warnings = captureConsoleWarnings(t);
+
+  const { factory, state } = createFakeQuery([
+    [{ type: 'assistant', text: 'nothing backgrounded here' }, { type: 'result', subtype: 'success' }],
+  ]);
+
+  const advisories = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 'held-none',
+    userMessage: userMessage('hello'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onHoldWarning: (event) => advisories.push(event),
+    createQuery: factory,
+  });
+
+  await flushMicrotasks();
+  assert.equal(state.closed, true, 'no background work means the pre-pool behaviour: close at turn end');
+  tickHoldChecks(t, 30);
+  assert.equal(warnings.held().length, 0);
+  assert.deepEqual(advisories, [], 'a session that never held anything has nothing to be warned about');
+
+  t.mock.timers.reset();
 });

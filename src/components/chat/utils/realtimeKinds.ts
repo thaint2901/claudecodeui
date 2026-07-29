@@ -21,30 +21,43 @@ export function isNonTranscriptKind(kind: string): boolean {
 
 /**
  * Resolves a `background_task` frame's `status` into the transcript's own
- * status + human outcome phrase.
+ * status + human outcome phrase, and says whether the frame is an ADVISORY
+ * about work still in progress rather than a settled outcome.
  *
  * Fails toward "not a success" on purpose. The previous coercion mapped
  * anything that was not exactly `failed`/`stopped` onto `completed`, so a
  * producer that renamed an outcome — or omitted `status` altogether — would
  * render a failure as a green tick the user then trusts. An unrecognised status
  * is not evidence of success; it is evidence of not knowing.
+ *
+ * `advisory` exists because that same fail-closed rule is wrong for one frame
+ * the backend now sends: a task still holding a CLI process open has neither
+ * succeeded nor failed, and rendering it as either would misreport running work.
+ * Callers use the flag to keep completion signals (tab indicator, chime) off it
+ * and to give its row an id that cannot collide with the same task's eventual
+ * settlement.
  */
 export function resolveBackgroundTaskOutcome(status: unknown): {
-  status: 'completed' | 'failed' | 'stopped';
+  status: 'completed' | 'failed' | 'stopped' | 'running';
   outcome: string;
+  advisory: boolean;
 } {
   if (status === 'completed') {
-    return { status: 'completed', outcome: 'completed' };
+    return { status: 'completed', outcome: 'completed', advisory: false };
   }
   if (status === 'stopped') {
-    return { status: 'stopped', outcome: 'was stopped (likely reaped under memory pressure)' };
+    return { status: 'stopped', outcome: 'was stopped (likely reaped under memory pressure)', advisory: false };
   }
   if (status === 'failed') {
-    return { status: 'failed', outcome: 'failed' };
+    return { status: 'failed', outcome: 'failed', advisory: false };
+  }
+  if (status === 'running') {
+    return { status: 'running', outcome: 'still running', advisory: true };
   }
   return {
     status: 'failed',
     outcome: `did not report success (status: ${JSON.stringify(status ?? null)})`,
+    advisory: false,
   };
 }
 
