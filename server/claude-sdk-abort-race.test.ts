@@ -36,6 +36,8 @@ function createDeferred<T = void>() {
 const state = { closed: false, interruptCalls: 0 };
 const releaseTaskStarted = createDeferred();
 const releaseTerminator = createDeferred();
+const releaseResendTerminator = createDeferred();
+const releaseResendTurnTwo = createDeferred();
 
 type Frame = Record<string, unknown>;
 
@@ -82,7 +84,7 @@ process.env.DATABASE_PATH = path.join(os.tmpdir(), `claude-sdk-abort-race-${proc
 const { initializeDatabase } = await import('@/modules/database/index.js');
 initializeDatabase();
 
-const { queryClaudeSDK, abortClaudeSDKSession } = await import('./claude-sdk.js');
+const { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive } = await import('./claude-sdk.js');
 const { claudeSessionPool } = await import('./claude-session-pool.js');
 
 function createFakeWs() {
@@ -228,4 +230,93 @@ test('abort interrupts the turn but leaves it in flight — its own terminator s
   assert.deepEqual(ws.sent.filter((m) => m.kind === 'complete'), []);
 
   claudeSessionPool.closeSession('abort-settle-app-1');
+});
+
+/**
+ * Fix-round-1 finding 1, a regression this task's own A4 wait introduced.
+ *
+ * `activeSessions` is keyed by the PROVIDER-native id and `addSession`
+ * overwrites, so both runs of a Stop-then-resend share one key. Because the
+ * aborted turn now keeps the slot, run 2 registers its abort handle and then
+ * parks inside `runTurn` — and run 1's completion path, which reaches
+ * `removeSession(capturedSessionId)` only after that, used to delete the entry
+ * unconditionally. It was deleting run 2's handle. The user's re-sent turn was
+ * then unstoppable: `abortClaudeSDKSession` found nothing, returned false, and
+ * the UI reported "stopped" while the CLI ran the turn to completion.
+ *
+ * Reachable by construction, not by luck: the client's queued-draft flush fires
+ * exactly on `isLoading` -> false, which `handleChatAbort` triggers as soon as
+ * the abort returns — i.e. inside the window A4 exists to serve.
+ */
+test('a run finishing after a Stop-then-resend must not deregister the re-sent run\'s abort handle', async () => {
+  claudeSessionPool._resetForTests();
+  state.closed = false;
+  state.interruptCalls = 0;
+  const providerId = 'resend-provider-1';
+  const appSessionId = 'resend-app-1';
+
+  // One script closure for the pooled process, branching per turn: the live
+  // background task keeps the process alive, so run 2 reuses it.
+  frameScripts.push((() => {
+    let turn = 0;
+    return async function* script() {
+      turn += 1;
+      if (turn === 1) {
+        yield { type: 'system', subtype: 'init', session_id: providerId, slash_commands: [] };
+        yield { type: 'system', subtype: 'task_started', task_id: 'resend-task' };
+        await releaseResendTerminator.promise;
+        yield { type: 'result', subtype: 'error_during_execution' };
+      } else {
+        yield { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'the re-sent answer' }] } };
+        await releaseResendTurnTwo.promise;
+        yield { type: 'result', subtype: 'success' };
+      }
+    };
+  })());
+
+  const wsOne = createFakeWs();
+  let runOneFinished = false;
+  const runOne = queryClaudeSDK(
+    'the first prompt',
+    { appSessionId, cwd: os.tmpdir(), images: [], permissionMode: 'bypassPermissions' },
+    wsOne,
+  ).then(() => { runOneFinished = true; });
+
+  await waitFor(() => claudeSessionPool.getLiveTaskIds(appSessionId).length > 0);
+
+  // Stop. Abort deregisters its own handle (so a second Stop is a no-op) and
+  // leaves the turn in flight, holding the slot.
+  assert.equal(await abortClaudeSDKSession(providerId), true);
+  assert.equal(Boolean(isClaudeSDKSessionActive(providerId)), false);
+
+  // The queued draft flushes. Run 2 registers its handle under the same
+  // provider id, then parks on the aborted turn's settlement.
+  const wsTwo = createFakeWs();
+  const runTwo = queryClaudeSDK(
+    'the re-sent prompt',
+    { appSessionId, sessionId: providerId, cwd: os.tmpdir(), images: [], permissionMode: 'bypassPermissions' },
+    wsTwo,
+  );
+  await waitFor(() => Boolean(isClaudeSDKSessionActive(providerId)));
+
+  // Turn 1 terminates: run 2 takes the slot and starts streaming, and run 1
+  // only now reaches its own cleanup.
+  releaseResendTerminator.resolve();
+  await waitFor(() => runOneFinished && wsTwo.sent.some((m) => m.kind === 'text'));
+
+  assert.equal(
+    Boolean(isClaudeSDKSessionActive(providerId)),
+    true,
+    'run 1\'s cleanup must not delete an entry that now belongs to run 2',
+  );
+  assert.equal(
+    await abortClaudeSDKSession(providerId),
+    true,
+    'the re-sent turn must still be stoppable — otherwise the UI says stopped while the CLI keeps going',
+  );
+
+  releaseResendTurnTwo.resolve();
+  await runOne;
+  await runTwo;
+  claudeSessionPool.closeSession(appSessionId);
 });

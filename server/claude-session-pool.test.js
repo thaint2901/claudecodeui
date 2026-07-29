@@ -1382,6 +1382,188 @@ test('a turn sent while an aborted turn is still settling waits for it instead o
   claudeSessionPool.closeSession('stop-then-resend');
 });
 
+/**
+ * Fix-round-1 finding 2. `interruptTurn` read `promptSent` AFTER awaiting
+ * `interrupt()`, so it could not tell "the interrupt applied to this turn's
+ * prompt" from "the interrupt reached the CLI before this prompt existed". A
+ * Stop pressed while the next turn is merely RESERVED (parked in
+ * `applyLiveOptionChanges`) therefore marked a turn the CLI never interrupted:
+ * the user's fresh prompt ran to completion with every frame suppressed, and
+ * the abort fallback was armed against a live turn — able to vacate the slot
+ * mid-emission, which is the very state this whole task exists to prevent.
+ */
+test('a Stop landing while the next turn is only RESERVED is an honest no-op', async () => {
+  claudeSessionPool._resetForTests();
+  const reconcileGate = createDeferred();
+  const promptPushed = createDeferred();
+  let turns = 0;
+  let interruptCalls = 0;
+
+  const factory = ({ prompt }) => {
+    const generator = (async function* run() {
+      for await (const _message of prompt) {
+        turns += 1;
+        if (turns === 1) {
+          yield { type: 'system', subtype: 'task_started', task_id: 'survivor' };
+          yield { type: 'result', subtype: 'success' };
+        } else {
+          promptPushed.resolve();
+          yield { type: 'assistant', text: 'answer to the fresh prompt' };
+          yield { type: 'result', subtype: 'success' };
+        }
+      }
+    })();
+    generator.close = () => {};
+    // Acked only once turn 2's prompt is already in the process — the ordering
+    // that makes a post-await `promptSent` read report the wrong turn.
+    generator.interrupt = async () => {
+      interruptCalls += 1;
+      await promptPushed.promise;
+    };
+    generator.setPermissionMode = async () => { await reconcileGate.promise; };
+    return generator;
+  };
+
+  const common = {
+    appSessionId: 'reserved-stop',
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  // Turn 1 leaves a live background task, so turn 2 must reconcile in place —
+  // which is what creates the reserved window at all.
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    sdkOptions: { permissionMode: 'default' },
+    onMessage: () => {},
+  });
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('reserved-stop'), ['survivor']);
+
+  const frames = [];
+  const second = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('two'),
+    sdkOptions: { permissionMode: 'plan' },
+    onMessage: (m) => frames.push(m),
+  });
+
+  await waitFor(() => interruptCalls === 0 && turns === 1, { message: 'turn 2 must be reserved, not running' });
+  const interrupted = claudeSessionPool.interruptTurn('reserved-stop');
+  await flushMicrotasks();
+
+  // Now let reconciliation finish, so the prompt is pushed and only THEN does
+  // the CLI acknowledge the interrupt.
+  reconcileGate.resolve();
+  assert.equal(await interrupted, true);
+
+  const result = await second;
+  assert.equal(result.subtype, 'success');
+  assert.deepEqual(
+    frames.map((m) => m.text ?? m.subtype),
+    ['answer to the fresh prompt'],
+    'the CLI never interrupted this turn, so suppressing its frames would silently eat the user\'s prompt',
+  );
+  assert.equal(interruptCalls, 1);
+
+  claudeSessionPool.closeSession('reserved-stop');
+});
+
+/**
+ * Fix-round-1 finding 3. The `session.dead` branch dropped its own reference but
+ * left the DEAD session still holding this turn in its slot. The dying drain
+ * loop's teardown then rejects whatever it finds there — so if it unwinds after
+ * the turn has been re-pointed at a fresh process and started running on it,
+ * the caller is told "process ended before the turn completed" about a turn that
+ * is generating normally on a process that is very much alive.
+ */
+test('a session killed from outside mid-reconcile must not reject the turn that moved to its replacement', async () => {
+  claudeSessionPool._resetForTests();
+  const reconcileGate = createDeferred();
+  const teardownGate = createDeferred();
+  const replacementTurnGate = createDeferred();
+  const invocations = [];
+
+  const factory = ({ prompt }) => {
+    const record = { index: invocations.length, turns: 0, closed: false };
+    invocations.push(record);
+
+    const generator = (async function* run() {
+      try {
+        for await (const _message of prompt) {
+          record.turns += 1;
+          yield { type: 'system', subtype: 'task_started', task_id: `survivor-${record.index}-${record.turns}` };
+          if (record.index > 0 && record.turns === 1) {
+            // Keeps the re-pointed turn IN FLIGHT on the replacement process
+            // while the dead one finishes unwinding.
+            await replacementTurnGate.promise;
+          }
+          yield { type: 'result', subtype: 'success' };
+        }
+      } finally {
+        if (record.index === 0) {
+          // Holds the dying process's teardown open past the point where
+          // `runTurn` has re-pointed the turn at the replacement process.
+          await teardownGate.promise;
+        }
+      }
+    })();
+    generator.close = () => { record.closed = true; };
+    generator.setPermissionMode = async () => { await reconcileGate.promise; };
+    return generator;
+  };
+
+  const common = {
+    appSessionId: 'killed-mid-reconcile',
+    onBetweenTurnMessage: () => {},
+    onMessage: () => {},
+    createQuery: factory,
+  };
+
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    sdkOptions: { permissionMode: 'default' },
+  });
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('killed-mid-reconcile'), ['survivor-0-1']);
+
+  const second = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('two'),
+    sdkOptions: { permissionMode: 'plan' },
+  });
+
+  await waitFor(() => invocations.length === 1 && invocations[0].turns === 1, {
+    message: 'turn 2 must be parked inside setPermissionMode',
+  });
+
+  // Server shutdown (or any external close) lands in that window.
+  assert.equal(claudeSessionPool.closeAllSessions(), 1);
+  reconcileGate.resolve();
+
+  // The turn is now running on the replacement, and only now does the dead
+  // process finish unwinding. It must not reach into a turn it no longer owns.
+  await waitFor(() => invocations.length === 2 && invocations[1].turns === 1, {
+    message: 'the turn must have been re-pointed at a fresh process',
+  });
+  teardownGate.resolve();
+  await flushMicrotasks();
+  replacementTurnGate.resolve();
+
+  const result = await second;
+  assert.equal(result.subtype, 'success', 'the turn ran fine on the replacement: rejecting it is a lie');
+
+  // And the replacement's own slot is still usable afterwards.
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('three'),
+    sdkOptions: { permissionMode: 'plan' },
+  });
+  assert.equal(invocations.length, 2, 'the third turn reuses the replacement process');
+
+  claudeSessionPool.closeSession('killed-mid-reconcile');
+});
+
 test('genuine concurrency — a turn sent while a NON-aborted turn is in flight — still throws', async () => {
   claudeSessionPool._resetForTests();
   const { factory } = createFakeQuery([

@@ -19,12 +19,19 @@ const IDLE_GRACE_MS = 60000;
 /**
  * How long an aborted turn may keep the slot without a terminator.
  *
- * An interrupted turn normally DOES terminate itself — a `result` with
- * `subtype: 'error_during_execution'` arrives within milliseconds (measured:
- * `spikes/streaming-input-mode/interrupt-result.mjs`) — and that terminator is
- * what settles the turn. The one case that produces none is an interrupt that
- * FAILED, so this is a backstop, not the normal route: without it the caller's
- * promise would never settle and its run would sit in "processing" forever.
+ * The normal route is the terminator: an interrupted turn emits a `result` with
+ * `subtype: 'error_during_execution'` within milliseconds (measured:
+ * `spikes/streaming-input-mode/interrupt-result.mjs`), and that is what settles
+ * the turn. This covers the residual case of a CLI that ACKNOWLEDGED the
+ * interrupt and then emitted nothing — unmeasured, and unfalsifiable from in
+ * here, which is the point: a `result` that never comes cannot be waited on
+ * forever or the caller's promise never settles and the run sits in
+ * "processing" for the life of the process.
+ *
+ * Explicitly NOT the backstop for a FAILED interrupt, however tempting that
+ * reading is: a rejected `interrupt()` never marks the turn (see
+ * `interruptTurn`), so it never arms this timer — the stop did not happen, the
+ * run is still the user's run, and it terminates itself normally.
  */
 const ABORT_SETTLE_FALLBACK_MS = 5000;
 
@@ -420,7 +427,15 @@ function clearAbortSettleFallback(turn) {
   }
 }
 
-/** Takes `turn` out of the slot. Every exit route goes through here. */
+/**
+ * Takes `turn` out of the slot and wakes anything waiting on its settlement.
+ *
+ * Used by every route that settles a turn the process was actually running. The
+ * two routes that abandon a turn the process never ran — the recreate branch and
+ * the reconciliation `catch` in `runTurn` — null the slot directly instead:
+ * their turn is either about to run elsewhere or about to be thrown out of, so
+ * announcing it as "settled" would be a lie to any future waiter.
+ */
 function releaseTurn(session, turn) {
   session.currentTurn = null;
   clearAbortSettleFallback(turn);
@@ -440,8 +455,9 @@ function settleCurrentTurn(session, result) {
 }
 
 /**
- * Arms the backstop that settles an aborted turn when no terminator ever
- * arrives. Mirrors `armIdleTimerIfIdle`: arm-if-not-armed here, and the
+ * Arms the backstop that settles an aborted turn if the CLI acknowledged the
+ * interrupt and then never terminated the turn. Mirrors `armIdleTimerIfIdle`:
+ * arm-if-not-armed here, and the
  * callback re-checks at fire time that the turn it was armed for is still the
  * one in the slot rather than trusting the snapshot taken when it was armed.
  */
@@ -665,10 +681,15 @@ export const claudeSessionPool = {
           }
           await applyLiveOptionChanges(session, nextSnapshot);
           // Applying a control request yields the event loop; the process can die
-          // in that window. The drain loop's teardown releases a merely-reserved
-          // slot without rejecting it, so this turn is free to run on a fresh
-          // process below.
+          // in that window. Hand the slot back as well as dropping our own
+          // reference: this turn is about to run on a fresh process, and a dying
+          // session that still holds it will reject it from its drain loop's
+          // teardown — telling the caller "process ended before the turn
+          // completed" about a turn generating normally somewhere else.
           if (session.dead) {
+            if (session.currentTurn === turn) {
+              session.currentTurn = null;
+            }
             session = undefined;
           }
         }
@@ -756,8 +777,8 @@ export const claudeSessionPool = {
    * arrives after the slot has been vacated cannot be attributed back to the
    * turn it came from. Keeping the slot until that terminator arrives is the
    * only way to route it correctly; the aborted turn just stops forwarding to
-   * the UI in the meantime, and `armAbortSettleFallback` covers the one case
-   * that really produces no terminator.
+   * the UI in the meantime, and `armAbortSettleFallback` bounds the wait for a
+   * CLI that acks the interrupt and then emits nothing.
    */
   async interruptTurn(appSessionId) {
     const session = live.get(appSessionId);
@@ -765,6 +786,14 @@ export const claudeSessionPool = {
       return false;
     }
     const turn = session.currentTurn;
+    // Read BEFORE the await, not after. A turn that has only reserved the slot
+    // has no prompt in the process yet, so an interrupt cannot apply to it — and
+    // by the time the control request is acknowledged, that same turn may have
+    // been pushed and be running. Deciding from a post-await read would mark a
+    // turn the CLI never interrupted: the user's fresh prompt would run to
+    // completion with every frame suppressed, and the abort fallback would be
+    // armed against a live turn, free to vacate the slot mid-emission.
+    const wasInFlight = Boolean(turn?.promptSent);
 
     // A failed interrupt PROPAGATES on purpose. Swallowing it made the only
     // caller's own catch — the sole place that undoes its "this run was
@@ -775,7 +804,7 @@ export const claudeSessionPool = {
 
     // Marked only once the control request has landed: until then the stop has
     // not happened, and a run that is still the user's run must keep streaming.
-    if (turn && session.currentTurn === turn && turn.promptSent) {
+    if (wasInFlight && session.currentTurn === turn) {
       turn.aborted = true;
       armAbortSettleFallback(session, turn);
     }

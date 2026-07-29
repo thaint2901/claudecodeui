@@ -373,10 +373,11 @@ function sendSessionCreatedEvent(ws, newSessionId) {
  * @param {Object} queryInstance - SDK query instance, or (post pool-wiring) a
  *   handle exposing `interrupt()` for the pool-backed session
  * @param {Object} writer - WebSocket writer for reconnect support
- * @param {string|null} poolSessionId - The stable app-level id this run is
- *   keyed under in `claudeSessionPool`, so abort can address the pool by the
- *   same key `queryClaudeSDK` used for `runTurn` (never the provider-native
- *   `sessionId`, which forks change mid-stream).
+ * @param {string|null} poolSessionId - The stable app-level id this run is keyed
+ *   under in `claudeSessionPool` (never the provider-native `sessionId`, which
+ *   forks change mid-stream). Recorded for diagnostics only: abort used to read
+ *   it to settle the turn through the pool, and no longer does — it interrupts
+ *   and lets the CLI's own terminator settle the turn.
  */
 function addSession(sessionId, queryInstance, writer = null, poolSessionId = null) {
   activeSessions.set(sessionId, {
@@ -394,6 +395,26 @@ function addSession(sessionId, queryInstance, writer = null, poolSessionId = nul
  */
 function removeSession(sessionId) {
   activeSessions.delete(sessionId);
+}
+
+/**
+ * Removes a session entry only while `instance` is still the handle registered
+ * under `sessionId` — i.e. only the run that owns the entry may retire it.
+ *
+ * `activeSessions` is keyed by the PROVIDER-native id and `addSession`
+ * overwrites, so a Stop-then-resend puts two runs on one key: the aborted turn
+ * now keeps the pool's turn slot, so run 2 registers its own abort handle and
+ * then parks inside `runTurn` while run 1 is still unwinding. An unconditional
+ * delete on run 1's cleanup therefore deregistered RUN 2 — and the re-sent turn
+ * became unstoppable, with `abortClaudeSDKSession` reporting "not found" while
+ * the UI said stopped and the CLI ran the turn to completion.
+ * @param {string} sessionId - Provider-native session identifier.
+ * @param {Object} instance - The handle the calling run registered.
+ */
+function removeSessionIfOwnedBy(sessionId, instance) {
+  if (activeSessions.get(sessionId)?.instance === instance) {
+    activeSessions.delete(sessionId);
+  }
 }
 
 /**
@@ -938,9 +959,11 @@ async function queryClaudeSDK(command, options = {}, ws) {
       ws.send(createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget: resultTokenBudget, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
     }
 
-    // Clean up session on completion
+    // Clean up session on completion — but only OUR entry. A Stop-then-resend
+    // has already put the next run's handle on this same provider-native key by
+    // the time we get here; deleting it would leave that run unstoppable.
     if (capturedSessionId) {
-      removeSession(capturedSessionId);
+      removeSessionIfOwnedBy(capturedSessionId, poolSessionHandle);
     }
 
     // Send the terminal completion event — skipped for aborted runs, whose
@@ -961,9 +984,10 @@ async function queryClaudeSDK(command, options = {}, ws) {
   } catch (error) {
     console.error('SDK query error:', error);
 
-    // Clean up session on error
+    // Clean up session on error — same ownership test as the completion path:
+    // a later run may already hold this key.
     if (capturedSessionId) {
-      removeSession(capturedSessionId);
+      removeSessionIfOwnedBy(capturedSessionId, poolSessionHandle);
     }
 
     const wasAborted = capturedSessionId ? abortedSessionIds.delete(capturedSessionId) : false;
@@ -1026,9 +1050,11 @@ async function abortClaudeSDKSession(sessionId) {
     // no turn-correlation field, so a frame arriving after the turn slot has
     // been vacated cannot be attributed back to the turn it came from: the pool
     // keeps the slot, stops forwarding that turn's frames to the UI, and lets
-    // the real terminator settle it. `interruptTurn` arms its own timed
-    // fallback for the one case that produces no terminator (a FAILED
-    // interrupt), so the run cannot hang in "processing" either way.
+    // the real terminator settle it. `interruptTurn` arms its own timed fallback
+    // in case the CLI acks the interrupt and then emits nothing, so the run
+    // cannot hang in "processing" either way. (A FAILED interrupt is a
+    // different path: it rejects into the catch below, never marks the turn, and
+    // the run carries on to its own natural terminator.)
     //
     // Also deliberately not deciding here whether to close the pool session. A
     // `task_started` the CLI already sent (but the pool's drain loop has not
@@ -1043,8 +1069,10 @@ async function abortClaudeSDKSession(sessionId) {
     // Update session status
     session.status = 'aborted';
 
-    // Clean up session
-    removeSession(sessionId);
+    // Clean up session, so a second Stop is a no-op. Ownership-scoped for the
+    // same reason as the completion path: `interrupt()` is awaited above, and
+    // this key is shared by every run of this provider session.
+    removeSessionIfOwnedBy(sessionId, session.instance);
 
     return true;
   } catch (error) {
