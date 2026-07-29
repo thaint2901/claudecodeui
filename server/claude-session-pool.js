@@ -125,8 +125,42 @@ const CONSUMED_AT_CREATION_OPTION_FIELDS = ['forkSession', 'resumeSessionAt'];
  * process is no longer on the conversation the turn continues. Not an option
  * field: no option records it, because the drift happens mid-stream inside the
  * CLI (see `servesADifferentConversation`).
+ *
+ * The `reason:` prefix is not decoration. This value shares one flat namespace
+ * with the option field names in `pendingFreshProcessReasons`' output, and both
+ * are consumed by string membership (`FRESH_PROCESS_REQUIRED_REASONS.has`,
+ * `blocked.includes`). A bare `'conversation'` would silently MERGE with a future
+ * recreate-only option that happened to be named `conversation` — the drift
+ * message would then be emitted for a plain option change, and vice versa, with
+ * nothing anywhere to notice. No option field name can contain a colon, so the
+ * prefix makes the collision impossible rather than merely unlikely.
  */
-export const CONVERSATION_DRIFT_REASON = 'conversation';
+export const CONVERSATION_DRIFT_REASON = 'reason:conversation-drift';
+
+/**
+ * Stamped as `.code` on the error `runTurn` throws when a turn arrives while
+ * another is genuinely in flight on the same session.
+ *
+ * Exists so the caller can tell that refusal apart from a real failure without
+ * matching on the message text. It is a REFUSAL: nothing was started and nothing
+ * is broken, so `queryClaudeSDK` reports it the same way it reports a
+ * background-task-held session — a coded `protocol_error` plus the terminal
+ * `complete` — instead of letting the internal sentence below reach the user as
+ * an `error` frame.
+ *
+ * Narrow by design: a turn that arrives while an ABORTED one is still settling
+ * waits for it (see `runTurn`), so what is left here is two callers running at
+ * once on one session — in practice a REST `/api/agent` call landing on a session
+ * the websocket path is already running, since only the websocket path is
+ * serialised by `chatRunRegistry`.
+ */
+export const TURN_IN_FLIGHT_ERROR_CODE = 'SESSION_TURN_ALREADY_RUNNING';
+
+function turnInFlightError(appSessionId) {
+  const error = new Error(`Session "${appSessionId}" already has a turn in flight`);
+  error.code = TURN_IN_FLIGHT_ERROR_CODE;
+  return error;
+}
 
 /** @type {Map<string, LiveSession>} */
 const live = new Map();
@@ -604,10 +638,31 @@ function removeFromLiveIfCurrent(session) {
   }
 }
 
-function destroy(session) {
+/**
+ * The bookkeeping every route out of a live session's life owes, in one place:
+ * flag it dead, cancel both of its timers, and take it out of the live map if it
+ * is still the entry stored there.
+ *
+ * Shared by `destroy()` (we closed it) and `drain()`'s `finally` (it ended on its
+ * own, which never goes through `destroy`). Those two used to do the same steps
+ * independently, and the hold-check timer had already been added to only one of
+ * them once — a fifth step landing in one copy and not the other is the failure
+ * this collapses. What each caller keeps for itself is what makes it different:
+ * `destroy` also tears the process down, `drain` reads `dead` BEFORE calling this
+ * (that read is how it tells "we closed it" from "it died"), rejects its turn
+ * first so the caller's promise settles before anything reports, and reports lost
+ * tasks after — deliberately last, so nothing in reporting can leave a dead
+ * session in the live map.
+ */
+function markSessionDead(session) {
+  session.dead = true;
   clearIdleTimer(session);
   clearHoldCheckTimer(session);
-  session.dead = true;
+  removeFromLiveIfCurrent(session);
+}
+
+function destroy(session) {
+  markSessionDead(session);
   session.input.close();
   try {
     session.query.close?.();
@@ -617,7 +672,6 @@ function destroy(session) {
       error: error instanceof Error ? error.message : String(error),
     });
   }
-  removeFromLiveIfCurrent(session);
 }
 
 /**
@@ -1017,12 +1071,10 @@ async function drain(session) {
     // The process is gone. Reject any turn still waiting so the caller's
     // promise settles and its own safety net can complete the run.
     rejectCurrentTurn(session, new Error('Claude session process ended before the turn completed'));
-    session.dead = true;
-    clearIdleTimer(session);
-    // Cleared here as well as in `destroy`: this is the path a process that died
-    // on its OWN takes, and it never goes through `destroy`.
-    clearHoldCheckTimer(session);
-    removeFromLiveIfCurrent(session);
+    // Same four steps `destroy` performs, in the same order — including clearing
+    // the hold-check timer, because this is the path a process that died on its
+    // OWN takes and it never goes through `destroy`.
+    markSessionDead(session);
 
     // Last, deliberately: teardown correctness outranks reporting, so nothing
     // below can leave a dead session sitting in the live map. `liveTaskIds` is
@@ -1089,7 +1141,7 @@ export const claudeSessionPool = {
 
     if (session?.currentTurn) {
       if (!session.currentTurn.aborted) {
-        throw new Error(`Session "${appSessionId}" already has a turn in flight`);
+        throw turnInFlightError(appSessionId);
       }
       // An aborted turn keeps the slot until its terminator arrives (bounded by
       // ABORT_SETTLE_FALLBACK_MS), so a user who presses Stop and re-sends
@@ -1104,7 +1156,7 @@ export const claudeSessionPool = {
       if (session?.currentTurn) {
         // Someone else claimed the freed slot while we waited. That is genuine
         // concurrency, not a Stop-then-resend.
-        throw new Error(`Session "${appSessionId}" already has a turn in flight`);
+        throw turnInFlightError(appSessionId);
       }
     }
 

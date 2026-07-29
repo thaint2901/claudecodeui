@@ -21,7 +21,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 
 import { createProtocolErrorFrame, emitBackgroundTaskEvent } from '@/modules/websocket/index.js';
 
-import { claudeSessionPool, CONVERSATION_DRIFT_REASON } from './claude-session-pool.js';
+import { claudeSessionPool, CONVERSATION_DRIFT_REASON, TURN_IN_FLIGHT_ERROR_CODE } from './claude-session-pool.js';
 import { buildClaudeUserContent, normalizeImageDescriptors } from './shared/image-attachments.js';
 import { CLAUDE_FALLBACK_MODELS } from './modules/providers/list/claude/claude-models.provider.js';
 import { providerModelsService } from './modules/providers/services/provider-models.service.js';
@@ -1209,6 +1209,34 @@ async function queryClaudeSDK(command, options = {}, ws) {
     if (wasAborted) {
       // The abort already produced the terminal complete; a generator throw
       // caused by interrupt() is expected noise, not a user-facing error.
+      return;
+    }
+
+    // A genuine concurrency clash — another request is already running a turn on
+    // this session (the pool narrowed this to that case: a Stop-then-resend now
+    // WAITS for its predecessor instead of throwing). Reported exactly like
+    // `describeHeldProcessRefusal` above, and for the same reason: it is a
+    // refusal, not a failure — nothing was started, nothing is broken, and the
+    // pool's internal sentence (`Session "<id>" already has a turn in flight`)
+    // is not something to show a user. Reusing that shape rather than inventing a
+    // second one also keeps the frontend at one contract: `protocol_error` stops
+    // the spinner and writes one error row, then the terminal `complete` settles
+    // the run the websocket layer had already registered.
+    //
+    // Deliberately BEFORE the installed-CLI probe below: whether the binary is on
+    // PATH has nothing to do with this outcome, and that branch would happily
+    // tell a user with a working CLI that Claude Code is not installed. No
+    // `notifyRunFailed` either — same as the held-process refusal, and "run
+    // failed" would misdescribe a turn that never began.
+    if (error?.code === TURN_IN_FLIGHT_ERROR_CODE) {
+      const clashSessionId = capturedSessionId || sessionId || null;
+      ws.send(createProtocolErrorFrame(
+        TURN_IN_FLIGHT_ERROR_CODE,
+        'Another request is already running on this session, so this message was not started. '
+        + 'Wait for it to finish — or stop it — and send again.',
+        clashSessionId,
+      ));
+      ws.send(createCompleteMessage({ provider: 'claude', sessionId: clashSessionId, exitCode: 1 }));
       return;
     }
 

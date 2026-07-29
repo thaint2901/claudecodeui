@@ -1744,6 +1744,11 @@ function captureConsoleErrors(t) {
  * A fake process that starts `tasks`, ends its turn, optionally settles some of
  * those tasks, and then dies the way a crashed/OOM-killed CLI does: by throwing
  * out of its own generator with no turn in the slot.
+ *
+ * `deathMessage: null` makes it die the OTHER way instead — the generator simply
+ * RETURNS, with tasks still tracked. That is a CLI that exited 0 unexpectedly:
+ * `drain` gets no error to report, so the loss is real but the reason has to be
+ * stated rather than quoted.
  */
 function createDyingQuery({ tasks, settle = [], deathMessage = 'CLI process exited unexpectedly (simulated)' }) {
   return ({ prompt }) => {
@@ -1762,6 +1767,9 @@ function createDyingQuery({ tasks, settle = [], deathMessage = 'CLI process exit
             output_file: `/tmp/${taskId}.output`,
             summary: 'done',
           };
+        }
+        if (deathMessage === null) {
+          return;
         }
         throw new Error(deathMessage);
       }
@@ -1798,6 +1806,42 @@ test('a process dying between turns reports every still-tracked task as lost, wi
   ], 'each report must name the task it lost, so the row says WHICH task died');
   assert.equal(logged.deaths().length, 1, 'the operator gets exactly one death line, not one per task');
   assert.equal(claudeSessionPool.hasLiveSession('lost-between'), false);
+});
+
+test('a process whose stream just ENDS reports its tasks lost, naming the absence of an error as the reason', async (t) => {
+  claudeSessionPool._resetForTests();
+  const logged = captureConsoleErrors(t);
+
+  // The other half of `reportLostTasks`' reason ternary, and the only branch no
+  // fixture reached: every other `createDyingQuery` here throws. A CLI that exits
+  // 0 with a background shell still tracked leaves `drain` with `streamError ===
+  // null` — the loss is just as real, and the report must not say "undefined" or
+  // fall silent for want of an error object to quote.
+  const lost = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 'lost-silent-end',
+    userMessage: userMessage('start a background shell'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onTaskLost: (event) => lost.push(event),
+    createQuery: createDyingQuery({
+      tasks: [{ task_id: 'silent-1', description: 'Echo t1-t10 with delays' }],
+      deathMessage: null,
+    }),
+  });
+
+  await waitFor(() => lost.length === 1, {
+    message: 'a task must be reported lost whether or not the stream ended by throwing',
+  });
+  assert.deepEqual(lost, [{ taskId: 'silent-1', description: 'Echo t1-t10 with delays' }]);
+  assert.equal(logged.deaths().length, 1, 'the operator is told once, exactly as on the throwing path');
+  assert.equal(
+    logged.deaths()[0][1].error,
+    'the message stream ended without an error',
+    'the operator log must state why there is nothing to quote, not print an empty error',
+  );
+  assert.equal(claudeSessionPool.hasLiveSession('lost-silent-end'), false);
 });
 
 test('a process dying between turns with nothing tracked is still logged, and reports nothing', async (t) => {
