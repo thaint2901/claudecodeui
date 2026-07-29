@@ -4,7 +4,15 @@ export interface BackgroundTaskEvent {
   sessionId: string;
   taskId: string;
   status: 'completed' | 'failed' | 'stopped';
-  outputFile: string;
+  /**
+   * Where the task's output was written — omitted when there is no such file.
+   *
+   * Only `task_notification` carries a path; `task_started` does not (measured:
+   * `spikes/streaming-input-mode/task-classification.mjs`). So a task lost with
+   * a dead CLI process has no path to report, and never wrote one. Optional
+   * rather than an empty string: an empty path is still a claim about a file.
+   */
+  outputFile?: string;
   summary: string;
 }
 

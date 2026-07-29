@@ -47,3 +47,18 @@ export function resolveBackgroundTaskOutcome(status: unknown): {
     outcome: `did not report success (status: ${JSON.stringify(status ?? null)})`,
   };
 }
+
+/**
+ * Composes a `background_task` row's summary line.
+ *
+ * The output path is how the user retrieves the full output, so it is appended
+ * when there is one — and omitted entirely when there is not. A task lost to a
+ * CLI process that died never wrote an output file and the producer sends no
+ * `outputFile` for it, so rendering the field unconditionally would print
+ * `undefined` where a path belongs.
+ */
+export function buildBackgroundTaskSummary(outcome: string, summary: unknown, outputFile: unknown): string {
+  const summaryText = (typeof summary === 'string' && summary) || 'Background task finished';
+  const path = typeof outputFile === 'string' && outputFile ? ` — output: ${outputFile}` : '';
+  return `Background task ${outcome}: ${summaryText}${path}`;
+}

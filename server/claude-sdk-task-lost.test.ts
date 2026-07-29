@@ -1,0 +1,147 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+
+// Run with:
+//   npx tsx --test --experimental-test-module-mocks --tsconfig server/tsconfig.json \
+//     server/claude-sdk-task-lost.test.ts
+// (`mock.module` throws `TypeError: mock.module is not a function` without the
+// flag on Node 24+.)
+//
+// Final-review CRITICAL: a pooled CLI process that dies BETWEEN turns took every
+// background task it was running with it and told nobody. `claude-session-pool`'s
+// own tests prove the pool now calls `onTaskLost`, which is a different claim
+// from "the user is told": the transport lives on the other side of the pool's
+// deliberate ignorance of websockets, so a missing `onTaskLost:` line in
+// `queryClaudeSDK` would leave every one of those tests green and production
+// silent. This drives `queryClaudeSDK` for real (mocking only the SDK's
+// `query()`, which would otherwise spawn a CLI) and asserts on the frame that
+// actually reaches a connected client.
+
+const state = { closed: false };
+
+type Frame = Record<string, unknown>;
+
+const frameScripts: Array<() => AsyncGenerator<Frame>> = [];
+
+// `mock.module`'s `namedExports` replaces the whole module, so the real exports
+// must be spread through — other modules in the import graph use them.
+const realSdk = await import('@anthropic-ai/claude-agent-sdk');
+
+const { mock } = await import('node:test');
+
+mock.module('@anthropic-ai/claude-agent-sdk', {
+  namedExports: {
+    ...realSdk,
+    query: ({ prompt }: { prompt: AsyncIterable<unknown> }) => {
+      const script = frameScripts.shift();
+      const generator = (async function* run() {
+        for await (const _userMessage of prompt) {
+          if (!script) {
+            return;
+          }
+          yield* script();
+        }
+      })();
+      (generator as unknown as { interrupt: () => Promise<void> }).interrupt = async () => {};
+      (generator as unknown as { close: () => void }).close = () => {
+        state.closed = true;
+      };
+      return generator;
+    },
+  },
+});
+
+process.env.DATABASE_PATH = path.join(os.tmpdir(), `claude-sdk-task-lost-${process.pid}.db`);
+const { initializeDatabase } = await import('@/modules/database/index.js');
+initializeDatabase();
+
+const { connectedClients, WS_OPEN_STATE } = await import('@/modules/websocket/index.js');
+const { queryClaudeSDK } = await import('./claude-sdk.js');
+const { claudeSessionPool } = await import('./claude-session-pool.js');
+
+function createFakeWs() {
+  const sent: Array<Record<string, unknown>> = [];
+  return {
+    userId: null,
+    isWebSocketWriter: true,
+    send: (msg: Record<string, unknown>) => sent.push(msg),
+    sent,
+  };
+}
+
+async function waitFor(predicate: () => boolean, { maxTicks = 2000 } = {}): Promise<void> {
+  for (let tick = 0; tick < maxTicks; tick += 1) {
+    if (predicate()) {
+      return;
+    }
+    // Real fs I/O (loadMcpConfig, provider-model cache reads) needs actual
+    // event-loop turns, not just microtasks.
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail('condition did not become true in time');
+}
+
+test('a background task lost with the CLI process reaches the client as a failed event with no output path', async () => {
+  claudeSessionPool._resetForTests();
+  const ws = createFakeWs();
+
+  // `emitBackgroundTaskEvent` fans out to every connected client (a background
+  // task outlives the turn that started it, so it has no run writer to ride on).
+  const frames: Frame[] = [];
+  const client = {
+    readyState: WS_OPEN_STATE,
+    send: (data: string) => { frames.push(JSON.parse(data) as Frame); },
+  };
+  connectedClients.add(client);
+
+  frameScripts.push(async function* script() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-lost-provider-1', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'task-lost-1',
+      description: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+    // The turn is over and the process is still held open for the task above —
+    // then it dies. This is the window the whole fix is about.
+    throw new Error('CLI process exited unexpectedly (simulated OOM kill)');
+  });
+
+  try {
+    await queryClaudeSDK(
+      'start something in the background',
+      { appSessionId: 'task-lost-app-1', cwd: os.tmpdir(), images: [], permissionMode: 'bypassPermissions' },
+      ws,
+    );
+
+    await waitFor(() => frames.some((frame) => frame.kind === 'background_task'));
+    const frame = frames.find((f) => f.kind === 'background_task') as Frame;
+
+    assert.equal(frame.sessionId, 'task-lost-app-1', 'the app session id, never the provider-native one');
+    assert.equal(frame.taskId, 'task-lost-1');
+    assert.equal(frame.status, 'failed', 'a task killed with its process did not complete');
+    assert.match(
+      String(frame.summary),
+      /Echo t1-t10 with delays/,
+      'the row must say WHICH task was lost',
+    );
+    assert.match(
+      String(frame.summary),
+      /ended before this task reported a result/,
+      'and plainly why, rather than reading as a normal completion',
+    );
+    // Only `task_notification` carries an output path; `task_started` does not,
+    // and a task lost this way never wrote one.
+    assert.equal(
+      Object.hasOwn(frame, 'outputFile'),
+      false,
+      'no invented path, and no empty string pretending to be one',
+    );
+  } finally {
+    connectedClients.delete(client);
+    claudeSessionPool._resetForTests();
+  }
+});

@@ -940,6 +940,24 @@ async function queryClaudeSDK(command, options = {}, ws) {
       });
     };
 
+    // Reached when the pooled CLI process dies with background work still
+    // tracked. That death is otherwise unobservable between turns — the pool has
+    // no turn to reject there — and the user has already been told they will be
+    // notified when the task completes, so silence means waiting forever.
+    const reportLostBackgroundTask = ({ taskId, description }) => {
+      emitBackgroundTaskEvent({
+        sessionId: poolSessionId,
+        taskId,
+        status: 'failed',
+        // No `outputFile` on purpose: `task_started` carries none (measured —
+        // `spikes/streaming-input-mode/task-classification.mjs`), and a task that
+        // died with its process never wrote one. Sending an empty string would
+        // point the user at a file that does not exist.
+        summary: `${description ?? 'A background task'} — the Claude CLI process ended before this task `
+          + 'reported a result, so its output was never written.',
+      });
+    };
+
     const turnResult = await claudeSessionPool.runTurn({
       appSessionId: poolSessionId,
       userMessage: await buildPromptPayload(command, options.images, options.cwd),
@@ -947,6 +965,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
       turnContext,
       onMessage: handleSdkMessage,
       onBetweenTurnMessage: forwardBetweenTurnMessage,
+      onTaskLost: reportLostBackgroundTask,
       createQuery: createQueryWithHookFallback,
     });
 

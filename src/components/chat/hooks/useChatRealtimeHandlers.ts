@@ -8,7 +8,7 @@ import type { MarkSessionIdle, MarkSessionProcessing } from '../../../hooks/useS
 import type { PendingPermissionRequest } from '../types/types';
 import type { ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
-import { isNonTranscriptKind, resolveBackgroundTaskOutcome } from '../utils/realtimeKinds';
+import { buildBackgroundTaskSummary, isNonTranscriptKind, resolveBackgroundTaskOutcome } from '../utils/realtimeKinds';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -205,8 +205,9 @@ export function useChatRealtimeHandlers({
         // compact left-aligned notification row (already used for the /fork
         // background flow) — its `status` field drives a completed/failed dot
         // color, and the summary text spells out which of the three outcomes
-        // this was plus the output file path, since that path is how the
-        // user retrieves the full output. `showCompletionTitleIndicator`/
+        // this was plus the output file path when there is one, since that path
+        // is how the user retrieves the full output (a task lost with a dead CLI
+        // process has none). `showCompletionTitleIndicator`/
         // `playNotificationSound` take no status parameter, so they fire the
         // same way regardless of outcome — the transcript message is what
         // actually distinguishes success from failure from a reaped task.
@@ -215,8 +216,6 @@ export function useChatRealtimeHandlers({
             // Fails toward "not a success" for an unrecognised status — see
             // `resolveBackgroundTaskOutcome`.
             const { status, outcome } = resolveBackgroundTaskOutcome(msg.status);
-            const outputFile = typeof msg.outputFile === 'string' ? msg.outputFile : undefined;
-            const summaryText = (typeof msg.summary === 'string' && msg.summary) || 'Background task finished';
 
             sessionStore.appendRealtime(sid, {
               id: `background_task_${(typeof msg.taskId === 'string' && msg.taskId) || Date.now()}`,
@@ -225,7 +224,7 @@ export function useChatRealtimeHandlers({
               provider,
               kind: 'task_notification',
               status,
-              summary: `Background task ${outcome}: ${summaryText}${outputFile ? ` — output: ${outputFile}` : ''}`,
+              summary: buildBackgroundTaskSummary(outcome, msg.summary, msg.outputFile),
             } as NormalizedMessage);
           }
 

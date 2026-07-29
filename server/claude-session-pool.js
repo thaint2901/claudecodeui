@@ -98,9 +98,16 @@ const live = new Map();
  * @property {string} appSessionId
  * @property {object} query
  * @property {ReturnType<typeof createInputStream>} input
- * @property {Set<string>} liveTaskIds
+ * @property {Map<string, LiveTask>} liveTaskIds - Keyed by task id. A Map rather
+ *   than a Set because a task lost with the process has to be REPORTED, and the
+ *   only human label for it (`task_started.description`) arrives on the frame
+ *   that starts it and nowhere else. A parallel map beside a Set would be two
+ *   structures to keep in sync, which is where divergence bugs live.
  * @property {Turn | null} currentTurn
  * @property {Function} onBetweenTurnMessage
+ * @property {Function | null} onTaskLost - Told about each task that died with
+ *   the process. Refreshed per turn like `onBetweenTurnMessage`, so the report
+ *   reaches whoever is currently watching this session.
  * @property {object} optionSnapshot - Normalized `RELEVANT_OPTION_FIELDS` as
  *   currently in force on this process (creation values, amended by whatever
  *   control requests have since been applied).
@@ -118,6 +125,17 @@ const live = new Map();
  *   flag: a second fallback can fire while a debt is outstanding (turn 2 aborted
  *   too), and a flag would silently drop one debt, letting exactly the frame it
  *   was meant to swallow through.
+ */
+
+/**
+ * @typedef {object} LiveTask
+ * @property {string | null} description - The CLI's own short human label for
+ *   the task (measured: `"Echo t1-t10 with delays"` —
+ *   `spikes/streaming-input-mode/task-classification.mjs`). Null when the frame
+ *   carried none, so a report can say "a background task" instead of "null".
+ * @property {boolean} skipTranscript - The task is ambient housekeeping. Still
+ *   tracked (closing the process would kill it too) but deliberately kept out of
+ *   the transcript, exactly as its `task_notification` already is.
  */
 
 /** Order-insensitive for lists, so a reshuffled allowlist is not a "change". */
@@ -368,7 +386,13 @@ function trackTask(session, message) {
     return;
   }
   if (message.subtype === 'task_started' && typeof message.task_id === 'string') {
-    session.liveTaskIds.add(message.task_id);
+    // `description` is the only label this frame carries that a human can read:
+    // `task_started` has no `output_file` (only `task_notification` does), so a
+    // task lost with the process can be named but never located.
+    session.liveTaskIds.set(message.task_id, {
+      description: typeof message.description === 'string' && message.description ? message.description : null,
+      skipTranscript: message.skip_transcript === true,
+    });
     return;
   }
   if (message.subtype === 'task_notification' && typeof message.task_id === 'string') {
@@ -600,24 +624,89 @@ function routeMessage(session, message) {
   armIdleTimerIfIdle(session);
 }
 
+/**
+ * Says out loud that the process died and takes its tracked tasks down with it.
+ *
+ * This used to be entirely silent, which recreated the bug this pool exists to
+ * fix through a new mechanism: between turns `currentTurn` is `null`, so the only
+ * thing `drain`'s error path did — reject the turn — dropped the error on the
+ * floor. No log line for the operator, and no frame for the user, who had been
+ * told they would be notified when the task completed and so waited forever.
+ *
+ * A `skipTranscript` task is counted in the log but not reported: it is ambient
+ * housekeeping ccui deliberately keeps out of the conversation (the same rule
+ * `forwardBetweenTurnMessage` applies to its notifications), and surfacing it
+ * only on the failure path would put a row the user never asked for — and cannot
+ * act on — into the transcript.
+ */
+function reportLostTasks(session, error) {
+  const lost = [...session.liveTaskIds.entries()];
+
+  console.error('[ClaudeSessionPool] the Claude CLI process ended unexpectedly; any background task it was still running is lost', {
+    appSessionId: session.appSessionId,
+    lostTaskCount: lost.length,
+    // Logged unconditionally, including with zero tasks and with a turn in
+    // flight: the turn's own rejection tells one caller, and nothing at all
+    // tells the operator that a ~320 MB subprocess just disappeared.
+    error: error ? error.message : 'the message stream ended without an error',
+  });
+
+  for (const [taskId, task] of lost) {
+    if (task.skipTranscript) {
+      continue;
+    }
+    try {
+      session.onTaskLost?.({ taskId, description: task.description });
+    } catch (reportError) {
+      // One sink throwing must not cost the remaining tasks their report. The
+      // caller's callback reaches a websocket fan-out, so it can fail for
+      // reasons that have nothing to do with the next task in this list.
+      console.error('[ClaudeSessionPool] failed to report a lost background task', {
+        appSessionId: session.appSessionId,
+        taskId,
+        error: reportError instanceof Error ? reportError.message : String(reportError),
+      });
+    }
+  }
+}
+
 async function drain(session) {
+  /** The throw that ended the stream, if it ended by throwing. */
+  let streamError = null;
   try {
     for await (const message of session.query) {
       routeMessage(session, message);
     }
   } catch (error) {
-    rejectCurrentTurn(session, error instanceof Error ? error : new Error(String(error)));
+    streamError = error instanceof Error ? error : new Error(String(error));
+    rejectCurrentTurn(session, streamError);
   } finally {
+    // `destroy()` sets `dead` before the generator unwinds, so a flag still
+    // false here means the process ended on its OWN — crash, OOM kill, killed
+    // out of band — rather than because we closed it. Only that is a loss:
+    // `closeAllSessions` (shutdown) and the recreate branch both close on
+    // purpose, with nothing left to notify in the first case and nothing lost in
+    // the second.
+    const unexpected = !session.dead;
+
     // The process is gone. Reject any turn still waiting so the caller's
     // promise settles and its own safety net can complete the run.
     rejectCurrentTurn(session, new Error('Claude session process ended before the turn completed'));
     session.dead = true;
     clearIdleTimer(session);
     removeFromLiveIfCurrent(session);
+
+    // Last, deliberately: teardown correctness outranks reporting, so nothing
+    // below can leave a dead session sitting in the live map. `liveTaskIds` is
+    // left populated — the session is out of the map, so it is unreachable, and
+    // clearing it would only hide a teardown bug from `getLiveTaskIds`.
+    if (unexpected) {
+      reportLostTasks(session, streamError);
+    }
   }
 }
 
-function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, createQuery }) {
+function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, onTaskLost, createQuery }) {
   const input = createInputStream();
   const query = createQuery({ prompt: input, options: sdkOptions });
 
@@ -626,9 +715,10 @@ function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTur
     appSessionId,
     query,
     input,
-    liveTaskIds: new Set(),
+    liveTaskIds: new Map(),
     currentTurn: null,
     onBetweenTurnMessage,
+    onTaskLost: onTaskLost ?? null,
     optionSnapshot: snapshotOptions(sdkOptions),
     // The allowlist the CLI was SPAWNED with — the set it will auto-approve from
     // for the whole life of the process, regardless of what `optionSnapshot`
@@ -659,7 +749,7 @@ export const claudeSessionPool = {
    * prompt is pushed — recreate when nothing is at stake, reconfigure in place
    * when background work must survive.
    */
-  async runTurn({ appSessionId, userMessage, sdkOptions, turnContext, onMessage, onBetweenTurnMessage, createQuery }) {
+  async runTurn({ appSessionId, userMessage, sdkOptions, turnContext, onMessage, onBetweenTurnMessage, onTaskLost, createQuery }) {
     let session = live.get(appSessionId);
     if (session?.dead) {
       session = undefined;
@@ -751,11 +841,12 @@ export const claudeSessionPool = {
       // PLACE so the approval callback the SDK captured on turn 1 resolves this
       // turn's writer and this turn's allow/deny lists.
       session.onBetweenTurnMessage = onBetweenTurnMessage;
+      session.onTaskLost = onTaskLost ?? null;
       if (session.turnContext && turnContext) {
         Object.assign(session.turnContext, turnContext);
       }
     } else {
-      session = createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, createQuery });
+      session = createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, onTaskLost, createQuery });
     }
 
     clearIdleTimer(session);
@@ -771,8 +862,10 @@ export const claudeSessionPool = {
     return Boolean(session && !session.dead);
   },
 
+  /** Ids only — `liveTaskIds` also carries each task's label, which no caller wants. */
   getLiveTaskIds(appSessionId) {
-    return [...(live.get(appSessionId)?.liveTaskIds ?? [])];
+    const session = live.get(appSessionId);
+    return session ? [...session.liveTaskIds.keys()] : [];
   },
 
   /**

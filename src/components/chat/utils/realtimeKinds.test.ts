@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { isNonTranscriptKind, resolveBackgroundTaskOutcome } from './realtimeKinds.js';
+import { buildBackgroundTaskSummary, isNonTranscriptKind, resolveBackgroundTaskOutcome } from './realtimeKinds.js';
 
 test('background_task must never be appended to the transcript store', () => {
   assert.equal(isNonTranscriptKind('background_task'), true);
@@ -31,4 +31,29 @@ test('an unknown or missing status never renders as a success', () => {
     assert.notEqual(resolved.status, 'completed', `status ${JSON.stringify(status)} must not read as success`);
     assert.match(resolved.outcome, /did not report success/);
   }
+});
+
+test('a background task with no output path renders a row without one, never "undefined"', () => {
+  const summary = buildBackgroundTaskSummary(
+    'failed',
+    'Echo t1-t10 with delays — the Claude CLI process ended before this task reported a result, so its output was never written.',
+    undefined,
+  );
+  assert.doesNotMatch(summary, /undefined/, 'a task lost with the process never produced an output file');
+  assert.doesNotMatch(summary, /output:/, 'and must not claim a path it does not have');
+  assert.match(summary, /^Background task failed: Echo t1-t10 with delays/);
+});
+
+test('a background task that did write an output file still shows the path', () => {
+  assert.equal(
+    buildBackgroundTaskSummary('completed', 'sonar finished', '/tmp/bg3.output'),
+    'Background task completed: sonar finished — output: /tmp/bg3.output',
+  );
+});
+
+test('a background task frame with no summary at all still reads as a sentence', () => {
+  assert.equal(
+    buildBackgroundTaskSummary('failed', undefined, ''),
+    'Background task failed: Background task finished',
+  );
 });

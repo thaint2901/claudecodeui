@@ -1719,3 +1719,272 @@ test('genuine concurrency — a turn sent while a NON-aborted turn is in flight 
   await pending;
   claudeSessionPool.closeSession('concurrent');
 });
+
+/**
+ * Final-review CRITICAL (goal 3 — "losses become visible, never silent"): a
+ * pooled process that dies BETWEEN turns took every task it was running with it
+ * and said nothing. `drain`'s error path rejects `currentTurn`, but between turns
+ * that slot is `null`, so the error was dropped: no log line for the operator, no
+ * frame for the user who had been told they would be notified on completion. The
+ * six tests below pin the reporting, and the last one pins the no-regression
+ * case — a deliberate close must stay quiet.
+ */
+
+/** Collects `console.error` for the duration of one test. */
+function captureConsoleErrors(t) {
+  const calls = [];
+  t.mock.method(console, 'error', (...args) => { calls.push(args); });
+  return {
+    deaths: () => calls.filter((args) => String(args[0]).includes('ended unexpectedly')),
+    all: calls,
+  };
+}
+
+/**
+ * A fake process that starts `tasks`, ends its turn, optionally settles some of
+ * those tasks, and then dies the way a crashed/OOM-killed CLI does: by throwing
+ * out of its own generator with no turn in the slot.
+ */
+function createDyingQuery({ tasks, settle = [], deathMessage = 'CLI process exited unexpectedly (simulated)' }) {
+  return ({ prompt }) => {
+    const generator = (async function* run() {
+      for await (const _userMessage of prompt) {
+        for (const task of tasks) {
+          yield { type: 'system', subtype: 'task_started', ...task };
+        }
+        yield { type: 'result', subtype: 'success' };
+        for (const taskId of settle) {
+          yield {
+            type: 'system',
+            subtype: 'task_notification',
+            task_id: taskId,
+            status: 'completed',
+            output_file: `/tmp/${taskId}.output`,
+            summary: 'done',
+          };
+        }
+        throw new Error(deathMessage);
+      }
+    })();
+    generator.close = () => {};
+    return generator;
+  };
+}
+
+test('a process dying between turns reports every still-tracked task as lost, with its description', async (t) => {
+  claudeSessionPool._resetForTests();
+  const logged = captureConsoleErrors(t);
+
+  const lost = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 'lost-between',
+    userMessage: userMessage('start two background shells'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onTaskLost: (event) => lost.push(event),
+    createQuery: createDyingQuery({
+      tasks: [
+        { task_id: 'lost-1', description: 'Echo t1-t10 with delays' },
+        { task_id: 'lost-2', description: 'Tail the build log' },
+      ],
+    }),
+  });
+
+  await waitFor(() => lost.length === 2, { message: 'both lost tasks should have been reported' });
+  assert.deepEqual(lost, [
+    { taskId: 'lost-1', description: 'Echo t1-t10 with delays' },
+    { taskId: 'lost-2', description: 'Tail the build log' },
+  ], 'each report must name the task it lost, so the row says WHICH task died');
+  assert.equal(logged.deaths().length, 1, 'the operator gets exactly one death line, not one per task');
+  assert.equal(claudeSessionPool.hasLiveSession('lost-between'), false);
+});
+
+test('a process dying between turns with nothing tracked is still logged, and reports nothing', async (t) => {
+  claudeSessionPool._resetForTests();
+  const logged = captureConsoleErrors(t);
+
+  const lost = [];
+  const settled = createDeferred();
+  await claudeSessionPool.runTurn({
+    appSessionId: 'lost-none',
+    userMessage: userMessage('start one and let it finish'),
+    sdkOptions: {},
+    onMessage: () => {},
+    // The notification arrives BETWEEN turns, which clears the task and leaves
+    // the session alive on its idle grace window — the real window in which a
+    // process can die with nothing tracked.
+    onBetweenTurnMessage: () => settled.resolve(),
+    onTaskLost: (event) => lost.push(event),
+    createQuery: createDyingQuery({
+      tasks: [{ task_id: 'settled-1', description: 'Echo once' }],
+      settle: ['settled-1'],
+    }),
+  });
+
+  await settled.promise;
+  await waitFor(() => !claudeSessionPool.hasLiveSession('lost-none'), {
+    message: 'the session should be dead once its generator threw',
+  });
+  assert.deepEqual(lost, [], 'nothing was live, so nothing may be reported as lost');
+  assert.equal(logged.deaths().length, 1, 'the subprocess still died — the operator must be told');
+});
+
+test('a task that already settled is not reported lost when the process later dies', async (t) => {
+  claudeSessionPool._resetForTests();
+  captureConsoleErrors(t);
+
+  const lost = [];
+  const settled = createDeferred();
+  await claudeSessionPool.runTurn({
+    appSessionId: 'lost-partial',
+    userMessage: userMessage('start two, one finishes'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => settled.resolve(),
+    onTaskLost: (event) => lost.push(event),
+    createQuery: createDyingQuery({
+      tasks: [
+        { task_id: 'done-1', description: 'Finished before the crash' },
+        { task_id: 'still-live-1', description: 'Still running at the crash' },
+      ],
+      settle: ['done-1'],
+    }),
+  });
+
+  await settled.promise;
+  await waitFor(() => lost.length === 1, { message: 'the surviving task should be reported lost' });
+  assert.deepEqual(lost, [{ taskId: 'still-live-1', description: 'Still running at the crash' }]);
+});
+
+test('a process dying WITH a turn in flight both rejects that turn and reports the lost task', async (t) => {
+  claudeSessionPool._resetForTests();
+  const logged = captureConsoleErrors(t);
+
+  let turns = 0;
+  const factory = ({ prompt }) => {
+    const generator = (async function* run() {
+      for await (const _userMessage of prompt) {
+        turns += 1;
+        if (turns === 1) {
+          yield { type: 'system', subtype: 'task_started', task_id: 'inflight-loss', description: 'Long build' };
+          yield { type: 'result', subtype: 'success' };
+          continue;
+        }
+        // Turn 2 never terminates: the process dies underneath it.
+        throw new Error('CLI process exited unexpectedly (simulated, mid-turn)');
+      }
+    })();
+    generator.close = () => {};
+    return generator;
+  };
+
+  const lost = [];
+  const common = {
+    appSessionId: 'lost-inflight',
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onTaskLost: (event) => lost.push(event),
+    createQuery: factory,
+  };
+
+  await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('start the build') });
+  await assert.rejects(
+    () => claudeSessionPool.runTurn({ ...common, userMessage: userMessage('are you there?') }),
+    /simulated, mid-turn/,
+    'the caller must still learn its own turn failed',
+  );
+
+  assert.deepEqual(lost, [{ taskId: 'inflight-loss', description: 'Long build' }],
+    'a turn in flight must not swallow the background loss');
+  assert.equal(logged.deaths().length, 1);
+});
+
+test('a throwing onTaskLost cannot cost the next task its report, nor stop the session being torn down', async (t) => {
+  claudeSessionPool._resetForTests();
+  captureConsoleErrors(t);
+
+  const lost = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 'lost-throwing-sink',
+    userMessage: userMessage('start two background shells'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onTaskLost: (event) => {
+      if (event.taskId === 'throw-1') {
+        throw new Error('the websocket writer blew up');
+      }
+      lost.push(event);
+    },
+    createQuery: createDyingQuery({
+      tasks: [
+        { task_id: 'throw-1', description: 'Reported by a sink that throws' },
+        { task_id: 'throw-2', description: 'Must still be reported' },
+      ],
+    }),
+  });
+
+  await waitFor(() => lost.length === 1, { message: 'the second task should still be reported' });
+  assert.deepEqual(lost, [{ taskId: 'throw-2', description: 'Must still be reported' }]);
+  // Teardown outranks reporting: dead AND out of the map. `getLiveTaskIds`
+  // reads the live map, so a stale entry left behind would still list both ids.
+  assert.equal(claudeSessionPool.hasLiveSession('lost-throwing-sink'), false, 'the session must still be dead');
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('lost-throwing-sink'), [],
+    'the session must still have been removed from the live map');
+});
+
+test('a normal turn-end close reports nothing and logs no death', async (t) => {
+  claudeSessionPool._resetForTests();
+  const logged = captureConsoleErrors(t);
+
+  const { factory, state } = createFakeQuery([
+    [{ type: 'assistant', text: 'nothing backgrounded here' }, { type: 'result', subtype: 'success' }],
+  ]);
+
+  const lost = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 'clean-close',
+    userMessage: userMessage('hello'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onTaskLost: (event) => lost.push(event),
+    createQuery: factory,
+  });
+
+  await flushMicrotasks();
+  assert.equal(state.closed, true, 'the pool closed this session itself — nothing was lost');
+  assert.deepEqual(lost, [], 'a deliberate close is not a loss');
+  assert.equal(logged.deaths().length, 0, 'and it must not cry wolf in the operator log');
+});
+
+test('an ambient skip_transcript task is counted in the death log but not shown to the user', async (t) => {
+  claudeSessionPool._resetForTests();
+  const logged = captureConsoleErrors(t);
+
+  const lost = [];
+  await claudeSessionPool.runTurn({
+    appSessionId: 'lost-ambient',
+    userMessage: userMessage('do something that spawns housekeeping'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    onTaskLost: (event) => lost.push(event),
+    createQuery: createDyingQuery({
+      tasks: [
+        { task_id: 'ambient-1', description: 'Ambient housekeeping', skip_transcript: true },
+        { task_id: 'real-1', description: 'The task the user actually started' },
+      ],
+    }),
+  });
+
+  await waitFor(() => lost.length === 1, { message: 'the user-visible task should be reported' });
+  // Same rule `forwardBetweenTurnMessage` applies to an ambient task's
+  // notification: tracked, because closing the process would kill it, but never
+  // put in the transcript — least of all as a failure the user cannot act on.
+  assert.deepEqual(lost, [{ taskId: 'real-1', description: 'The task the user actually started' }]);
+  assert.equal(logged.deaths().length, 1);
+  assert.equal(logged.deaths()[0][1].lostTaskCount, 2, 'the operator still sees both, ambient included');
+});
