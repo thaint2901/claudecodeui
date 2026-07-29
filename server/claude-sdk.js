@@ -19,7 +19,7 @@ import path from 'path';
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
-import { emitBackgroundTaskEvent } from '@/modules/websocket/index.js';
+import { createProtocolErrorFrame, emitBackgroundTaskEvent } from '@/modules/websocket/index.js';
 
 import { claudeSessionPool } from './claude-session-pool.js';
 import { buildClaudeUserContent, normalizeImageDescriptors } from './shared/image-attachments.js';
@@ -290,6 +290,89 @@ function mapCliOptionsToSDK(options = {}) {
   }
 
   return sdkOptions;
+}
+
+/**
+ * Recreate-only option fields whose change must REFUSE the turn — rather than
+ * be warned about and skipped — when a background task is holding the session's
+ * CLI process open.
+ *
+ * `effort` is deliberately absent even though it is recreate-only too:
+ * `applyFlagSettings`'s `effortLevel` has a narrower domain than the `effort`
+ * option (`'low'|'medium'|'high'|'xhigh'` versus those plus `'max'` and
+ * numbers), so it cannot be fully applied live either — but running a turn at
+ * the previous effort is a degradation the user can live with, not a different
+ * feature. The pool's warn-and-skip stays right for it. The fields below are
+ * different in kind: running the turn anyway silently performs a DIFFERENT
+ * action than the one that was asked for.
+ */
+const FRESH_PROCESS_REQUIRED_FIELDS = new Set(['cwd', 'forkSession', 'resumeSessionAt']);
+
+/**
+ * Explains, in the user's terms, why this turn cannot run on the session's
+ * current CLI process — or returns null when it can.
+ *
+ * Both conditions have to hold. Only a live process with live background work
+ * is genuinely HELD: with nothing to protect the pool closes and recreates it
+ * cleanly, which honours every option including these, and with no live process
+ * at all there is nothing to be stale against.
+ *
+ * @param {string} poolSessionId - The APP-level session id the pool is keyed on.
+ *   Never the provider-native id, which a fork reassigns mid-stream.
+ * @param {object} options - The caller's options, pre-`mapCliOptionsToSDK`.
+ * @param {object} sdkOptions - The mapped SDK options this turn would run with.
+ * @returns {string | null} A user-facing explanation, or null to proceed.
+ */
+function describeHeldProcessRefusal(poolSessionId, options, sdkOptions) {
+  if (!claudeSessionPool.hasLiveSession(poolSessionId)) {
+    return null;
+  }
+  const liveTaskIds = claudeSessionPool.getLiveTaskIds(poolSessionId);
+  if (liveTaskIds.length === 0) {
+    return null;
+  }
+
+  const blocked = claudeSessionPool
+    .pendingRecreateOnlyFields(poolSessionId, sdkOptions)
+    .filter((field) => FRESH_PROCESS_REQUIRED_FIELDS.has(field));
+
+  const reasons = [];
+
+  // `forkSubagent` never reaches `sdkOptions` as a field — `mapCliOptionsToSDK`
+  // turns it into child env, and `sdkOptions.env` is rebuilt every turn, so the
+  // pool's snapshot cannot see it. Hence the raw option, and hence "requested
+  // for this turn" rather than "differs": a held process cannot have been
+  // spawned with the /subtask env, because that env disables background tasks
+  // outright, so there would be nothing holding it.
+  if (options.forkSubagent === true) {
+    reasons.push(
+      '/subtask needs its own Claude CLI process: it runs the subagent with this conversation\'s context '
+      + 'inherited, which is set up through the process\'s environment when it starts and cannot be '
+      + 'changed on a running one.',
+    );
+  }
+  if (blocked.includes('forkSession') || blocked.includes('resumeSessionAt')) {
+    reasons.push(
+      'Editing an earlier prompt needs its own Claude CLI process: it branches the conversation from that '
+      + 'point instead of continuing from the end.',
+    );
+  }
+  if (blocked.includes('cwd')) {
+    reasons.push(
+      'Running this turn in a different project directory needs its own Claude CLI process: the working '
+      + 'directory is fixed when the process starts.',
+    );
+  }
+
+  if (reasons.length === 0) {
+    return null;
+  }
+
+  const taskCount = liveTaskIds.length;
+  return `${reasons.join(' ')} A background command started in this session is still running `
+    + `(${taskCount} task${taskCount === 1 ? '' : 's'}), and starting a new process means closing this one, `
+    + 'which would kill it. Wait for the background task to finish — or stop it — and try again, or start a '
+    + 'new session.';
 }
 
 /**
@@ -690,6 +773,27 @@ async function queryClaudeSDK(command, options = {}, ws) {
       model: resolvedModel || options.model,
       effortModels,
     });
+
+    // Refuse before anything else touches the session. Some things a turn can
+    // ask for are only deliverable by a FRESH process, and when background work
+    // is holding this session's process open the pool cannot give it one — it
+    // used to log a warning and run the turn anyway, which quietly performed a
+    // different action than the one requested (a /subtask that never inherited
+    // the conversation; an edited prompt appended to the tip instead of
+    // branching). Refusing here, rather than in the websocket gateway, is what
+    // also covers the REST entry point (server/routes/agent.js), which is not
+    // registered in `chatRunRegistry` and would otherwise keep degrading
+    // silently.
+    const refusal = describeHeldProcessRefusal(poolSessionId, options, sdkOptions);
+    if (refusal) {
+      const refusalSessionId = capturedSessionId || sessionId || null;
+      ws.send(createProtocolErrorFrame('SESSION_BUSY_BACKGROUND_TASK', refusal, refusalSessionId));
+      // The websocket layer registers the run BEFORE calling this function, so a
+      // return without a terminal `complete` leaves the client in "processing"
+      // forever. Non-zero exit: the turn the user asked for did not happen.
+      ws.send(createCompleteMessage({ provider: 'claude', sessionId: refusalSessionId, exitCode: 1 }));
+      return;
+    }
 
     const mcpServers = await loadMcpConfig(options.cwd);
     if (mcpServers) {

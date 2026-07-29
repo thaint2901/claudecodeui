@@ -71,6 +71,24 @@ const LIVE_APPLICABLE_OPTION_FIELDS = ['permissionMode', 'model', 'allowedTools'
 const RECREATE_ONLY_OPTION_FIELDS = ['cwd', 'effort', 'forkSession', 'resumeSessionAt'];
 const RELEVANT_OPTION_FIELDS = [...LIVE_APPLICABLE_OPTION_FIELDS, ...RECREATE_ONLY_OPTION_FIELDS];
 
+/**
+ * Recreate-only fields that a process CONSUMES as it is created, and which are
+ * therefore not a pending change once it exists — the same argument the `resume`
+ * exclusion above makes, one step further along: `resume` is excluded outright
+ * because it is never a behaviour knob, whereas forking IS one, but only in one
+ * direction.
+ *
+ * A live process created with `forkSession` is already the branch. Keeping the
+ * creation value in the snapshot made every LATER ordinary turn on that session
+ * compare `undefined` against `true` forever — a needless recreate when there
+ * was nothing to protect, and a `console.warn` on every single turn when there
+ * was. So the snapshot records them as already-consumed (null) at creation,
+ * which leaves the change detectable in the direction that still matters: a
+ * session that is NOT a fork receiving a fork request still differs, still
+ * recreates, and (when a background task forbids that) is still refused.
+ */
+const CONSUMED_AT_CREATION_OPTION_FIELDS = ['forkSession', 'resumeSessionAt'];
+
 /** @type {Map<string, LiveSession>} */
 const live = new Map();
 
@@ -110,7 +128,8 @@ const live = new Map();
  *   reaches whoever is currently watching this session.
  * @property {object} optionSnapshot - Normalized `RELEVANT_OPTION_FIELDS` as
  *   currently in force on this process (creation values, amended by whatever
- *   control requests have since been applied).
+ *   control requests have since been applied), except for the fields creation
+ *   itself consumed — see `creationSnapshot`.
  * @property {string[]} spawnAllowedTools - The `--allowedTools` list this process
  *   was spawned with, which the CLI auto-approves from for its whole lifetime.
  * @property {{ ask: string[], deny: string[] } | null} appliedPermissions - The
@@ -151,6 +170,19 @@ function snapshotOptions(sdkOptions) {
   const snapshot = {};
   for (const field of RELEVANT_OPTION_FIELDS) {
     snapshot[field] = normalizeOptionValue(sdkOptions?.[field]);
+  }
+  return snapshot;
+}
+
+/**
+ * The snapshot to store on a process at the moment it is created: what it was
+ * spawned with, minus the fields spawning itself consumed (see
+ * `CONSUMED_AT_CREATION_OPTION_FIELDS`).
+ */
+function creationSnapshot(sdkOptions) {
+  const snapshot = snapshotOptions(sdkOptions);
+  for (const field of CONSUMED_AT_CREATION_OPTION_FIELDS) {
+    snapshot[field] = null;
   }
   return snapshot;
 }
@@ -719,7 +751,7 @@ function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTur
     currentTurn: null,
     onBetweenTurnMessage,
     onTaskLost: onTaskLost ?? null,
-    optionSnapshot: snapshotOptions(sdkOptions),
+    optionSnapshot: creationSnapshot(sdkOptions),
     // The allowlist the CLI was SPAWNED with — the set it will auto-approve from
     // for the whole life of the process, regardless of what `optionSnapshot`
     // later says. Frozen here because `optionSnapshot.allowedTools` is rewritten
@@ -860,6 +892,27 @@ export const claudeSessionPool = {
   hasLiveSession(appSessionId) {
     const session = live.get(appSessionId);
     return Boolean(session && !session.dead);
+  },
+
+  /**
+   * Which `RECREATE_ONLY_OPTION_FIELDS` this turn would need a FRESH process to
+   * honour, given the process currently live for `appSessionId`. Empty when
+   * there is no live process (nothing to be stale against) or nothing differs.
+   *
+   * Read-only: it answers the question, it does not act on it. The caller
+   * decides what an unhonourable field means, because that depends on what the
+   * field is — `runTurn` recreates for it when nothing is at stake, and
+   * `queryClaudeSDK` refuses the turn for the subset where running anyway would
+   * silently do something else. The comparison lives here because the snapshot
+   * semantics do (normalization, and which fields creation already consumed);
+   * duplicating them in the caller is how the two drift apart.
+   */
+  pendingRecreateOnlyFields(appSessionId, sdkOptions) {
+    const session = live.get(appSessionId);
+    if (!session || session.dead) {
+      return [];
+    }
+    return differingFields(RECREATE_ONLY_OPTION_FIELDS, session.optionSnapshot, snapshotOptions(sdkOptions));
   },
 
   /** Ids only — `liveTaskIds` also carries each task's label, which no caller wants. */

@@ -1988,3 +1988,161 @@ test('an ambient skip_transcript task is counted in the death log but not shown 
   assert.equal(logged.deaths().length, 1);
   assert.equal(logged.deaths()[0][1].lostTaskCount, 2, 'the operator still sees both, ambient included');
 });
+
+/**
+ * Collects the pool's `console.warn` lines for the duration of one test.
+ *
+ * Separate from `captureConsoleErrors` because the thing under test below is a
+ * warning that must NOT be emitted — an assertion no other test in this file
+ * makes, since every other console line here is either an error or incidental.
+ */
+function captureConsoleWarnings(t) {
+  const calls = [];
+  t.mock.method(console, 'warn', (...args) => { calls.push(args); });
+  return {
+    unappliable: () => calls.filter((args) => String(args[0]).includes('cannot take effect')),
+    all: calls,
+  };
+}
+
+test('a fork-created session stops reporting its own consumed fork options as a pending change', async (t) => {
+  claudeSessionPool._resetForTests();
+  const warnings = captureConsoleWarnings(t);
+  const { factory, state } = createFakeQuery([
+    [{ type: 'system', subtype: 'task_started', task_id: 'survivor' }, { type: 'result', subtype: 'success' }],
+    [{ type: 'result', subtype: 'success' }],
+  ]);
+
+  // Turn 1 is the fork itself: `forkSession`/`resumeSessionAt` are consumed by
+  // process creation, and the turn leaves a background shell behind, so the
+  // process may not be closed afterwards.
+  await claudeSessionPool.runTurn({
+    appSessionId: 'fork-consumed',
+    userMessage: userMessage('branch here'),
+    sdkOptions: {
+      forkSession: true,
+      resumeSessionAt: 'anchor-uuid',
+      allowedTools: [],
+      disallowedTools: [],
+      permissionMode: 'bypassPermissions',
+    },
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('fork-consumed'), ['survivor']);
+
+  // Turn 2 is an ORDINARY turn on the fork: it does not ask to fork again. The
+  // fork already happened, so there is nothing left to apply and nothing to
+  // report — the snapshot used to keep `forkSession: true` forever and compare
+  // every later turn as changed, warning on each one for the session's whole life.
+  await claudeSessionPool.runTurn({
+    appSessionId: 'fork-consumed',
+    userMessage: userMessage('carry on'),
+    sdkOptions: {
+      allowedTools: [],
+      disallowedTools: [],
+      permissionMode: 'bypassPermissions',
+    },
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  assert.equal(state.turns, 2, 'both turns must run on the same process');
+  assert.equal(state.closed, false, 'and the background shell must survive');
+  assert.deepEqual(
+    warnings.unappliable(),
+    [],
+    'the fork options were consumed at creation; reporting them as pending would warn on every later turn',
+  );
+
+  claudeSessionPool.closeSession('fork-consumed');
+});
+
+test('a fork-created session with nothing to protect is not needlessly recreated on its next turn', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, invocations } = createCountingFakeQuery([
+    [
+      // Turn 0 emits no `result` — what an interrupted turn looks like.
+      // Settling it by hand leaves the session live with no background work,
+      // which is the only way a task-free session survives a turn boundary.
+      [{ type: 'assistant', text: 'working' }],
+      [{ type: 'result', subtype: 'success' }],
+    ],
+  ]);
+
+  const turnOneStarted = createDeferred();
+  const pending = claudeSessionPool.runTurn({
+    appSessionId: 'fork-consumed-idle',
+    userMessage: userMessage('branch here'),
+    sdkOptions: { forkSession: true, resumeSessionAt: 'anchor-uuid' },
+    onMessage: () => turnOneStarted.resolve(),
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  await turnOneStarted.promise;
+  assert.equal(claudeSessionPool.settleTurn('fork-consumed-idle', 'aborted'), true);
+  await pending;
+
+  await claudeSessionPool.runTurn({
+    appSessionId: 'fork-consumed-idle',
+    userMessage: userMessage('carry on'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  assert.equal(
+    invocations.length,
+    1,
+    'the fork options were consumed at creation, so the next ordinary turn has nothing to recreate for',
+  );
+
+  claudeSessionPool.closeSession('fork-consumed-idle');
+});
+
+test('a session that is NOT forked still recreates when a fork is requested', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, invocations } = createCountingFakeQuery([
+    [
+      [{ type: 'assistant', text: 'working' }],
+      [{ type: 'result', subtype: 'success' }],
+    ],
+    [[{ type: 'result', subtype: 'success' }]],
+  ]);
+
+  const turnOneStarted = createDeferred();
+  const pending = claudeSessionPool.runTurn({
+    appSessionId: 'fork-request',
+    userMessage: userMessage('one'),
+    sdkOptions: {},
+    onMessage: () => turnOneStarted.resolve(),
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  await turnOneStarted.promise;
+  assert.equal(claudeSessionPool.settleTurn('fork-request', 'aborted'), true);
+  await pending;
+
+  await claudeSessionPool.runTurn({
+    appSessionId: 'fork-request',
+    userMessage: userMessage('branch from here'),
+    sdkOptions: { forkSession: true, resumeSessionAt: 'anchor-uuid' },
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  // The boundary that stops "stop reporting a consumed fork" from becoming
+  // "ignore forkSession": there is no fork-mid-stream control request, so a
+  // session that is not already a fork can only honour one with a new process.
+  assert.equal(invocations.length, 2, 'a fork request on a non-forked session must spawn its own process');
+  assert.equal(invocations[0].closed, true);
+
+  claudeSessionPool.closeSession('fork-request');
+});

@@ -115,25 +115,43 @@ function sendIfOpen(ws: WebSocket, payload: string): void {
 }
 
 /**
- * Reports a protocol-level failure to the requesting client.
+ * The protocol-error frame shape, in one place.
  *
  * Protocol errors deliberately use their own `kind` (instead of the provider
  * `error` message kind) so the frontend can distinguish "your request was
  * invalid" from "the model run produced an error" without inspecting text.
+ *
+ * Exported (and re-exported from the module barrel) because a provider runtime
+ * can also have to refuse a request it cannot honour — `queryClaudeSDK` refuses
+ * a turn that would need a fresh CLI process while a background task is holding
+ * the current one. Only the SHAPE is shared, not the send: this gateway writes
+ * straight to a raw `WebSocket`, whereas a runtime holds a `ChatSessionWriter`
+ * that takes the frame as an object and remaps its `sessionId` to the app id.
+ * Handing the writer to `sendProtocolError` would silently send nothing (a
+ * writer has no `readyState`).
  */
+export function createProtocolErrorFrame(
+  code: string,
+  error: string,
+  sessionId?: string | null
+): AnyRecord {
+  return {
+    kind: 'protocol_error',
+    code,
+    error,
+    sessionId: sessionId ?? null,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/** Reports a protocol-level failure to the requesting client. */
 function sendProtocolError(
   ws: WebSocket,
   code: string,
   error: string,
   sessionId?: string
 ): void {
-  sendJson(ws, {
-    kind: 'protocol_error',
-    code,
-    error,
-    sessionId: sessionId ?? null,
-    timestamp: new Date().toISOString(),
-  });
+  sendJson(ws, createProtocolErrorFrame(code, error, sessionId));
 }
 
 function readRequiredSessionId(data: AnyRecord): string | null {
