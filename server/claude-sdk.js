@@ -761,10 +761,16 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
   // Who a background task belongs to. There is no session owner to look up (the
   // `sessions` table has no such column and the app has no session ACL), so the
-  // only available notion is the user whose turn set this work going — carried by
-  // the run writer. Read once here, so each per-turn callback below reports to
-  // the user of the turn that created it, rather than to whoever ran last.
-  const ownerUserId = ws?.userId ?? null;
+  // only available notion is the user whose turn set the work going — carried by
+  // the run writer.
+  //
+  // Handed to the pool as THIS turn's `taskOwner`: the pool stamps it on each task
+  // this turn starts and hands it back with every later report about that task.
+  // The reports below therefore read the owner off the task, never off this
+  // binding — a background shell outlives turns, and the next turn on a shared
+  // session can be someone else's, so "the current turn's user" would address the
+  // wrong single person instead of everyone.
+  const turnOwnerUserId = ws?.userId ?? null;
 
   // A stand-in for the raw SDK query instance: the pool owns the real object
   // internally (it may not even exist yet, or may be a currently-idle
@@ -1080,7 +1086,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
     // `task_notification` arrives — with no turn in flight (the task outlived
     // the turn that started it) and also from inside a later turn, where the
     // frame would otherwise be dropped by the role-keyed normalizer.
-    const forwardBetweenTurnMessage = (message) => {
+    const forwardBetweenTurnMessage = (message, meta) => {
       if (message?.type !== 'system' || message.subtype !== 'task_notification') {
         return;
       }
@@ -1099,7 +1105,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
         status: message.status,
         outputFile: message.output_file,
         summary: message.summary,
-        ownerUserId,
+        // The owner recorded when this task STARTED, which the pool hands back
+        // here — not `turnOwnerUserId`, which is whoever is running now.
+        ownerUserId: meta?.taskOwner ?? null,
       });
     };
 
@@ -1107,11 +1115,11 @@ async function queryClaudeSDK(command, options = {}, ws) {
     // tracked. That death is otherwise unobservable between turns — the pool has
     // no turn to reject there — and the user has already been told they will be
     // notified when the task completes, so silence means waiting forever.
-    const reportLostBackgroundTask = ({ taskId, description }) => {
+    const reportLostBackgroundTask = ({ taskId, description }, meta) => {
       emitBackgroundTaskEvent({
         sessionId: backgroundTaskSessionId,
         taskId,
-        ownerUserId,
+        ownerUserId: meta?.taskOwner ?? null,
         status: 'failed',
         // No `outputFile` on purpose: `task_started` carries none (measured —
         // `spikes/streaming-input-mode/task-classification.mjs`), and a task that
@@ -1126,12 +1134,12 @@ async function queryClaudeSDK(command, options = {}, ws) {
     // warn threshold. Advisory only, by ruling: nothing here (or in the pool)
     // ends the hold — an eviction rule would kill the user's running work, which
     // is the bug this pool exists to fix. What was missing was any way to SEE it.
-    const reportHeldBackgroundTask = ({ taskId, description, heldForMs }) => {
+    const reportHeldBackgroundTask = ({ taskId, description, heldForMs }, meta) => {
       const minutes = Math.max(1, Math.round(heldForMs / 60000));
       emitBackgroundTaskEvent({
         sessionId: backgroundTaskSessionId,
         taskId,
-        ownerUserId,
+        ownerUserId: meta?.taskOwner ?? null,
         // Deliberately not one of the three settled outcomes: the task has not
         // completed, failed, or been stopped.
         status: 'running',
@@ -1152,6 +1160,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
       onBetweenTurnMessage: forwardBetweenTurnMessage,
       onTaskLost: reportLostBackgroundTask,
       onHoldWarning: reportHeldBackgroundTask,
+      taskOwner: turnOwnerUserId,
       createQuery: createQueryWithHookFallback,
     });
 

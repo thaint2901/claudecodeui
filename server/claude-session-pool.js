@@ -161,14 +161,22 @@ const live = new Map();
  *   that starts it and nowhere else. A parallel map beside a Set would be two
  *   structures to keep in sync, which is where divergence bugs live.
  * @property {Turn | null} currentTurn
- * @property {Function} onBetweenTurnMessage
+ * @property {Function} onBetweenTurnMessage - Called `(message, { taskOwner })`.
+ *   `taskOwner` is the owner recorded for a task that this very message settled,
+ *   and null for everything else — read from the task record because `trackTask`
+ *   has already removed it by the time this runs.
  * @property {Function | null} onTaskLost - Told about each task that died with
- *   the process. Refreshed per turn like `onBetweenTurnMessage`, so the report
- *   reaches whoever is currently watching this session.
+ *   the process, as `(event, { taskOwner })`. Refreshed per turn like
+ *   `onBetweenTurnMessage`, so the report reaches whoever is currently watching
+ *   this session — but `taskOwner` comes from the TASK, not from the turn that
+ *   installed this callback.
  * @property {Function | null} onHoldWarning - Told once about each task that has
- *   held this process open past `HOLD_WARN_AFTER_MS`. Refreshed per turn for the
- *   same reason as `onTaskLost`. Advisory only: the pool takes no action on the
- *   hold before or after calling it.
+ *   held this process open past `HOLD_WARN_AFTER_MS`, as `(event, { taskOwner })`.
+ *   Refreshed per turn for the same reason as `onTaskLost`. Advisory only: the
+ *   pool takes no action on the hold before or after calling it.
+ * @property {unknown} taskOwner - Opaque token for the CURRENT turn's owner,
+ *   refreshed per turn exactly like the callbacks above. Its only use is being
+ *   stamped onto each task this session starts; the pool never interprets it.
  * @property {string | null} providerSessionId - The provider-native session id
  *   the process is currently on, as last announced in its own message stream.
  *   Null until it announces one. The pool otherwise knows nothing about provider
@@ -215,6 +223,13 @@ const live = new Map();
  * @property {boolean} holdReported - This task's long-hold advisory has already
  *   gone out. Per task, not per session and not per check: a warning that repeats
  *   every minute is noise, and noise is how the previous silent failure hid.
+ * @property {unknown} owner - Whoever the caller says this task belongs to,
+ *   captured from `session.taskOwner` when its `task_started` frame was routed
+ *   and handed back with every report about it. Per TASK because a background
+ *   shell outlives turns, and the next turn on a shared session can be someone
+ *   else's: an owner read off "the current turn" addresses the latest user, which
+ *   is the same defect as telling everyone, narrowed to one wrong recipient.
+ *   Opaque to the pool — it is compared and interpreted only by the caller.
  */
 
 /** Order-insensitive for lists, so a reshuffled allowlist is not a "change". */
@@ -527,7 +542,10 @@ function reportLongHeldTasks(session) {
       continue;
     }
     try {
-      session.onHoldWarning?.({ taskId, description: task.description, heldForMs: now - task.startedAt });
+      session.onHoldWarning?.(
+        { taskId, description: task.description, heldForMs: now - task.startedAt },
+        { taskOwner: task.owner },
+      );
     } catch (reportError) {
       // One sink throwing must not cost the remaining tasks their advisory, for
       // the same reason `reportLostTasks` guards each call: the caller's callback
@@ -600,16 +618,25 @@ function destroy(session) {
  * depend on string matching.
  */
 function trackTask(session, message) {
-  applyTaskLifecycle(session, message);
+  const settledTaskOwner = applyTaskLifecycle(session, message);
   // The hold check's lifetime follows `liveTaskIds`, so it is re-derived
   // wherever that map is touched — arming when the first task registers and
   // clearing when the last one settles.
   syncHoldCheckTimer(session);
+  return settledTaskOwner;
 }
 
+/**
+ * Returns the `owner` of a task this message just SETTLED, or null.
+ *
+ * The return value exists because the record is gone by the time any sink runs:
+ * `routeMessage` tracks before it forwards (task lifecycle must be applied even
+ * for messages that are otherwise suppressed), so a sink that wanted to know who
+ * a settling task belonged to could no longer look it up.
+ */
 function applyTaskLifecycle(session, message) {
   if (message?.type !== 'system') {
-    return;
+    return null;
   }
   if (message.subtype === 'task_started' && typeof message.task_id === 'string') {
     // `description` is the only label this frame carries that a human can read:
@@ -620,19 +647,29 @@ function applyTaskLifecycle(session, message) {
       skipTranscript: message.skip_transcript === true,
       startedAt: Date.now(),
       holdReported: false,
+      // Whoever's turn started it, for the whole life of the task. A task the
+      // pool never saw start (no `task_started` routed) has no record at all, so
+      // its settlement reports a null owner — the caller's documented
+      // unknown-owner path, and deliberately NOT a guess at the current turn's
+      // user, which is the mistake this field removes.
+      owner: session.taskOwner ?? null,
     });
-    return;
+    return null;
   }
   if (message.subtype === 'task_notification' && typeof message.task_id === 'string') {
+    const settling = session.liveTaskIds.get(message.task_id);
     session.liveTaskIds.delete(message.task_id);
-    return;
+    return settling?.owner ?? null;
   }
   if (message.subtype === 'task_updated' && typeof message.task_id === 'string') {
     const status = message.patch?.status;
     if (status === 'completed' || status === 'failed' || status === 'killed') {
+      const settling = session.liveTaskIds.get(message.task_id);
       session.liveTaskIds.delete(message.task_id);
+      return settling?.owner ?? null;
     }
   }
+  return null;
 }
 
 /** Closes the session unless background work still needs the process alive. */
@@ -815,7 +852,11 @@ function trackProviderSessionId(session, message) {
 
 function routeMessage(session, message) {
   trackProviderSessionId(session, message);
-  trackTask(session, message);
+  // Captured here, not at the sinks: tracking runs first (lifecycle is exempt
+  // from every suppression rule below), so by the time a sink sees the message
+  // the settling task's record has already been removed.
+  const settledTaskOwner = trackTask(session, message);
+  const sinkMeta = { taskOwner: settledTaskOwner };
 
   if (session.owedTerminators > 0) {
     // A turn the abort fallback settled early is still unwinding inside the CLI.
@@ -825,7 +866,7 @@ function routeMessage(session, message) {
     // terminator. Task lifecycle is exempt (see `isTaskLifecycle`) and still
     // reaches the session sink, which is where between-turn task events belong.
     if (isTaskLifecycle(message)) {
-      session.onBetweenTurnMessage(message);
+      session.onBetweenTurnMessage(message, sinkMeta);
       return;
     }
     if (message?.type === 'result') {
@@ -850,7 +891,7 @@ function routeMessage(session, message) {
     // completion, a failure, or a reaper kill vanish silently, which is exactly
     // what goal 3 of the design forbids.
     if (isTaskNotification(message)) {
-      session.onBetweenTurnMessage(message);
+      session.onBetweenTurnMessage(message, sinkMeta);
     }
     turn.onMessage(message);
     return;
@@ -862,13 +903,13 @@ function routeMessage(session, message) {
     // the transcript — but a background task's settlement still has to get
     // through, so this routes exactly like the between-turn path (whose sink
     // forwards only `task_notification`).
-    session.onBetweenTurnMessage(message);
+    session.onBetweenTurnMessage(message, sinkMeta);
     return;
   }
 
   // No turn in flight: this is the path that carries a background task's
   // completion to the UI after its turn already finished.
-  session.onBetweenTurnMessage(message);
+  session.onBetweenTurnMessage(message, sinkMeta);
 
   armIdleTimerIfIdle(session);
 }
@@ -905,7 +946,7 @@ function reportLostTasks(session, error) {
       continue;
     }
     try {
-      session.onTaskLost?.({ taskId, description: task.description });
+      session.onTaskLost?.({ taskId, description: task.description }, { taskOwner: task.owner });
     } catch (reportError) {
       // One sink throwing must not cost the remaining tasks their report. The
       // caller's callback reaches a websocket fan-out, so it can fail for
@@ -958,7 +999,7 @@ async function drain(session) {
   }
 }
 
-function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, onTaskLost, onHoldWarning, createQuery }) {
+function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, onTaskLost, onHoldWarning, taskOwner, createQuery }) {
   const input = createInputStream();
   const query = createQuery({ prompt: input, options: sdkOptions });
 
@@ -973,6 +1014,7 @@ function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTur
     onBetweenTurnMessage,
     onTaskLost: onTaskLost ?? null,
     onHoldWarning: onHoldWarning ?? null,
+    taskOwner: taskOwner ?? null,
     optionSnapshot: creationSnapshot(sdkOptions),
     // The allowlist the CLI was SPAWNED with — the set it will auto-approve from
     // for the whole life of the process, regardless of what `optionSnapshot`
@@ -1004,7 +1046,7 @@ export const claudeSessionPool = {
    * prompt is pushed — recreate when nothing is at stake, reconfigure in place
    * when background work must survive.
    */
-  async runTurn({ appSessionId, userMessage, sdkOptions, turnContext, onMessage, onBetweenTurnMessage, onTaskLost, onHoldWarning, createQuery }) {
+  async runTurn({ appSessionId, userMessage, sdkOptions, turnContext, onMessage, onBetweenTurnMessage, onTaskLost, onHoldWarning, taskOwner, createQuery }) {
     let session = live.get(appSessionId);
     if (session?.dead) {
       session = undefined;
@@ -1113,11 +1155,16 @@ export const claudeSessionPool = {
       session.onBetweenTurnMessage = onBetweenTurnMessage;
       session.onTaskLost = onTaskLost ?? null;
       session.onHoldWarning = onHoldWarning ?? null;
+      // Refreshed with the sinks, and for the same reason — but it applies only
+      // to tasks THIS turn starts. Tasks already tracked keep the owner recorded
+      // when they started, which is what stops one user's task being reported to
+      // whoever took the next turn on a shared session.
+      session.taskOwner = taskOwner ?? null;
       if (session.turnContext && turnContext) {
         Object.assign(session.turnContext, turnContext);
       }
     } else {
-      session = createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, onTaskLost, onHoldWarning, createQuery });
+      session = createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTurnMessage, onTaskLost, onHoldWarning, taskOwner, createQuery });
     }
 
     clearIdleTimer(session);

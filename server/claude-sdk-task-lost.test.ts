@@ -35,9 +35,13 @@ mock.module('@anthropic-ai/claude-agent-sdk', {
   namedExports: {
     ...realSdk,
     query: ({ prompt }: { prompt: AsyncIterable<unknown> }) => {
-      const script = frameScripts.shift();
       const generator = (async function* run() {
+        // One script per PROMPT, not per `query()` call: a pooled process serves
+        // several turns on one generator, and the multi-turn tests below need
+        // turn 2 to say something different from turn 1. Single-turn tests are
+        // unaffected — they push one script and send one message.
         for await (const _userMessage of prompt) {
+          const script = frameScripts.shift();
           if (!script) {
             return;
           }
@@ -354,6 +358,238 @@ test('a REST-originated run — no app session id — emits no background_task a
     );
   } finally {
     connectedClients.delete(client);
+    claudeSessionPool._resetForTests();
+  }
+});
+
+// A background shell can outlive several turns — that is this branch's whole
+// premise — and on a shared session the next turn can be someone else's. The
+// pool refreshes its report callbacks per turn, so an owner read off "the turn
+// that happens to be current" addresses the LATEST user, not the one whose work
+// this is. That is the same defect as broadcasting, narrowed to one wrong
+// recipient, so the owner is recorded on the TASK when it starts.
+const TWO_USER_OPTIONS = { cwd: os.tmpdir(), images: [], permissionMode: 'bypassPermissions' } as const;
+
+function createTwoUserClients() {
+  const ownerFrames: Frame[] = [];
+  const otherFrames: Frame[] = [];
+  const ownerClient = {
+    readyState: WS_OPEN_STATE,
+    userId: OWNER_USER_ID,
+    send: (data: string) => { ownerFrames.push(JSON.parse(data) as Frame); },
+  };
+  const otherClient = {
+    readyState: WS_OPEN_STATE,
+    userId: OTHER_USER_ID,
+    send: (data: string) => { otherFrames.push(JSON.parse(data) as Frame); },
+  };
+  connectedClients.add(ownerClient);
+  connectedClients.add(otherClient);
+  return {
+    ownerFrames,
+    otherFrames,
+    backgroundTaskFrames: (frames: Frame[]) => frames.filter((f) => f.kind === 'background_task'),
+    dispose: () => {
+      connectedClients.delete(ownerClient);
+      connectedClients.delete(otherClient);
+    },
+  };
+}
+
+test('a task that settles after a DIFFERENT user took the next turn still reports to the user who started it', async () => {
+  claudeSessionPool._resetForTests();
+  const clients = createTwoUserClients();
+
+  // Turn 1 (user A) starts the background task and ends.
+  frameScripts.push(async function* turnOne() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-shared-provider-1', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'task-shared-1',
+      description: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+  });
+  // Turn 2 (user B) reuses the held process, and A's task settles inside it.
+  frameScripts.push(async function* turnTwo() {
+    yield {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'task-shared-1',
+      status: 'completed',
+      output_file: '/home/alice/.claude/tasks/task-shared-1.output',
+      summary: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+  });
+
+  try {
+    await queryClaudeSDK(
+      'start something in the background',
+      { ...TWO_USER_OPTIONS, appSessionId: 'task-shared-app-1' },
+      createFakeWs(OWNER_USER_ID),
+    );
+    assert.deepEqual(
+      claudeSessionPool.getLiveTaskIds('task-shared-app-1'),
+      ['task-shared-1'],
+      'the process must still be held for the task, or this test proves nothing',
+    );
+
+    await queryClaudeSDK(
+      'unrelated follow-up from someone else',
+      { ...TWO_USER_OPTIONS, appSessionId: 'task-shared-app-1' },
+      createFakeWs(OTHER_USER_ID),
+    );
+
+    await waitFor(() => clients.backgroundTaskFrames(clients.ownerFrames).length > 0);
+    const frame = clients.backgroundTaskFrames(clients.ownerFrames)[0];
+    assert.equal(frame.taskId, 'task-shared-1');
+    assert.equal(frame.outputFile, '/home/alice/.claude/tasks/task-shared-1.output');
+    assert.equal(
+      clients.backgroundTaskFrames(clients.otherFrames).length,
+      0,
+      'the user who merely took the next turn is not the owner of this work',
+    );
+  } finally {
+    clients.dispose();
+    claudeSessionPool._resetForTests();
+  }
+});
+
+test('the ten-minute advisory goes to the user whose task it is, not to whoever took the last turn', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() });
+  const clients = createTwoUserClients();
+
+  frameScripts.push(async function* turnOne() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-shared-provider-2', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'task-shared-2',
+      description: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+  });
+  frameScripts.push(async function* turnTwo() {
+    yield { type: 'result', subtype: 'success' };
+  });
+
+  try {
+    await queryClaudeSDK(
+      'start something in the background',
+      { ...TWO_USER_OPTIONS, appSessionId: 'task-shared-app-2' },
+      createFakeWs(OWNER_USER_ID),
+    );
+    await queryClaudeSDK(
+      'unrelated follow-up from someone else',
+      { ...TWO_USER_OPTIONS, appSessionId: 'task-shared-app-2' },
+      createFakeWs(OTHER_USER_ID),
+    );
+
+    for (let i = 0; i < 10; i += 1) {
+      t.mock.timers.tick(60000);
+    }
+
+    const frame = clients.backgroundTaskFrames(clients.ownerFrames)[0];
+    assert.ok(frame, 'the advisory must reach the task\'s owner');
+    assert.equal(frame.status, 'running');
+    assert.equal(
+      clients.backgroundTaskFrames(clients.otherFrames).length,
+      0,
+      'and nobody else — the advisory names a command they did not run',
+    );
+  } finally {
+    clients.dispose();
+    claudeSessionPool._resetForTests();
+    t.mock.timers.reset();
+  }
+});
+
+test('a task lost with the process reports to the user who started it, not to the last turn\'s user', async () => {
+  claudeSessionPool._resetForTests();
+  const clients = createTwoUserClients();
+
+  frameScripts.push(async function* turnOne() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-shared-provider-3', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'task-shared-3',
+      description: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+  });
+  frameScripts.push(async function* turnTwo() {
+    yield { type: 'result', subtype: 'success' };
+    throw new Error('CLI process exited unexpectedly (simulated OOM kill)');
+  });
+
+  try {
+    await queryClaudeSDK(
+      'start something in the background',
+      { ...TWO_USER_OPTIONS, appSessionId: 'task-shared-app-3' },
+      createFakeWs(OWNER_USER_ID),
+    );
+    await queryClaudeSDK(
+      'unrelated follow-up from someone else',
+      { ...TWO_USER_OPTIONS, appSessionId: 'task-shared-app-3' },
+      createFakeWs(OTHER_USER_ID),
+    );
+
+    await waitFor(() => clients.backgroundTaskFrames(clients.ownerFrames).length > 0);
+    const frame = clients.backgroundTaskFrames(clients.ownerFrames)[0];
+    assert.equal(frame.taskId, 'task-shared-3');
+    assert.equal(frame.status, 'failed');
+    assert.equal(clients.backgroundTaskFrames(clients.otherFrames).length, 0);
+  } finally {
+    clients.dispose();
+    claudeSessionPool._resetForTests();
+  }
+});
+
+test('a task with no recorded owner still broadcasts, and does not fall back to the current turn\'s user', async (t) => {
+  claudeSessionPool._resetForTests();
+  const warn = t.mock.method(console, 'warn', () => {});
+  const clients = createTwoUserClients();
+
+  // No `task_started` frame, so nothing ever recorded an owner for this task —
+  // the one shape where the owner is genuinely unknown. Silence would cost the
+  // owner the notification that is the whole feature, and guessing "whoever is
+  // running now" is the defect this change removes.
+  frameScripts.push(async function* onlyANotification() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-orphan-provider-1', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'task-orphan-1',
+      status: 'completed',
+      output_file: '/tmp/task-orphan-1.output',
+      summary: 'a task nobody saw start',
+    };
+    yield { type: 'result', subtype: 'success' };
+  });
+
+  try {
+    await queryClaudeSDK(
+      'start something in the background',
+      { ...TWO_USER_OPTIONS, appSessionId: 'task-orphan-app-1' },
+      createFakeWs(OWNER_USER_ID),
+    );
+
+    await waitFor(() => clients.backgroundTaskFrames(clients.ownerFrames).length > 0);
+    assert.equal(
+      clients.backgroundTaskFrames(clients.otherFrames).length,
+      1,
+      'an unknown owner falls back to a broadcast, never to silence',
+    );
+    const fallbackWarnings = warn.mock.calls.filter((call) =>
+      typeof call.arguments[0] === 'string' && (call.arguments[0] as string).includes('unknown owner'),
+    );
+    assert.equal(fallbackWarnings.length, 1, 'logged once for the event, not once per client');
+  } finally {
+    clients.dispose();
     claudeSessionPool._resetForTests();
   }
 });
