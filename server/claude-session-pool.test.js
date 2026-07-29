@@ -2512,3 +2512,107 @@ test('a session with no background task never arms the hold check at all', async
 
   t.mock.timers.reset();
 });
+
+/**
+ * Fix-round-2 finding 2. A task's owner is stamped when its `task_started` frame
+ * is ROUTED, from a per-turn field — but the abort backstop deliberately frees
+ * the slot while the aborted turn is still unwinding inside the CLI, and task
+ * lifecycle frames are exempt from the swallow. So a `task_started` announced by
+ * that tail arrived while a DIFFERENT user's turn held the field, and its
+ * eventual output path went to that user instead of the one who started it.
+ *
+ * The debt is what resolves it: a single-conversation CLI serialises turns, so
+ * everything up to and including the owed terminator belongs to the turn that
+ * owes it — the same invariant the swallow branch is already built on, not a
+ * guess. So while a terminator is owed, a newly announced task is attributed to
+ * the owner of the turn that owes it.
+ */
+test('a task announced by a fallback-settled turn\'s tail belongs to that turn\'s owner, not to whoever took the slot', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const tailGate = createDeferred();
+  let turns = 0;
+
+  const factory = ({ prompt }) => {
+    const generator = (async function* run() {
+      for await (const _message of prompt) {
+        turns += 1;
+        if (turns === 1) {
+          yield { type: 'assistant', text: 'before-stop' };
+          // Acked the interrupt, still unwinding well past the fallback window.
+          await tailGate.promise;
+          // Announced by turn 1's tail, while turn 2 holds the slot.
+          yield { type: 'system', subtype: 'task_started', task_id: 'alices-task', description: 'Alice\'s build' };
+          yield { type: 'result', subtype: 'error_during_execution' };
+        } else {
+          // Turn 2's own task, after the debt cleared: still turn 2's.
+          yield { type: 'system', subtype: 'task_started', task_id: 'bobs-task', description: 'Bob\'s build' };
+          yield { type: 'system', subtype: 'task_notification', task_id: 'alices-task', status: 'completed', output_file: '/tmp/alices.out' };
+          yield { type: 'system', subtype: 'task_notification', task_id: 'bobs-task', status: 'completed', output_file: '/tmp/bobs.out' };
+          yield { type: 'result', subtype: 'success' };
+        }
+      }
+    })();
+    generator.interrupt = async () => {};
+    generator.close = () => {};
+    return generator;
+  };
+
+  /** @type {Array<{ taskId: unknown, taskOwner: unknown }>} */
+  const settlements = [];
+  const common = {
+    appSessionId: 'debt-owner',
+    sdkOptions: {},
+    onBetweenTurnMessage: (message, meta) => {
+      if (message?.subtype === 'task_notification') {
+        settlements.push({ taskId: message.task_id, taskOwner: meta?.taskOwner });
+      }
+    },
+    createQuery: factory,
+  };
+
+  const turnStarted = createDeferred();
+  const first = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('start a long build'),
+    taskOwner: 'alice',
+    onMessage: (m) => {
+      if (m.type === 'assistant') {
+        turnStarted.resolve();
+      }
+    },
+  });
+
+  await turnStarted.promise;
+  assert.equal(await claudeSessionPool.interruptTurn('debt-owner'), true);
+
+  t.mock.timers.tick(5000);
+  await flushMicrotasks();
+  assert.equal((await first).subtype, 'aborted');
+
+  // Someone else sends the next message on this shared session.
+  const second = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('unrelated follow-up'),
+    taskOwner: 'bob',
+    onMessage: () => {},
+  });
+  await flushMicrotasks();
+
+  tailGate.resolve();
+  assert.equal((await second).subtype, 'success');
+  await flushMicrotasks();
+
+  assert.deepEqual(
+    settlements,
+    [
+      { taskId: 'alices-task', taskOwner: 'alice' },
+      { taskId: 'bobs-task', taskOwner: 'bob' },
+    ],
+    'the tail\'s task belongs to the turn that owed the terminator; the new turn\'s own task still belongs to it',
+  );
+
+  claudeSessionPool.closeSession('debt-owner');
+  t.mock.timers.reset();
+});

@@ -15,6 +15,14 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HANDLERS_SOURCE = path.join(HERE, '..', 'hooks', 'useChatRealtimeHandlers.ts');
 
 /**
+ * How many arms the first `switch (msg.kind)` is expected to have. Bump this in
+ * the same edit that adds the new kind to `NON_TRANSCRIPT_KINDS` — that pairing
+ * is the whole point, and a floor (`>= 8`) would let a ninth arm slip in
+ * unlisted.
+ */
+const EXPECTED_EARLY_RETURN_ARMS = 8;
+
+/**
  * The `case '<kind>':` labels of the FIRST `switch (msg.kind)` in
  * useChatRealtimeHandlers — the switch whose every arm returns before the
  * generic append path.
@@ -25,9 +33,25 @@ function readEarlyReturningKinds(): string[] {
   assert.notEqual(switchAt, -1, 'the first kind switch must still be findable for this check to mean anything');
   const defaultAt = source.indexOf('default:', switchAt);
   assert.notEqual(defaultAt, -1, 'the first kind switch must still end in a default arm');
+  const region = source.slice(switchAt, defaultAt);
 
-  const kinds = [...source.slice(switchAt, defaultAt).matchAll(/case '([a-z_]+)':/g)].map((match) => match[1]);
-  assert.ok(kinds.length >= 8, `expected the extraction to find the switch arms, found ${kinds.length}`);
+  // `\w` and `-` rather than `[a-z_]`: a kind with a digit, a capital or a
+  // hyphen used to be silently unextractable, so an arm added under such a name
+  // would pass this whole check while carrying none of its protection.
+  const kinds = [...region.matchAll(/case\s+'([\w-]+)':/g)].map((match) => match[1]);
+  // Counted independently of the label pattern, so a label the pattern still
+  // cannot read fails here instead of shrinking the list unnoticed.
+  const armCount = (region.match(/^\s+case\b/gm) ?? []).length;
+  assert.equal(
+    kinds.length,
+    armCount,
+    `every case arm must be extractable — found ${armCount} arms but could only read ${kinds.length} labels`,
+  );
+  assert.equal(
+    kinds.length,
+    EXPECTED_EARLY_RETURN_ARMS,
+    `the first switch has ${kinds.length} arms, not ${EXPECTED_EARLY_RETURN_ARMS} — add the new kind to NON_TRANSCRIPT_KINDS and bump the expected count together`,
+  );
   return kinds;
 }
 
@@ -69,31 +93,35 @@ test('the frontend hook still returns early for all eight known non-transcript k
   }
 });
 
-test('a settled task only rings the chime for the session the user is looking at', () => {
+// The signal must NOT depend on which session is on screen. Alice starts a
+// 20-minute build in session S and switches to session T to keep working — which
+// is the entire reason a shell is backgrounded. Gating on the viewed session
+// silences the notification in exactly that case, and the only trace left is a
+// row in S's store bucket, which nothing surfaces (there is no unread or badge
+// mechanism in useSessionStore or the sidebar). `showCompletionTitleIndicator`
+// holds `[Done]` until the user comes back, so it is built for precisely the
+// away-from-it case. Delivery is already owner-scoped server-side, so a frame
+// that arrives is by construction the recipient's own work.
+test('a settled outcome signals no matter which session is on screen', () => {
+  assert.equal(shouldSignalBackgroundTaskCompletion({ advisory: false }), true);
+});
+
+test('the long-hold advisory still signals nothing at all', () => {
   assert.equal(
-    shouldSignalBackgroundTaskCompletion({ advisory: false, sessionId: 'app-1', activeViewSessionId: 'app-1' }),
-    true,
-  );
-  assert.equal(
-    shouldSignalBackgroundTaskCompletion({ advisory: false, sessionId: 'app-2', activeViewSessionId: 'app-1' }),
+    shouldSignalBackgroundTaskCompletion({ advisory: true }),
     false,
-    'another session settling must not flash this tab\'s title or ring its chime',
-  );
-  assert.equal(
-    shouldSignalBackgroundTaskCompletion({ advisory: false, sessionId: 'app-1', activeViewSessionId: null }),
-    false,
-    'with no session in view there is nothing the signal could be about',
+    'an advisory about work that is STILL RUNNING is not a completion',
   );
 });
 
-test('the long-hold advisory signals nothing, viewed session or not', () => {
-  for (const activeViewSessionId of ['app-1', 'app-2', null]) {
-    assert.equal(
-      shouldSignalBackgroundTaskCompletion({ advisory: true, sessionId: 'app-1', activeViewSessionId }),
-      false,
-      'an advisory about work that is STILL RUNNING is not a completion',
-    );
-  }
+test('the signal decision takes no view state, so it cannot be re-gated on the viewed session by accident', () => {
+  const source = readFileSync(
+    path.join(HERE, 'realtimeKinds.ts'),
+    'utf8',
+  );
+  const signature = source.slice(source.indexOf('export function shouldSignalBackgroundTaskCompletion'));
+  const params = signature.slice(0, signature.indexOf('}):'));
+  assert.doesNotMatch(params, /sessionId|activeView/, 'the viewed session is deliberately not an input to this decision');
 });
 
 test('real chat message kinds remain transcript-bound', () => {

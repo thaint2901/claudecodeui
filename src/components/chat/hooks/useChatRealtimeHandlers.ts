@@ -241,12 +241,15 @@ export function useChatRealtimeHandlers({
           // Both of these say "the thing you were waiting for is done" — the tab
           // title indicator literally, the chime by being the same sound every
           // completion makes. An advisory about work that is STILL RUNNING must
-          // not claim that; its transcript row is the whole notification. And
-          // both are tab-global, so a task settling on a session this tab is not
-          // showing would ding the user with nothing on screen to explain it —
-          // the transcript row above is still written either way, so switching
-          // to that session finds it waiting.
-          if (shouldSignalBackgroundTaskCompletion({ advisory, sessionId: sid, activeViewSessionId })) {
+          // not claim that; its transcript row is the whole notification.
+          //
+          // Deliberately NOT gated on `sid === activeViewSessionId`: the user
+          // backgrounded this work in order to go and do something else, so
+          // "settled in a session you are not looking at" is the case the
+          // notification exists for. The server already delivers these frames
+          // only to the owner's connections, so there is no longer anyone else
+          // to spare.
+          if (shouldSignalBackgroundTaskCompletion({ advisory })) {
             showCompletionTitleIndicator();
             void playNotificationSound();
           }

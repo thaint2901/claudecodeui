@@ -148,6 +148,9 @@ const live = new Map();
  * @property {boolean} promptSent - False while the turn has only RESERVED the
  *   slot (claimed before reconciliation, which may still reject or recreate the
  *   process). Nothing may be routed to, or settled on, a reserved turn.
+ * @property {unknown} taskOwner - This turn's opaque owner token, kept on the
+ *   turn as well as on the session so that a task announced by this turn's TAIL
+ *   — after the abort backstop vacated the slot — can still be attributed to it.
  */
 
 /**
@@ -200,11 +203,17 @@ const live = new Map();
  *   that outlives its session is the same class of defect as the slot that
  *   outlived its turn.
  * @property {boolean} dead
- * @property {number} owedTerminators - How many `result` messages are still
- *   expected for turns the abort fallback settled without one. A counter, not a
- *   flag: a second fallback can fire while a debt is outstanding (turn 2 aborted
- *   too), and a flag would silently drop one debt, letting exactly the frame it
- *   was meant to swallow through.
+ * @property {unknown[]} owedTerminators - One entry per `result` message still
+ *   expected for a turn the abort fallback settled without one, holding that
+ *   turn's `taskOwner`, oldest first. A queue rather than a flag: a second
+ *   fallback can fire while a debt is outstanding (turn 2 aborted too), and a
+ *   flag would silently drop one debt, letting exactly the frame it was meant to
+ *   swallow through. It carries the owner rather than being a bare count because
+ *   a single-conversation CLI serialises turns, so everything up to and including
+ *   the owed terminator belongs to the turn that owes it — which is what lets a
+ *   task announced by that tail be attributed correctly (see
+ *   `ownerForNewlyStartedTask`). Same invariant `routeMessage`'s swallow branch
+ *   already relies on, not a second guess about it.
  */
 
 /**
@@ -634,6 +643,30 @@ function trackTask(session, message) {
  * for messages that are otherwise suppressed), so a sink that wanted to know who
  * a settling task belonged to could no longer look it up.
  */
+/**
+ * Who a task announced RIGHT NOW belongs to.
+ *
+ * Normally the turn in the slot — `session.taskOwner`. But the abort backstop
+ * vacates the slot while the aborted turn is still unwinding inside the CLI, and
+ * task lifecycle frames are deliberately exempt from the swallow that covers the
+ * rest of that tail (they are session-scoped, and dropping one would let the pool
+ * close a process with a live shell in it). So a `task_started` can arrive from a
+ * turn that no longer holds the slot, and reading the current field would hand
+ * one user's background shell — its summary and its absolute output path — to
+ * whoever happened to send the next message.
+ *
+ * The outstanding debt resolves it without any new guess: a single-conversation
+ * CLI serialises turns, so everything up to and including the owed terminator
+ * belongs to the turn that owes it. That is the same invariant `routeMessage`'s
+ * swallow branch is built on. Oldest debt first, for the same reason.
+ */
+function ownerForNewlyStartedTask(session) {
+  if (session.owedTerminators.length > 0) {
+    return session.owedTerminators[0];
+  }
+  return session.taskOwner ?? null;
+}
+
 function applyTaskLifecycle(session, message) {
   if (message?.type !== 'system') {
     return null;
@@ -652,7 +685,7 @@ function applyTaskLifecycle(session, message) {
       // its settlement reports a null owner — the caller's documented
       // unknown-owner path, and deliberately NOT a guess at the current turn's
       // user, which is the mistake this field removes.
-      owner: session.taskOwner ?? null,
+      owner: ownerForNewlyStartedTask(session),
     });
     return null;
   }
@@ -690,7 +723,7 @@ function closeIfIdle(session) {
  * `runTurn` claim the slot BEFORE its first `await` instead of inside the
  * executor several awaits later.
  */
-function createTurn(onMessage) {
+function createTurn(onMessage, taskOwner) {
   let resolve;
   let reject;
   const promise = new Promise((res, rej) => {
@@ -711,6 +744,7 @@ function createTurn(onMessage) {
     aborted: false,
     abortSettleTimer: null,
     promptSent: false,
+    taskOwner: taskOwner ?? null,
   };
 }
 
@@ -767,9 +801,10 @@ function armAbortSettleFallback(session, turn) {
     if (settleCurrentTurn(session, { type: 'result', subtype: 'aborted' })) {
       // We just guessed that nothing more is coming for this turn, and the pool
       // cannot tell "emitted nothing" from "has not emitted yet". Record the
-      // terminator we settled without, so that if the guess was wrong the tail
-      // is swallowed rather than misattributed to whoever claims the slot next.
-      session.owedTerminators += 1;
+      // terminator we settled without — with the turn's owner, so a task its tail
+      // announces is attributed to it — so that if the guess was wrong the tail is
+      // swallowed rather than misattributed to whoever claims the slot next.
+      session.owedTerminators.push(turn.taskOwner ?? null);
     }
     armIdleTimerIfIdle(session);
   }, ABORT_SETTLE_FALLBACK_MS);
@@ -858,7 +893,7 @@ function routeMessage(session, message) {
   const settledTaskOwner = trackTask(session, message);
   const sinkMeta = { taskOwner: settledTaskOwner };
 
-  if (session.owedTerminators > 0) {
+  if (session.owedTerminators.length > 0) {
     // A turn the abort fallback settled early is still unwinding inside the CLI.
     // Its tail cannot be told apart from the current turn's output — there is no
     // turn-correlation field on any SDK message — so everything up to and
@@ -870,7 +905,7 @@ function routeMessage(session, message) {
       return;
     }
     if (message?.type === 'result') {
-      session.owedTerminators -= 1;
+      session.owedTerminators.shift();
     }
     return;
   }
@@ -1026,7 +1061,7 @@ function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTur
     idleTimer: null,
     holdCheckTimer: null,
     dead: false,
-    owedTerminators: 0,
+    owedTerminators: [],
   };
 
   live.set(appSessionId, session);
@@ -1073,7 +1108,7 @@ export const claudeSessionPool = {
       }
     }
 
-    const turn = createTurn(onMessage);
+    const turn = createTurn(onMessage, taskOwner);
 
     if (session) {
       // Claim the slot SYNCHRONOUSLY, before the first `await` below. The guard

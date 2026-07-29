@@ -78,33 +78,25 @@ export function resolveBackgroundTaskOutcome(status: unknown): {
  * Whether a `background_task` frame may fire the completion signals — the tab
  * title indicator and the chime.
  *
- * Both signals are global to the browser tab, so they only make sense for the
- * conversation the user is actually looking at. Firing them for any session
- * meant a second tab (or a colleague's browser, before the server started
- * scoping delivery to the task's owner) got dinged about work it has no view
- * of, with nothing on screen to explain the sound.
+ * The advisory is the only thing that suppresses them. In particular the session
+ * on screen deliberately does NOT: a background shell is started precisely so the
+ * user can go and work somewhere else, so gating on the viewed session silences
+ * the notification in the exact case the feature exists for, and nothing else
+ * surfaces it (a row lands in that session's store bucket, and there is no unread
+ * or badge mechanism pointing at it). `showCompletionTitleIndicator` holds
+ * `[Done]` in the title until the user comes back, which is what it is for.
  *
- * The transcript row is written regardless — that is how a task that settled on
- * a session in the background is still there when the user switches to it.
- * This gate is only about the attention-grabbing part.
+ * Safe to fire unconditionally because the server delivers these frames only to
+ * the connections of the user whose turn started the task
+ * (`emitBackgroundTaskEvent`) — a frame that arrives is by construction about the
+ * recipient's own work. Several tabs of that one user each signalling is the
+ * pre-existing behaviour and is fine.
  *
- * `advisory` frames never signal: a task still holding a CLI process open has
- * not completed, and both signals mean "the thing you were waiting for is
- * done".
+ * `advisory` frames never signal: a task still holding a CLI process open has not
+ * completed, and both signals mean "the thing you were waiting for is done".
  */
-export function shouldSignalBackgroundTaskCompletion(args: {
-  advisory: boolean;
-  /** The frame's resolved session id (`msg.sessionId` or the viewed session). */
-  sessionId: string | null;
-  activeViewSessionId: string | null;
-}): boolean {
-  if (args.advisory) {
-    return false;
-  }
-  if (!args.sessionId || !args.activeViewSessionId) {
-    return false;
-  }
-  return args.sessionId === args.activeViewSessionId;
+export function shouldSignalBackgroundTaskCompletion(frame: { advisory: boolean }): boolean {
+  return !frame.advisory;
 }
 
 /**
