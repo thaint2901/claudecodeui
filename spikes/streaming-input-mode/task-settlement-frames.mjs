@@ -66,6 +66,13 @@ await turn(
 console.log('--- TURN 2: a subagent');
 await turn('Use the Agent tool to launch one subagent whose entire job is to reply with the single word PONG.');
 
+console.log('--- TURN 3: a backgrounded Bash that FAILS on its own');
+await turn(
+  'Use the Bash tool with run_in_background true to run exactly: '
+  + "bash -c 'sleep 2; echo about-to-fail; exit 3'. "
+  + 'Do not wait, do not poll. Reply LAUNCHED.',
+);
+
 // Let the shell finish and every late settlement frame land.
 await new Promise((resolve) => setTimeout(resolve, 20000));
 

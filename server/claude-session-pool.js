@@ -77,6 +77,12 @@ const ABORT_SETTLE_FALLBACK_MS = 5000;
  *   #2 task_updated{"status":"completed","end_time":…}
  *   #3 task_notification{status:completed,output_file:true}   ← 0 ms after #2
  *
+ * Re-measured for a FAILING backgrounded command after the first version of this
+ * assumed the two matched: same frame set, same order, 1 ms lag
+ * (`task_updated{"status":"failed"}` then `task_notification{status:failed}`).
+ * `killed` remains UNMEASURED — memory pressure cannot be forced from a probe —
+ * which is one of the two reasons the code must not depend on the lag at all.
+ *
  * Both facts are load-bearing and neither is inferable from `sdk.d.ts`:
  *
  * - Because there are two frames for one settlement, forwarding both would put
@@ -94,10 +100,18 @@ const ABORT_SETTLE_FALLBACK_MS = 5000;
  * the design spec claims the opposite in writing, and "losses become visible,
  * never silent" was unmet for exactly this shape.
  *
- * 2 s against a measured 0 ms is margin for a notification split across stdout
+ * 2 s against a measured 0-1 ms is margin for a notification split across stdout
  * chunks, not a guess at an unknown latency. Over-waiting costs a reaped task's
  * row two seconds; under-waiting double-reports every healthy task, so the
  * asymmetry is deliberate.
+ *
+ * And nothing here may treat the window as a GUARANTEE that a notification cannot
+ * arrive later. Two routes to one that does, neither excluded by any measurement:
+ * `killed` was never observed at all, and Node runs the timers phase BEFORE the
+ * poll phase, so any event-loop stall longer than the window fires this timer first
+ * and reads the buffered notification second. That is why the reported record is
+ * retained rather than deleted — see `PendingSettlement.reported`, and the
+ * broadcast that deleting it caused.
  */
 const SETTLEMENT_NOTIFICATION_GRACE_MS = 2000;
 
@@ -768,13 +782,56 @@ function removeFromLiveIfCurrent(session) {
  * nothing, and returns a promise that nothing can ever settle. The abort fallback
  * does not cover it either, because that turn was never aborted.
  *
- * So the accessor is READ here, which is the whole reason it exists. Treating the
- * session as gone makes `runTurn` fall through to a fresh process, and the
- * abandoned one's own drain loop ends on its closed input and reports whatever it
- * was still holding as lost — the visible outcome instead of the silent one.
+ * So the accessor is READ here, which is the whole reason it exists. `runTurn`
+ * then falls through to a fresh process — and hands the old session to
+ * `retireUnusableSession`, which is where the "then what happens to it" half of
+ * this lives. Do not treat "unusable" as "already dealt with": nothing has set
+ * `dead`, so nothing has cleaned up after it.
  */
 function isUnusable(session) {
   return Boolean(session.dead || session.input.closed);
+}
+
+/**
+ * Closes a session `runTurn` must not hand a turn to, and says what it cost.
+ *
+ * Dropping the reference is NOT enough, and the first version of this did exactly
+ * that. `createLiveSession` overwrites the key in `live`, so an
+ * `input.closed`-but-not-`dead` session becomes unreachable while still fully
+ * alive, and three things then outlive it: the ~320 MB CLI subprocess, which
+ * nothing ever calls `close()` on and which `closeAllSessions()` can no longer
+ * see; its hold-check interval, which self-clears only for a `dead` session and so
+ * keeps firing — telling the user ten minutes later that a process is "still
+ * holding" when it is neither reachable nor, by then, running; and any turn still
+ * in its slot, whose caller used to get a rejection it could act on and would
+ * otherwise sit in "processing" with the Stop button now retargeted at the
+ * replacement process.
+ *
+ * So it goes through `destroy()` like every other route out of a session's life.
+ * The consequence to be deliberate about: `destroy()` sets `dead` first, which is
+ * exactly how `drain` tells "we closed it" from "it died", so `drain` will NOT
+ * report the tasks this session was holding. They are still lost — the input is
+ * closed, so the CLI is going away and taking them with it — so the report is made
+ * from here instead, once, after teardown. An earlier comment claimed the drain
+ * loop would cover this; that is only true while OUR input drives the generator,
+ * which is precisely what has stopped being true.
+ */
+function retireUnusableSession(session) {
+  if (session.dead) {
+    // Already closed by whatever killed it, and that route owns the reporting.
+    return;
+  }
+  const lostTaskCount = session.liveTaskIds.size;
+  destroy(session);
+  reportLostTasks(
+    session,
+    new Error(
+      lostTaskCount > 0
+        ? 'the Claude CLI closed this session\'s input stream, so the session could no longer be given a '
+          + 'prompt and its background work could not be kept alive'
+        : 'the Claude CLI closed this session\'s input stream, so the session could no longer be given a prompt',
+    ),
+  );
 }
 
 /**
@@ -841,21 +898,23 @@ function destroy(session) {
  * depend on string matching.
  */
 function trackTask(session, message) {
-  const settledTaskOwner = applyTaskLifecycle(session, message);
+  const outcome = applyTaskLifecycle(session, message);
   // The hold check's lifetime follows `liveTaskIds`, so it is re-derived
   // wherever that map is touched — arming when the first task registers and
   // clearing when the last one settles.
   syncHoldCheckTimer(session);
-  return settledTaskOwner;
+  return outcome;
 }
 
 /**
- * Returns the `owner` of a task this message just SETTLED, or null.
+ * Applies this message to the session's task bookkeeping and returns a
+ * `TaskLifecycleOutcome` describing what it did.
  *
- * The return value exists because the record is gone by the time any sink runs:
- * `routeMessage` tracks before it forwards (task lifecycle must be applied even
- * for messages that are otherwise suppressed), so a sink that wanted to know who
- * a settling task belonged to could no longer look it up.
+ * There is a return value at all because the record is gone by the time any sink
+ * runs: `routeMessage` tracks before it forwards (task lifecycle must be applied
+ * even for messages that are otherwise suppressed), so a sink that wanted to know
+ * who a settling task belonged to — or whether its outcome had already been
+ * announced — could no longer look either up.
  */
 /**
  * Who a task announced RIGHT NOW belongs to: the owner of the turn that is
@@ -902,9 +961,26 @@ function ownerForNewlyStartedTask(session, taskId) {
   return session.taskOwner ?? null;
 }
 
+/**
+ * What `applyTaskLifecycle` says about a message that announced nothing about a
+ * task's life. Frozen and shared: `routeMessage` runs for every frame the process
+ * emits, and the overwhelming majority are this.
+ *
+ * @typedef {object} TaskLifecycleOutcome
+ * @property {unknown} taskOwner - The owner recorded for a task this very message
+ *   SETTLED, or null. Read here rather than at the sinks because the settling
+ *   frame is what removes the record.
+ * @property {boolean} duplicateSettlement - This frame announces a settlement the
+ *   pool has ALREADY reported to the caller, so it must not reach the session
+ *   sink. Only a `task_notification` arriving after the grace window closed can
+ *   set it; forwarding that frame would put a second row in the transcript for one
+ *   background command.
+ */
+const NO_TASK_LIFECYCLE = Object.freeze({ taskOwner: null, duplicateSettlement: false });
+
 function applyTaskLifecycle(session, message) {
   if (message?.type !== 'system') {
-    return null;
+    return NO_TASK_LIFECYCLE;
   }
   if (message.subtype === 'task_started' && typeof message.task_id === 'string') {
     // `description` is the only label this frame carries that a human can read:
@@ -922,7 +998,7 @@ function applyTaskLifecycle(session, message) {
       // user, which is the mistake this field removes.
       owner: ownerForNewlyStartedTask(session, message.task_id),
     });
-    return null;
+    return NO_TASK_LIFECYCLE;
   }
   if (message.subtype === 'task_notification' && typeof message.task_id === 'string') {
     // Two places to look, and the SECOND one is the fix for a real
@@ -933,10 +1009,21 @@ function applyTaskLifecycle(session, message) {
     // BROADCASTS — the task's summary and the absolute host path of its output
     // went to every connected client, which is the exact exposure the
     // per-task-owner work was meant to close.
-    const settling = session.liveTaskIds.get(message.task_id)
-      ?? takePendingSettlement(session, message.task_id)?.task;
+    //
+    // The second lookup has to work for a settlement the grace window has ALREADY
+    // reported, not just a live one, which is why `reportPendingSettlement` keeps
+    // its record instead of deleting it: two things are needed from that record
+    // and they are separate concerns. Who owns the task — so a frame that does
+    // get forwarded is never addressed to "unknown", i.e. to everyone. And that
+    // the settlement was already announced — so this frame is suppressed rather
+    // than adding a second row for one background command.
+    const stillLive = session.liveTaskIds.get(message.task_id);
     session.liveTaskIds.delete(message.task_id);
-    return settling?.owner ?? null;
+    const alreadySettled = stillLive ? null : takePendingSettlement(session, message.task_id);
+    return {
+      taskOwner: (stillLive ?? alreadySettled?.task)?.owner ?? null,
+      duplicateSettlement: alreadySettled?.reported === true,
+    };
   }
   if (message.subtype === 'task_updated' && typeof message.task_id === 'string') {
     const status = message.patch?.status;
@@ -951,10 +1038,10 @@ function applyTaskLifecycle(session, message) {
         // its very first one, so every task it can see settle it also saw start.
         openPendingSettlement(session, message.task_id, settling, message.patch);
       }
-      return settling?.owner ?? null;
+      return { taskOwner: settling?.owner ?? null, duplicateSettlement: false };
     }
   }
-  return null;
+  return NO_TASK_LIFECYCLE;
 }
 
 /**
@@ -966,7 +1053,40 @@ function applyTaskLifecycle(session, message) {
  *   through unmapped: the pool does not know the wire vocabulary its caller emits.
  * @property {string | null} error - `patch.error`, which only `failed` carries.
  * @property {NodeJS.Timeout | null} timer
+ * @property {boolean} reported - The caller has already been told about this
+ *   settlement, so the entry now exists ONLY as memory: who the task belonged to,
+ *   and that its outcome has been announced. Both are needed by a
+ *   `task_notification` that arrives after the window closed — the first so the
+ *   frame is never addressed to "unknown owner", which broadcasts, and the second
+ *   so it is suppressed instead of adding a second row.
+ *
+ *   Deleting the record at report time instead — the first version of this — meant
+ *   a late notification found nothing in either map, reported a null owner, and
+ *   handed one user's task summary and the absolute host path of its output to
+ *   every connected client, plus a second transcript row. Two routes to a late
+ *   notification, neither excluded: the measured 0 ms lag was measured for
+ *   `completed` only, and Node runs the timers phase BEFORE the poll phase, so any
+ *   event-loop stall longer than the window fires the fallback first and reads the
+ *   buffered notification second.
+ *
+ *   Retained entries are forgotten when the notification arrives or the session
+ *   dies, so the bound is the number of settlements whose notification never came
+ *   during one process's life — in practice the reaped tasks, which is the shape
+ *   this whole mechanism exists for.
  */
+
+/**
+ * Why the pool is reporting a settlement itself rather than forwarding the CLI's
+ * own notification. Passed through to the caller because the two are NOT the same
+ * claim and only one of them supports "the CLI reported no result for this task":
+ * `NOTIFICATION_WINDOW_ELAPSED` is that fact, whereas `PROCESS_ENDED` means we
+ * closed or lost the process before any notification could be routed — which is
+ * also true of a task that completed normally and did write its output file.
+ */
+const SETTLEMENT_REASON = Object.freeze({
+  NOTIFICATION_WINDOW_ELAPSED: 'notification-window-elapsed',
+  PROCESS_ENDED: 'process-ended',
+});
 
 /**
  * Records a settlement announced by `task_updated` and starts the grace window in
@@ -982,12 +1102,13 @@ function openPendingSettlement(session, taskId, task, patch) {
     status: patch?.status,
     error: typeof patch?.error === 'string' && patch.error ? patch.error : null,
     timer: null,
+    reported: false,
   };
   session.pendingSettlements.set(taskId, pending);
   pending.timer = setTimeout(() => {
     pending.timer = null;
     if (session.pendingSettlements.get(taskId) === pending) {
-      reportPendingSettlement(session, taskId, pending);
+      reportPendingSettlement(session, taskId, pending, SETTLEMENT_REASON.NOTIFICATION_WINDOW_ELAPSED);
     }
   }, SETTLEMENT_NOTIFICATION_GRACE_MS);
   // Same reasoning as the hold check's timer: a missed clear must not be able to
@@ -995,10 +1116,22 @@ function openPendingSettlement(session, taskId, task, patch) {
   pending.timer.unref?.();
 }
 
+function clearPendingSettlementTimer(pending) {
+  if (pending.timer) {
+    clearTimeout(pending.timer);
+    pending.timer = null;
+  }
+}
+
 /**
- * Takes a pending settlement out of the window without reporting it, cancelling
- * its timer. Called when the `task_notification` the window was waiting for
- * arrives, which is the healthy path and the overwhelmingly common one.
+ * Forgets a settlement entirely, returning what was known about it.
+ *
+ * Called when the `task_notification` arrives — whether that is inside the window
+ * (the healthy path, and the overwhelmingly common one, where the notification
+ * supersedes a report that has not happened yet) or after it closed (where the
+ * record's `reported` flag is what stops the frame becoming a second row). Either
+ * way the CLI has now had its say about this task, so there is nothing left to
+ * remember.
  */
 function takePendingSettlement(session, taskId) {
   const pending = session.pendingSettlements.get(taskId);
@@ -1006,28 +1139,30 @@ function takePendingSettlement(session, taskId) {
     return null;
   }
   session.pendingSettlements.delete(taskId);
-  if (pending.timer) {
-    clearTimeout(pending.timer);
-    pending.timer = null;
-  }
+  clearPendingSettlementTimer(pending);
   return pending;
 }
 
 /**
- * Tells the caller about a settlement whose `task_notification` never came, so
+ * Tells the caller about a settlement whose `task_notification` has not come, so
  * the outcome reaches the user the same way a notified one does.
+ *
+ * The record is marked rather than deleted — see `PendingSettlement.reported` for
+ * what a late notification still needs from it, and what deleting it cost.
  *
  * `skipTranscript` is filtered here for the same reason `reportLostTasks` and
  * `reportLongHeldTasks` filter it: ambient housekeeping is tracked (closing the
  * process would kill it too) but deliberately kept out of the conversation, and
  * the reaper killing one is not something the user asked about or can act on.
  */
-function reportPendingSettlement(session, taskId, pending) {
-  session.pendingSettlements.delete(taskId);
-  if (pending.timer) {
-    clearTimeout(pending.timer);
-    pending.timer = null;
+function reportPendingSettlement(session, taskId, pending, reason) {
+  clearPendingSettlementTimer(pending);
+  if (pending.reported) {
+    return;
   }
+  // Set BEFORE the sink runs, not after: a sink that throws must not leave the
+  // settlement looking unannounced, or a late notification would report it again.
+  pending.reported = true;
   if (pending.task.skipTranscript) {
     return;
   }
@@ -1038,6 +1173,7 @@ function reportPendingSettlement(session, taskId, pending) {
         description: pending.task.description,
         status: pending.status,
         error: pending.error,
+        reason,
       },
       { taskOwner: pending.task.owner },
     );
@@ -1054,16 +1190,19 @@ function reportPendingSettlement(session, taskId, pending) {
 }
 
 /**
- * Reports every settlement still inside its grace window.
+ * Reports every settlement not yet reported, and forgets all of them.
  *
- * Called on both death paths, because the task HAS settled — that is a known
- * fact, not a guess — and the notification that would have superseded the report
- * can no longer arrive on a process that is gone. Dropping these would reopen the
- * silence this whole mechanism exists to close, in a two-second window.
+ * Called on both death paths. Reporting, because the task HAS settled — that is a
+ * known fact, not a guess — and the notification that would have superseded the
+ * report can no longer arrive on a process that is gone, so dropping it would
+ * reopen the silence this mechanism exists to close, inside a two-second window.
+ * Forgetting, because the owner memory an already-reported entry exists for is
+ * only useful while frames can still arrive, and none can now.
  */
 function flushPendingSettlements(session) {
   for (const [taskId, pending] of [...session.pendingSettlements]) {
-    reportPendingSettlement(session, taskId, pending);
+    reportPendingSettlement(session, taskId, pending, SETTLEMENT_REASON.PROCESS_ENDED);
+    session.pendingSettlements.delete(taskId);
   }
 }
 
@@ -1253,8 +1392,8 @@ function routeMessage(session, message) {
   // The owner is captured here rather than at the sinks for the same ordering
   // reason: by the time a sink sees the message, the settling task's record has
   // already been removed.
-  const settledTaskOwner = trackTask(session, message);
-  const sinkMeta = { taskOwner: settledTaskOwner };
+  const { taskOwner, duplicateSettlement } = trackTask(session, message);
+  const sinkMeta = { taskOwner };
 
   if (message?.type === 'result') {
     /*
@@ -1376,7 +1515,7 @@ function routeMessage(session, message) {
     // normalizes to nothing — routing it only to the turn would make a
     // completion, a failure, or a reaper kill vanish silently, which is exactly
     // what goal 3 of the design forbids.
-    if (isTaskNotification(message)) {
+    if (isTaskNotification(message) && !duplicateSettlement) {
       session.onBetweenTurnMessage(message, sinkMeta);
     }
     turn.frameCount += 1;
@@ -1390,13 +1529,22 @@ function routeMessage(session, message) {
     // the transcript — but a background task's settlement still has to get
     // through, so this routes exactly like the between-turn path (whose sink
     // forwards only `task_notification`).
-    session.onBetweenTurnMessage(message, sinkMeta);
+    if (!duplicateSettlement) {
+      session.onBetweenTurnMessage(message, sinkMeta);
+    }
     return;
   }
 
   // No turn in flight: this is the path that carries a background task's
   // completion to the UI after its turn already finished.
-  session.onBetweenTurnMessage(message, sinkMeta);
+  //
+  // The one frame withheld from the sink anywhere in this function is a
+  // settlement the pool has already announced: the transcript has no
+  // update-in-place, so a second frame for one task id is a second row (and,
+  // under the same id, two React children under one key).
+  if (!duplicateSettlement) {
+    session.onBetweenTurnMessage(message, sinkMeta);
+  }
 
   armIdleTimerIfIdle(session);
 }
@@ -1546,6 +1694,7 @@ export const claudeSessionPool = {
 
     let session = live.get(appSessionId);
     if (session && isUnusable(session)) {
+      retireUnusableSession(session);
       session = undefined;
     }
 
@@ -1561,6 +1710,7 @@ export const claudeSessionPool = {
       await session.currentTurn.settled;
       session = live.get(appSessionId);
       if (session && isUnusable(session)) {
+        retireUnusableSession(session);
         session = undefined;
       }
       if (session?.currentTurn) {
@@ -1631,6 +1781,7 @@ export const claudeSessionPool = {
             if (session.currentTurn === turn) {
               session.currentTurn = null;
             }
+            retireUnusableSession(session);
             session = undefined;
           }
         }

@@ -238,18 +238,31 @@ warning, not a narrower filter and not eviction.
 
 ### Settlement frame shape and order (`task-settlement-frames.mjs`)
 
-Run twice, identical both times (a backgrounded Bash and a subagent):
+Run three times; the third run adds a FAILING backgrounded command, because the first two measured
+`completed` only and the report then assumed `failed` matched it — an assumption that contributed to
+a real defect (below). Identical shape every time:
 
 ```
-   #1 <task> task_started
-   #2 <task> task_updated{{"status":"completed","end_time":…}}
-   #3 <task> task_notification{status:completed,output_file:true}   ← 0 ms after #2
+   #1 b05qtan9 task_started
+   #2 b05qtan9 task_updated{{"status":"completed","end_time":…}}
+   #3 b05qtan9 task_notification{status:completed,output_file:true}
+   #4 aeebb803 task_started
+   #5 aeebb803 task_updated{{"status":"completed","end_time":…}}
+   #6 aeebb803 task_notification{status:completed,output_file:true}
+   #7 bdfup06x task_started
+   #8 bdfup06x task_updated{{"status":"failed","end_time":…}}
+   #9 bdfup06x task_notification{status:failed,output_file:true}
 
-tasks emitting BOTH             : 2
+tasks emitting BOTH             : 3
   ...notification first in all  : false
-  ...notification lag (ms)      : 0, 0
+  ...notification lag (ms)      : 0, 1, 1
 tasks emitting only task_updated: 0
 ```
+
+So `failed` matches `completed` in frame set, order and lag — now measured rather than assumed. A
+non-zero exit is **not** misreported as `completed`, and the failed notification carries an
+`output_file` too. **`killed` is still UNMEASURED** and cannot be forced from a probe, so no code may
+depend on the lag: see the second bullet after the next one.
 
 Neither fact is in `sdk.d.ts`, and both are load-bearing for how a settlement is reported:
 
@@ -261,10 +274,18 @@ Neither fact is in `sdk.d.ts`, and both are load-bearing for how a settlement is
   from a status patch.
 
 The design that follows: the notification stays primary, and a terminal `task_updated` is held as a
-**fallback** for `SETTLEMENT_NOTIFICATION_GRACE_MS` (2 s, against a measured 0 ms — margin for a
+**fallback** for `SETTLEMENT_NOTIFICATION_GRACE_MS` (2 s, against a measured 0-1 ms — margin for a
 notification split across stdout chunks, not a guess at an unknown latency), reported only if no
 notification supersedes it. That fallback is the only route by which a task reaped under memory
 pressure reaches a user at all: `patch.status: 'killed'` has no notification behind it.
+
+- **The window is not a guarantee, and treating it as one cost a broadcast.** The first version of
+  the fallback deleted its record when it fired, so a notification arriving *after* the window found
+  nothing, reported a null owner — which `emitBackgroundTaskEvent` broadcasts — and added a second
+  transcript row. Two routes to a late notification, neither excluded by anything above: `killed` was
+  never measured, and Node runs the **timers phase before the poll phase**, so any event-loop stall
+  longer than the window fires the fallback first and reads the already-buffered notification second.
+  The record is therefore retained after reporting, as owner memory plus a "already announced" flag.
 
 This probe also uncovered a shipped defect it was not looking for. Because the status patch removes
 the task record and the notification lands 0 ms later, the notification found nothing tracked and

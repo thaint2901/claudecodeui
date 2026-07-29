@@ -3142,35 +3142,54 @@ test('a task announced between turns belongs to the aborted turn\'s owner, and o
  * for any reason of its own invokes `return()` on the iterator, which closes the
  * stream (`claude-session-input-stream.js`). The pool never learns: nothing sets
  * `dead`, the generator has not ended, so `drain`'s teardown has not run either.
+ *
+ * `settleFirstTurn: false` additionally leaves turn 1 IN the slot when that
+ * happens, which is the case where abandoning the session orphans a caller.
  */
-function createTornPromptQuery() {
-  const state = { processes: 0, prompts: [], tornDown: false };
+function createTornPromptQuery({ settleFirstTurn = true } = {}) {
+  const state = { processes: 0, prompts: [], tornDown: false, closed: [] };
+  /** @type {Map<number, Function>} Resolved by `close()`, which is what ends each generator. */
+  const closeWaiters = new Map();
 
   const factory = ({ prompt }) => {
     state.processes += 1;
     const processIndex = state.processes;
     const generator = (async function* run() {
+      if (processIndex > 1) {
+        // The REPLACEMENT process is an ordinary one and must be driven through
+        // `prompt`'s async-ITERABLE protocol. An earlier version of this fake
+        // reused a bare iterator here, so process 2 threw
+        // `iterator is not async iterable` the moment it yielded, and the
+        // resulting "process ended unexpectedly" noise is exactly what hid the
+        // abandoned session's own misbehaviour from review.
+        for await (const userMessage of prompt) {
+          state.prompts.push(userMessage.message.content);
+          yield { type: 'result', subtype: 'success' };
+        }
+        return;
+      }
+
       const iterator = prompt[Symbol.asyncIterator]();
       const first = await iterator.next();
       state.prompts.push(first.value.message.content);
-      yield { type: 'system', subtype: 'task_started', task_id: `bg-${processIndex}`, description: 'a background shell' };
-      yield { type: 'result', subtype: 'success' };
-      if (processIndex === 1) {
-        // What the SDK does on its way out of `streamInput`, and nothing else.
-        await iterator.return();
-        state.tornDown = true;
-        // Deliberately never ends: a generator that returned here would take
-        // `drain`'s `finally` with it and set `dead`, which is the state the pool
-        // ALREADY handles. The whole point is the state it did not.
-        await new Promise(() => {});
-      }
-      for await (const userMessage of iterator) {
-        state.prompts.push(userMessage.message.content);
+      yield { type: 'system', subtype: 'task_started', task_id: 'bg-1', description: 'a background shell' };
+      if (settleFirstTurn) {
         yield { type: 'result', subtype: 'success' };
       }
+      // What the SDK does on its way out of `streamInput`, and nothing else.
+      await iterator.return();
+      state.tornDown = true;
+      // Alive until someone closes us — which is what a real `close()` achieves by
+      // terminating the subprocess. A generator that simply returned here would
+      // take `drain`'s `finally` with it and set `dead`, i.e. the state the pool
+      // already handled rather than the one under test.
+      await new Promise((resolve) => { closeWaiters.set(processIndex, resolve); });
     })();
     generator.interrupt = async () => {};
-    generator.close = () => {};
+    generator.close = () => {
+      state.closed.push(processIndex);
+      closeWaiters.get(processIndex)?.();
+    };
     return generator;
   };
 
@@ -3193,6 +3212,7 @@ test('a session whose input the SDK closed is not reused, and its next turn stil
     appSessionId: 'torn',
     sdkOptions: {},
     onBetweenTurnMessage: () => {},
+    onTaskLost: () => {},
     createQuery: factory,
   };
 
@@ -3231,34 +3251,102 @@ test('a session whose input the SDK closed is not reused, and its next turn stil
 });
 
 /*
- * H1, at the pool's own boundary: a task whose only terminal frame is
- * `task_updated` must reach a sink. `claude-sdk-task-lost.test.ts` proves the
- * frame reaches a client; these prove the pool calls the callback at all, plus the
- * three behaviours the transport cannot see — the grace window, the dedup against
- * the notification that normally follows, and the skip_transcript exclusion.
- *
- * Built on `createInterleavableQuery` because every frame here arrives BETWEEN
- * turns, which the script-per-turn fake cannot express.
+ * Fix-round-2 finding: dropping the reference to an unusable session was not
+ * enough. `createLiveSession` overwrites its key in `live`, so it became
+ * unreachable while still fully alive — its subprocess never closed and invisible
+ * to `closeAllSessions()`, its hold-check interval still firing (that callback
+ * refuses only a `dead` session), and any turn still in its slot orphaned in
+ * "processing" with Stop now retargeted at the replacement process.
  */
-async function startTaskSession(appSessionId, { emit, factory }, task, extra = {}) {
-  const settlements = [];
-  const betweenTurn = [];
-  const turn = claudeSessionPool.runTurn({
-    appSessionId,
-    userMessage: userMessage('start a shell'),
+test('an unusable session is closed, not abandoned: process closed, tasks reported, no later advisory', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() });
+  captureConsoleErrors(t);
+  const { factory, state } = createTornPromptQuery();
+
+  const lost = [];
+  const holdWarnings = [];
+  const common = {
+    appSessionId: 'torn-retire',
     sdkOptions: {},
-    onMessage: () => {},
-    onBetweenTurnMessage: (message, meta) => betweenTurn.push({ subtype: message.subtype, ...meta }),
-    onTaskSettledWithoutNotification: (event, meta) => settlements.push({ ...event, ...meta }),
+    onBetweenTurnMessage: () => {},
+    onTaskLost: (event, meta) => lost.push({ ...event, ...meta }),
+    onHoldWarning: (event) => holdWarnings.push(event),
     taskOwner: 'alice',
     createQuery: factory,
-    ...extra,
+  };
+
+  await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('turn one'), onMessage: () => {} });
+  await waitFor(() => state.tornDown, { message: 'the SDK must have torn the prompt iterator down' });
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('torn-retire'), ['bg-1'], 'the session is holding a task');
+
+  await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('turn two'), onMessage: () => {} });
+
+  assert.ok(
+    state.closed.includes(1),
+    'the ~320 MB subprocess must actually be closed — nothing else can reach it once its key is '
+    + `overwritten (closed: ${JSON.stringify(state.closed)})`,
+  );
+  assert.equal(claudeSessionPool.hasLiveSession('torn-retire'), false);
+  assert.deepEqual(
+    lost,
+    [{ taskId: 'bg-1', description: 'a background shell', taskOwner: 'alice' }],
+    'and its background work is lost, so it must be reported — `drain` will not, because we closed it',
+  );
+
+  // Ten minutes on the fake clock: the abandoned session's hold check used to keep
+  // firing, telling the user a process was "still holding" when it was neither
+  // reachable nor running.
+  for (let i = 0; i < 10; i += 1) {
+    t.mock.timers.tick(60000);
+  }
+  assert.deepEqual(holdWarnings, [], 'a retired session must not advise anyone about anything');
+
+  claudeSessionPool._resetForTests();
+  t.mock.timers.reset();
+});
+
+test('a turn still in the slot when the SDK closes the input is rejected, not left in "processing"', async (t) => {
+  claudeSessionPool._resetForTests();
+  captureConsoleErrors(t);
+  const { factory, state } = createTornPromptQuery({ settleFirstTurn: false });
+
+  const common = {
+    appSessionId: 'torn-orphan',
+    sdkOptions: {},
+    onBetweenTurnMessage: () => {},
+    onTaskLost: () => {},
+    createQuery: factory,
+  };
+
+  // Turn 1 never gets a terminator: the iterator is torn down while it still holds
+  // the slot. Recorded, not awaited — an unrejected turn would hang the test.
+  let firstOutcome = null;
+  const first = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('turn one'),
+    onMessage: () => {},
   });
-  emit({ type: 'system', subtype: 'task_started', description: 'a long shell', ...task });
-  emit({ type: 'result', subtype: 'success' });
-  await turn;
-  return { settlements, betweenTurn };
-}
+  first.then((result) => { firstOutcome = result; }, (error) => { firstOutcome = error; });
+
+  await waitFor(() => state.tornDown, { message: 'the SDK must have torn the prompt iterator down' });
+  assert.equal(firstOutcome, null, 'turn 1 is still in the slot — that is the premise');
+
+  const second = await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('turn two'),
+    onMessage: () => {},
+  });
+  assert.equal(second.subtype, 'success', 'the new message runs on a fresh process');
+
+  await waitFor(() => firstOutcome !== null, {
+    message: 'the orphaned turn must be rejected — its caller has no other route out of "processing"',
+  });
+  assert.ok(firstOutcome instanceof Error, `expected a rejection, got ${JSON.stringify(firstOutcome)}`);
+  assert.match(String(firstOutcome.message), /process ended before the turn completed/);
+
+  claudeSessionPool._resetForTests();
+});
 
 test('a task settling only via task_updated is reported once the notification window closes', async (t) => {
   claudeSessionPool._resetForTests();
@@ -3277,7 +3365,17 @@ test('a task settling only via task_updated is reported once the notification wi
   t.mock.timers.tick(2000);
   assert.deepEqual(
     settlements,
-    [{ taskId: 'reaped', description: 'a long shell', status: 'killed', error: null, taskOwner: 'alice' }],
+    [{
+      taskId: 'reaped',
+      description: 'a long shell',
+      status: 'killed',
+      error: null,
+      // Why the pool is reporting rather than forwarding, which is what lets the
+      // caller word the row honestly: only on THIS path is "the CLI reported no
+      // result notification" a fact.
+      reason: 'notification-window-elapsed',
+      taskOwner: 'alice',
+    }],
     'the reaper\'s own signal reaches the caller, named, with the owner who started the task',
   );
 
@@ -3307,6 +3405,104 @@ test('the task_notification that normally follows cancels the fallback report', 
   );
 
   claudeSessionPool.closeSession('healthy-settle');
+  t.mock.timers.reset();
+});
+
+/*
+ * H1, at the pool's own boundary: a task whose only terminal frame is
+ * `task_updated` must reach a sink. `claude-sdk-task-lost.test.ts` proves the
+ * frame reaches a client; these prove the pool calls the callback at all, plus the
+ * behaviours the transport cannot see — the grace window, the dedup against the
+ * notification that normally follows, and the skip_transcript exclusion.
+ *
+ * Built on `createInterleavableQuery` because every frame here arrives BETWEEN
+ * turns, which the script-per-turn fake cannot express.
+ */
+async function startTaskSession(appSessionId, { emit, factory }, task, extra = {}) {
+  const settlements = [];
+  const betweenTurn = [];
+  const turn = claudeSessionPool.runTurn({
+    appSessionId,
+    userMessage: userMessage('start a shell'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: (message, meta) => betweenTurn.push({ subtype: message.subtype, ...meta }),
+    onTaskSettledWithoutNotification: (event, meta) => settlements.push({ ...event, ...meta }),
+    taskOwner: 'alice',
+    createQuery: factory,
+    ...extra,
+  });
+  emit({ type: 'system', subtype: 'task_started', description: 'a long shell', ...task });
+  emit({ type: 'result', subtype: 'success' });
+  await turn;
+  return { settlements, betweenTurn };
+}
+
+/*
+ * Fix-round-2 CRITICAL: `reportPendingSettlement` deleted the pending record —
+ * the only surviving copy of the owner — before reporting. A `task_notification`
+ * arriving after the window then found nothing in either map, reported a NULL
+ * owner (which `emitBackgroundTaskEvent` broadcasts to every connected client,
+ * summary and absolute host output path included), and added a second transcript
+ * row for one background command. Two routes to a late notification: the measured
+ * lag covers `completed` and `failed` (0-1 ms) but not `killed`, and Node runs the
+ * timers phase BEFORE the poll phase, so any event-loop stall longer than the
+ * window fires the fallback first and reads the buffered notification second.
+ */
+test('a task_notification arriving after the grace window adds no second row', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: Date.now() });
+  const query = createInterleavableQuery();
+
+  const { settlements, betweenTurn } = await startTaskSession('late-notify', query, { task_id: 'late' });
+
+  query.emit({ type: 'system', subtype: 'task_updated', task_id: 'late', patch: { status: 'completed' } });
+  await flushMicrotasks();
+  t.mock.timers.tick(2000);
+  assert.equal(settlements.length, 1, 'the window closed, so the fallback has already told the user');
+  assert.equal(settlements[0].taskOwner, 'alice');
+
+  // Now the notification the window gave up waiting for.
+  query.emit({
+    type: 'system',
+    subtype: 'task_notification',
+    task_id: 'late',
+    status: 'completed',
+    output_file: '/home/alice/.claude/tasks/late.output',
+  });
+  await flushMicrotasks();
+  t.mock.timers.tick(2000);
+
+  assert.deepEqual(
+    betweenTurn.filter((entry) => entry.subtype === 'task_notification'),
+    [],
+    'the settlement was already announced, so this frame must not reach the sink at all — '
+    + 'the transcript has no update-in-place, so a second frame is a second row',
+  );
+  assert.equal(settlements.length, 1, 'and it must not be reported a second time either');
+
+  claudeSessionPool.closeSession('late-notify');
+  t.mock.timers.reset();
+});
+
+test('a settlement already reported is not reported again when the session dies', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: Date.now() });
+  const query = createInterleavableQuery();
+
+  const { settlements } = await startTaskSession('reported-then-death', query, { task_id: 'once' });
+
+  query.emit({ type: 'system', subtype: 'task_updated', task_id: 'once', patch: { status: 'killed' } });
+  await flushMicrotasks();
+  t.mock.timers.tick(2000);
+  assert.equal(settlements.length, 1);
+
+  // The record is retained after reporting (it is the owner memory a late
+  // notification needs), so the death-path flush has to skip it rather than
+  // treat every retained entry as unreported.
+  claudeSessionPool.closeSession('reported-then-death');
+  assert.equal(settlements.length, 1, 'one settlement, one report, however the session ends');
+
   t.mock.timers.reset();
 });
 
@@ -3352,7 +3548,17 @@ test('a settlement still inside its grace window is reported when the process di
   claudeSessionPool.closeSession('dying-window');
   assert.deepEqual(
     settlements,
-    [{ taskId: 'racing', description: 'a long shell', status: 'failed', error: 'exit 137', taskOwner: 'alice' }],
+    [{
+      taskId: 'racing',
+      description: 'a long shell',
+      status: 'failed',
+      error: 'exit 137',
+      // A DIFFERENT reason from the window-elapsed path, and the distinction is
+      // the point: we ended the process before a notification could be routed, so
+      // the row must not claim the CLI reported nothing.
+      reason: 'process-ended',
+      taskOwner: 'alice',
+    }],
     'and the report carries patch.error, so the row can say what failed',
   );
 

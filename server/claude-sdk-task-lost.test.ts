@@ -434,6 +434,90 @@ test('the notification after a terminal task_updated still knows the task\'s own
   }
 });
 
+// Fix-round-2 CRITICAL, at the transport where it actually hurt. The first version
+// of the grace window DELETED its record when the fallback fired, so a
+// `task_notification` arriving after the window found nothing in either map,
+// reported a null owner — and `emitBackgroundTaskEvent` BROADCASTS an unknown
+// owner. Measured on that tree: Bob received Alice's task summary and
+// `/home/alice/.claude/tasks/….output`, his chime fired, and Alice got two rows
+// for one command. This pins both halves at the wire.
+test('a notification arriving after the grace window reaches nobody — not a second row, not a bystander', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: Date.now() });
+  const clients = createTwoUserClients();
+
+  frameScripts.push(async function* script() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-late-provider', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'task-late-1',
+      description: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+    yield {
+      type: 'system',
+      subtype: 'task_updated',
+      task_id: 'task-late-1',
+      patch: { status: 'completed', end_time: Date.now() },
+    };
+    // Held back deliberately: the pool must not still be waiting for this when the
+    // test advances the clock past the window.
+    yield { type: 'system', subtype: 'task_progress', task_id: 'task-late-1', description: 'still going' };
+  });
+
+  try {
+    await queryClaudeSDK(
+      'start something in the background',
+      { ...TWO_USER_OPTIONS, appSessionId: 'task-late-app' },
+      createFakeWs(OWNER_USER_ID),
+    );
+
+    await waitFor(() => claudeSessionPool.getLiveTaskIds('task-late-app').length === 0);
+    t.mock.timers.tick(2000);
+    assert.equal(
+      clients.backgroundTaskFrames(clients.ownerFrames).length,
+      1,
+      'the window closed, so the owner has already been told once',
+    );
+
+    // The notification, arriving after the window — the case the deleted record
+    // could not survive.
+    frameScripts.push(async function* late() {
+      yield {
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-late-1',
+        status: 'completed',
+        output_file: '/home/alice/.claude/tasks/task-late-1.output',
+        summary: 'Echo t1-t10 with delays',
+      };
+      yield { type: 'result', subtype: 'success' };
+    });
+    await queryClaudeSDK(
+      'anything at all',
+      { ...TWO_USER_OPTIONS, appSessionId: 'task-late-app' },
+      createFakeWs(OWNER_USER_ID),
+    );
+    t.mock.timers.tick(2000);
+
+    assert.equal(
+      clients.backgroundTaskFrames(clients.ownerFrames).length,
+      1,
+      'one background command, one row — the transcript has no update-in-place',
+    );
+    assert.equal(
+      clients.backgroundTaskFrames(clients.otherFrames).length,
+      0,
+      'and a bystander must never receive the owner\'s task summary or the absolute host output path',
+    );
+  } finally {
+    clients.dispose();
+    claudeSessionPool._resetForTests();
+    t.mock.timers.reset();
+  }
+});
+
 // `emitBackgroundTaskEvent` scopes delivery to the task's owner, but only the
 // producer can say who that is, and the only available answer is the user whose
 // turn set the work going — carried by the run writer. The service's own tests

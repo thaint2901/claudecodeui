@@ -334,6 +334,69 @@ test('/subtask on a live process whose task already settled recreates it instead
   claudeSessionPool._resetForTests();
 });
 
+// The mirror direction, and the reason `forkSubagent` is a refusing reason rather
+// than a comment: a process started for a /subtask carries
+// `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` for its whole life, so an ordinary message
+// reusing it would silently lose `run_in_background`. Unreachable in production —
+// such a process cannot hold a task, so `closeIfIdle` destroys it at turn end and
+// the next turn always gets a fresh one — which is exactly why the fake constructs
+// the state directly: if that ever stops being true, this refuses instead of
+// quietly downgrading the feature. It is also what makes the third argument to
+// `pendingFreshProcessReasons` load-bearing: omit it and every ordinary turn on a
+// held session compares `false` against `null` and gets refused.
+test('an ordinary turn on a HELD /subtask process is refused, not silently stripped of run_in_background', async (t) => {
+  claudeSessionPool._resetForTests();
+  resetSdkState();
+
+  const subtaskWs = createFakeWs();
+  await queryClaudeSDK(
+    'Run a subtask: summarize the conversation so far',
+    {
+      appSessionId: 'held-subtask',
+      cwd,
+      images: [],
+      model: 'sonnet',
+      permissionMode: 'bypassPermissions',
+      toolsSettings: { allowedTools: ['Bash'], disallowedTools: [], skipPermissions: false },
+      forkSubagent: true,
+    },
+    subtaskWs,
+  );
+  assert.equal(refusal(subtaskWs), undefined, 'the /subtask itself creates the process, so it must not be refused');
+  assert.deepEqual(
+    claudeSessionPool.getLiveTaskIds('held-subtask'),
+    ['bg-shell-1'],
+    'the fake holds a task on the subtask process — a state the real CLI cannot reach, which is the point',
+  );
+
+  const runTurn = t.mock.method(claudeSessionPool, 'runTurn');
+
+  const ws = createFakeWs();
+  await queryClaudeSDK(
+    'now run something in the background for me',
+    {
+      appSessionId: 'held-subtask',
+      sessionId: 'busy-provider-1',
+      cwd,
+      images: [],
+      model: 'sonnet',
+      permissionMode: 'bypassPermissions',
+      toolsSettings: { allowedTools: ['Bash'], disallowedTools: [], skipPermissions: false },
+    },
+    ws,
+  );
+
+  const error = refusal(ws);
+  assert.ok(error, `expected a protocol_error frame, got ${JSON.stringify(ws.sent)}`);
+  assert.equal(error.code, 'SESSION_BUSY_BACKGROUND_TASK');
+  assert.match(String(error.error), /subtask/i, 'the user must be told which process is in the way');
+  assert.match(String(error.error), /background commands/i, 'and what it costs them');
+  assert.deepEqual(ws.sent.map((frame) => frame.kind), ['protocol_error', 'complete']);
+  assert.equal(runTurn.mock.callCount(), 0, 'running with run_in_background silently off is the bug, not the fallback');
+
+  claudeSessionPool._resetForTests();
+});
+
 test('an edit-prompt fork on a session holding a background task is refused, and the message names the fork', async (t) => {
   claudeSessionPool._resetForTests();
   resetSdkState();

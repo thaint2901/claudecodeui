@@ -311,6 +311,7 @@ const FRESH_PROCESS_REQUIRED_REASONS = new Set([
   'cwd',
   'forkSession',
   'resumeSessionAt',
+  'forkSubagent',
   CONVERSATION_DRIFT_REASON,
 ]);
 
@@ -340,11 +341,12 @@ function describeHeldProcessRefusal(poolSessionId, options, sdkOptions) {
   }
 
   const blocked = claudeSessionPool
-    // `forkSubagent` is stated rather than read off `sdkOptions` for the reason
-    // spelled out below and in the pool's `CALLER_STATED_OPTION_FIELDS`. Passing
-    // it keeps this comparison honest even though the /subtask refusal itself is
-    // decided from the raw option: without it a process spawned FOR a subtask
-    // would report a spurious difference on every later turn.
+    // The third argument is load-bearing, not decorative: `forkSubagent` is not an
+    // `sdkOptions` field (see the pool's `CALLER_STATED_OPTION_FIELDS`), so the
+    // pool has no way to derive it, and it is now a refusing reason. Omit it and
+    // every ordinary turn on a held session compares `false` against `null`,
+    // reports a difference, and gets refused. It must be stated the same way here
+    // as at the `runTurn` call site or the two disagree.
     .pendingFreshProcessReasons(poolSessionId, sdkOptions, { forkSubagent: options.forkSubagent === true })
     .filter((reason) => FRESH_PROCESS_REQUIRED_REASONS.has(reason));
 
@@ -362,6 +364,20 @@ function describeHeldProcessRefusal(poolSessionId, options, sdkOptions) {
       '/subtask needs its own Claude CLI process: it runs the subagent with this conversation\'s context '
       + 'inherited, which is set up through the process\'s environment when it starts and cannot be '
       + 'changed on a running one.',
+    );
+  }
+  // The mirror of the branch above, and the only one of these that describes the
+  // LIVE process rather than the request: this process was started for a /subtask,
+  // whose env (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`) turns background commands
+  // off for its whole life, so an ordinary message reusing it would silently lose
+  // `run_in_background`. Unreachable while a /subtask process cannot hold a task
+  // and is therefore closed at turn end — which is exactly why it is refused
+  // rather than trusted: if either of those facts ever changes, this says so
+  // instead of quietly downgrading the feature.
+  if (blocked.includes('forkSubagent') && options.forkSubagent !== true) {
+    reasons.push(
+      'This session\'s Claude CLI process was started for a /subtask, which switches background commands '
+      + 'off for as long as it runs, so an ordinary message needs its own process.',
     );
   }
   if (forkBlocked) {
@@ -1161,7 +1177,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
     // window. `patch.status: 'killed'` is the memory-pressure reaper's own signal,
     // and until this existed such a task reached no user at all: the pool cleared
     // its tracking and `forwardBetweenTurnMessage` forwards only notifications.
-    const reportSettledBackgroundTask = ({ taskId, description, status, error }, meta) => {
+    const reportSettledBackgroundTask = ({ taskId, description, status, error, reason }, meta) => {
       const label = description ?? 'A background task';
       // `killed` is not part of the wire vocabulary — `stopped` is, and the
       // frontend already renders it as "was stopped (likely reaped under memory
@@ -1173,6 +1189,16 @@ async function queryClaudeSDK(command, options = {}, ws) {
         : status === 'failed'
           ? `${label} — failed${error ? `: ${error}` : ''}.`
           : `${label} — finished.`;
+      // The two reasons are different claims and only one of them supports "the
+      // CLI reported nothing". `process-ended` means we closed or lost the process
+      // before a notification could be routed — which is also what happens to a
+      // task that completed normally and DID write its output file, so asserting
+      // "reported no result notification" there would be false. What is true on
+      // both paths is only that we have no path to the output.
+      const provenance = reason === 'process-ended'
+        ? 'The Claude CLI process ended before it said where the output went, so its output cannot be located '
+          + 'from here.'
+        : 'The Claude CLI reported no result notification for it, so its output could not be located.';
       emitBackgroundTaskEvent({
         sessionId: backgroundTaskSessionId,
         taskId,
@@ -1184,8 +1210,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
         // No `outputFile`: `task_updated.patch` carries no path (only
         // `task_notification` does), and inventing one would point the user at a
         // file that may not exist.
-        summary: `${detail} The Claude CLI reported no result notification for it, so its output could `
-          + 'not be located.',
+        summary: `${detail} ${provenance}`,
       });
     };
 
