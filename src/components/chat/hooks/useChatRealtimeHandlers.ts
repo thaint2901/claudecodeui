@@ -8,7 +8,12 @@ import type { MarkSessionIdle, MarkSessionProcessing } from '../../../hooks/useS
 import type { PendingPermissionRequest } from '../types/types';
 import type { ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
-import { buildBackgroundTaskSummary, isNonTranscriptKind, resolveBackgroundTaskOutcome } from '../utils/realtimeKinds';
+import {
+  buildBackgroundTaskSummary,
+  isNonTranscriptKind,
+  resolveBackgroundTaskOutcome,
+  shouldSignalBackgroundTaskCompletion,
+} from '../utils/realtimeKinds';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -236,8 +241,12 @@ export function useChatRealtimeHandlers({
           // Both of these say "the thing you were waiting for is done" — the tab
           // title indicator literally, the chime by being the same sound every
           // completion makes. An advisory about work that is STILL RUNNING must
-          // not claim that; its transcript row is the whole notification.
-          if (!advisory) {
+          // not claim that; its transcript row is the whole notification. And
+          // both are tab-global, so a task settling on a session this tab is not
+          // showing would ding the user with nothing on screen to explain it —
+          // the transcript row above is still written either way, so switching
+          // to that session finds it waiting.
+          if (shouldSignalBackgroundTaskCompletion({ advisory, sessionId: sid, activeViewSessionId })) {
             showCompletionTitleIndicator();
             void playNotificationSound();
           }

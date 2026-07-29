@@ -750,6 +750,22 @@ async function queryClaudeSDK(command, options = {}, ws) {
   // one-shot run, a fresh id scoped to just this call.
   const poolSessionId = options.appSessionId || sessionId || createRequestId();
 
+  // What `background_task` frames may be addressed to, which is NOT
+  // `poolSessionId`: those two fall-backs above are a provider-native id and a
+  // one-shot request id, and the frontend takes the frame's `sessionId` as an app
+  // session id and writes a transcript row into that store bucket. Null for the
+  // REST entry points, which `emitBackgroundTaskEvent` then drops.
+  const backgroundTaskSessionId = typeof options.appSessionId === 'string' && options.appSessionId
+    ? options.appSessionId
+    : null;
+
+  // Who a background task belongs to. There is no session owner to look up (the
+  // `sessions` table has no such column and the app has no session ACL), so the
+  // only available notion is the user whose turn set this work going — carried by
+  // the run writer. Read once here, so each per-turn callback below reports to
+  // the user of the turn that created it, rather than to whoever ran last.
+  const ownerUserId = ws?.userId ?? null;
+
   // A stand-in for the raw SDK query instance: the pool owns the real object
   // internally (it may not even exist yet, or may be a currently-idle
   // between-turn session), so abort addresses it through the pool by
@@ -1078,11 +1094,12 @@ async function queryClaudeSDK(command, options = {}, ws) {
       emitBackgroundTaskEvent({
         // The app-level id, not `capturedSessionId` — the frontend (and this
         // event's own consumer contract) never sees the provider-native id.
-        sessionId: poolSessionId,
+        sessionId: backgroundTaskSessionId,
         taskId: message.task_id,
         status: message.status,
         outputFile: message.output_file,
         summary: message.summary,
+        ownerUserId,
       });
     };
 
@@ -1092,8 +1109,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
     // notified when the task completes, so silence means waiting forever.
     const reportLostBackgroundTask = ({ taskId, description }) => {
       emitBackgroundTaskEvent({
-        sessionId: poolSessionId,
+        sessionId: backgroundTaskSessionId,
         taskId,
+        ownerUserId,
         status: 'failed',
         // No `outputFile` on purpose: `task_started` carries none (measured —
         // `spikes/streaming-input-mode/task-classification.mjs`), and a task that
@@ -1111,8 +1129,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
     const reportHeldBackgroundTask = ({ taskId, description, heldForMs }) => {
       const minutes = Math.max(1, Math.round(heldForMs / 60000));
       emitBackgroundTaskEvent({
-        sessionId: poolSessionId,
+        sessionId: backgroundTaskSessionId,
         taskId,
+        ownerUserId,
         // Deliberately not one of the three settled outcomes: the task has not
         // completed, failed, or been stopped.
         status: 'running',

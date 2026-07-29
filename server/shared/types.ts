@@ -25,13 +25,25 @@ export type AnyRecord = Record<string, any>;
 /**
  * Minimal websocket client contract used by backend broadcaster services.
  *
- * Any transport object added to `connectedClients` must implement these two
+ * Any transport object added to `connectedClients` must implement the first two
  * members so shared services can safely send JSON strings and check whether the
  * socket is still open before broadcasting.
  */
 export type RealtimeClientConnection = {
   readyState: number;
   send(data: string): void;
+  /**
+   * Which authenticated user this connection belongs to, stamped when the chat
+   * websocket registers it (`handleChatConnection`).
+   *
+   * Broadcasters that carry per-user content read this to address only that
+   * user's connections instead of everyone's. It lives on the connection rather
+   * than in a parallel map so there is nothing to keep in sync with connects and
+   * disconnects. Optional and nullable: unauthenticated or non-chat transports
+   * (and any caller that never set it) leave it absent, which every reader must
+   * treat as "owner unknown".
+   */
+  userId?: string | number | null;
 };
 
 /**

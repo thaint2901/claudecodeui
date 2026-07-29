@@ -1,7 +1,35 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
-import { buildBackgroundTaskSummary, isNonTranscriptKind, resolveBackgroundTaskOutcome } from './realtimeKinds.js';
+import {
+  buildBackgroundTaskSummary,
+  isNonTranscriptKind,
+  resolveBackgroundTaskOutcome,
+  shouldSignalBackgroundTaskCompletion,
+} from './realtimeKinds.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const HANDLERS_SOURCE = path.join(HERE, '..', 'hooks', 'useChatRealtimeHandlers.ts');
+
+/**
+ * The `case '<kind>':` labels of the FIRST `switch (msg.kind)` in
+ * useChatRealtimeHandlers — the switch whose every arm returns before the
+ * generic append path.
+ */
+function readEarlyReturningKinds(): string[] {
+  const source = readFileSync(HANDLERS_SOURCE, 'utf8');
+  const switchAt = source.indexOf('switch (msg.kind) {');
+  assert.notEqual(switchAt, -1, 'the first kind switch must still be findable for this check to mean anything');
+  const defaultAt = source.indexOf('default:', switchAt);
+  assert.notEqual(defaultAt, -1, 'the first kind switch must still end in a default arm');
+
+  const kinds = [...source.slice(switchAt, defaultAt).matchAll(/case '([a-z_]+)':/g)].map((match) => match[1]);
+  assert.ok(kinds.length >= 8, `expected the extraction to find the switch arms, found ${kinds.length}`);
+  return kinds;
+}
 
 test('background_task must never be appended to the transcript store', () => {
   assert.equal(isNonTranscriptKind('background_task'), true);
@@ -10,6 +38,61 @@ test('background_task must never be appended to the transcript store', () => {
 test('the kinds that already dodge the generic append path stay classified', () => {
   for (const kind of ['session_upserted', 'loading_progress', 'session_lock_state_changed']) {
     assert.equal(isNonTranscriptKind(kind), true, `${kind} must not be appended`);
+  }
+});
+
+test('every kind that returns early from the first switch is on the allowlist', () => {
+  // The allowlist is the SECOND line of defence: if one of these arms ever
+  // loses its `return`, the allow-by-default `shouldPersist` guard is the only
+  // thing left between a frame with no `.id` and a corrupted session store.
+  // Reading the arms out of the source is what makes a newly added kind fail
+  // here instead of silently shipping without that defence.
+  for (const kind of readEarlyReturningKinds()) {
+    assert.equal(isNonTranscriptKind(kind), true, `${kind} returns early but has no allowlist entry`);
+  }
+});
+
+test('the frontend hook still returns early for all eight known non-transcript kinds', () => {
+  const kinds = readEarlyReturningKinds();
+  for (const kind of [
+    'websocket_reconnected',
+    'chat_subscribed',
+    'branch_created',
+    'protocol_error',
+    'session_upserted',
+    'loading_progress',
+    'session_lock_state_changed',
+    'background_task',
+  ]) {
+    assert.ok(kinds.includes(kind), `${kind} must still be handled in the first switch`);
+    assert.equal(isNonTranscriptKind(kind), true, `${kind} must not be appendable`);
+  }
+});
+
+test('a settled task only rings the chime for the session the user is looking at', () => {
+  assert.equal(
+    shouldSignalBackgroundTaskCompletion({ advisory: false, sessionId: 'app-1', activeViewSessionId: 'app-1' }),
+    true,
+  );
+  assert.equal(
+    shouldSignalBackgroundTaskCompletion({ advisory: false, sessionId: 'app-2', activeViewSessionId: 'app-1' }),
+    false,
+    'another session settling must not flash this tab\'s title or ring its chime',
+  );
+  assert.equal(
+    shouldSignalBackgroundTaskCompletion({ advisory: false, sessionId: 'app-1', activeViewSessionId: null }),
+    false,
+    'with no session in view there is nothing the signal could be about',
+  );
+});
+
+test('the long-hold advisory signals nothing, viewed session or not', () => {
+  for (const activeViewSessionId of ['app-1', 'app-2', null]) {
+    assert.equal(
+      shouldSignalBackgroundTaskCompletion({ advisory: true, sessionId: 'app-1', activeViewSessionId }),
+      false,
+      'an advisory about work that is STILL RUNNING is not a completion',
+    );
   }
 });
 

@@ -54,17 +54,24 @@ mock.module('@anthropic-ai/claude-agent-sdk', {
 });
 
 process.env.DATABASE_PATH = path.join(os.tmpdir(), `claude-sdk-task-lost-${process.pid}.db`);
-const { initializeDatabase } = await import('@/modules/database/index.js');
+const { initializeDatabase, userDb } = await import('@/modules/database/index.js');
 initializeDatabase();
+
+// The owner-scoped tests below hand `queryClaudeSDK` a real user id, and the
+// run-stopped notification it emits at the end of a turn reads that user's
+// notification preferences — an id with no `users` row fails the FK constraint
+// and the throw escapes the run. Two rows so "the other user" is a real one.
+const OWNER_USER_ID = Number(userDb.createUser('task-owner', 'x').id);
+const OTHER_USER_ID = Number(userDb.createUser('task-bystander', 'x').id);
 
 const { connectedClients, WS_OPEN_STATE } = await import('@/modules/websocket/index.js');
 const { queryClaudeSDK } = await import('./claude-sdk.js');
 const { claudeSessionPool } = await import('./claude-session-pool.js');
 
-function createFakeWs() {
+function createFakeWs(userId: string | number | null = null) {
   const sent: Array<Record<string, unknown>> = [];
   return {
-    userId: null,
+    userId,
     isWebSocketWriter: true,
     send: (msg: Record<string, unknown>) => sent.push(msg),
     sent,
@@ -217,5 +224,136 @@ test('a task still holding the CLI process open past ten minutes reaches the cli
     connectedClients.delete(client);
     claudeSessionPool._resetForTests();
     t.mock.timers.reset();
+  }
+});
+
+// `emitBackgroundTaskEvent` scopes delivery to the task's owner, but only the
+// producer can say who that is, and the only available answer is the user whose
+// turn set the work going — carried by the run writer. The service's own tests
+// prove the filter; they cannot prove `queryClaudeSDK` passes an owner at all, and
+// a missing `ownerUserId:` line there would leave them green while every user kept
+// receiving the task text and the host output path. Covers the settled producer
+// (`task_notification`), the one frame that carries the path.
+test('a settled task reaches only the connections of the user whose turn started it', async () => {
+  claudeSessionPool._resetForTests();
+  const ws = createFakeWs(OWNER_USER_ID);
+
+  const ownerFrames: Frame[] = [];
+  const ownerClient = {
+    readyState: WS_OPEN_STATE,
+    userId: OWNER_USER_ID,
+    send: (data: string) => { ownerFrames.push(JSON.parse(data) as Frame); },
+  };
+  const otherFrames: Frame[] = [];
+  const otherClient = {
+    readyState: WS_OPEN_STATE,
+    userId: OTHER_USER_ID,
+    send: (data: string) => { otherFrames.push(JSON.parse(data) as Frame); },
+  };
+  connectedClients.add(ownerClient);
+  connectedClients.add(otherClient);
+
+  frameScripts.push(async function* script() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-owned-provider-1', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'task-owned-1',
+      description: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+    // Settles AFTER the turn ended — the between-turn path, which is the whole
+    // reason this event cannot ride on a run writer.
+    yield {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'task-owned-1',
+      status: 'completed',
+      output_file: '/home/alice/.claude/tasks/task-owned-1.output',
+      summary: 'Echo t1-t10 with delays',
+    };
+  });
+
+  try {
+    await queryClaudeSDK(
+      'start something in the background',
+      { appSessionId: 'task-owned-app-1', cwd: os.tmpdir(), images: [], permissionMode: 'bypassPermissions' },
+      ws,
+    );
+
+    await waitFor(() => ownerFrames.some((frame) => frame.kind === 'background_task'));
+    const frame = ownerFrames.find((f) => f.kind === 'background_task') as Frame;
+    assert.equal(frame.sessionId, 'task-owned-app-1');
+    assert.equal(frame.outputFile, '/home/alice/.claude/tasks/task-owned-1.output');
+    assert.equal(
+      otherFrames.filter((f) => f.kind === 'background_task').length,
+      0,
+      'another user must not be handed the task text or the absolute host path',
+    );
+  } finally {
+    connectedClients.delete(ownerClient);
+    connectedClients.delete(otherClient);
+    claudeSessionPool._resetForTests();
+  }
+});
+
+// The gate is in `emitBackgroundTaskEvent`, but what decides whether it trips is
+// the value `queryClaudeSDK` passes: `poolSessionId` falls back to the
+// provider-native id (or a fresh request id) for the REST entry points, and the
+// frontend would take either as an app session id and write a transcript row into
+// a store bucket no session reads.
+test('a REST-originated run — no app session id — emits no background_task at all', async () => {
+  claudeSessionPool._resetForTests();
+  const ws = createFakeWs(OWNER_USER_ID);
+
+  const frames: Frame[] = [];
+  const client = {
+    readyState: WS_OPEN_STATE,
+    userId: OWNER_USER_ID,
+    send: (data: string) => { frames.push(JSON.parse(data) as Frame); },
+  };
+  connectedClients.add(client);
+
+  frameScripts.push(async function* script() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-rest-provider-1', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'task-rest-1',
+      description: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+    yield {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'task-rest-1',
+      status: 'completed',
+      output_file: '/tmp/task-rest-1.output',
+      summary: 'Echo t1-t10 with delays',
+    };
+  });
+
+  try {
+    // Exactly what server/routes/agent.js and server/routes/git.js pass: a
+    // provider `sessionId` at most, never an `appSessionId`.
+    await queryClaudeSDK(
+      'start something in the background',
+      { cwd: os.tmpdir(), images: [], permissionMode: 'bypassPermissions' },
+      ws,
+    );
+
+    // Drain the between-turn path the same number of ticks the owner test needs
+    // to see its frame, then assert nothing arrived.
+    for (let tick = 0; tick < 200; tick += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(
+      frames.filter((f) => f.kind === 'background_task').length,
+      0,
+      'the frame carries a non-app session id and must not reach the wire',
+    );
+  } finally {
+    connectedClients.delete(client);
+    claudeSessionPool._resetForTests();
   }
 });

@@ -11,6 +11,7 @@ import type {
   AnyRecord,
   AuthenticatedWebSocketRequest,
   LLMProvider,
+  RealtimeClientConnection,
 } from '@/shared/types.js';
 import { createNormalizedMessage, parseIncomingJsonObject } from '@/shared/utils.js';
 
@@ -688,9 +689,15 @@ export function handleChatConnection(
   dependencies: ChatWebSocketDependencies
 ): void {
   console.log('[INFO] Chat WebSocket connected');
-  connectedClients.add(ws);
 
   const userId = readRequestUserId(request);
+  // Stamp the identity onto the connection BEFORE it joins the set: a
+  // broadcaster carrying per-user content (background_task) reads it off the set
+  // entries, and the raw socket has no identity of its own. Mutating the socket
+  // rather than adding a parallel map keeps `connectedClients.delete(ws)` on
+  // close as the only cleanup there is.
+  (ws as RealtimeClientConnection).userId = userId;
+  connectedClients.add(ws);
 
   ws.on('message', async (rawMessage) => {
     try {
