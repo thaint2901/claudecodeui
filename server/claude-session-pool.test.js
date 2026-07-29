@@ -14,6 +14,9 @@ function createFakeQuery(scriptPerTurn, {
   omitApplyFlagSettings = false,
   // Which applyFlagSettings() calls throw, by 0-based call index.
   applyFlagSettingsFailsOn = () => false,
+  // A CLI that refuses the interrupt control request (or whose transport is
+  // already gone) — the one case that genuinely produces no turn terminator.
+  interruptFails = false,
 } = {}) {
   const state = {
     closed: false,
@@ -37,7 +40,12 @@ function createFakeQuery(scriptPerTurn, {
       }
     })();
 
-    generator.interrupt = async () => { state.interrupted = true; };
+    generator.interrupt = async () => {
+      state.interrupted = true;
+      if (interruptFails) {
+        throw new Error('interrupt refused by the fake process');
+      }
+    };
     generator.close = () => { state.closed = true; };
     // The two real streaming-input-only control requests the pool uses to
     // reconfigure a process it must not close.
@@ -185,7 +193,9 @@ test('two sequential turns share one process and route to their own writers', as
 
 test('settleTurn resolves an in-flight turn without closing the process', async () => {
   claudeSessionPool._resetForTests();
-  // Turn one never emits a result — this is what an interrupted turn looks like.
+  // Turn one never emits a result — what a turn whose terminator never arrives
+  // looks like, i.e. a FAILED interrupt (a successful one DOES terminate; see
+  // spikes/streaming-input-mode/interrupt-result.mjs).
   const { factory, state } = createFakeQuery([[{ type: 'assistant', text: 'working' }]]);
   const turnStarted = createDeferred();
 
@@ -229,8 +239,8 @@ test('interruptTurn calls the live query\'s interrupt() without closing the proc
   assert.equal(state.interrupted, true);
   assert.equal(state.closed, false, 'interruptTurn must not close the process');
 
-  // The interrupted turn itself still needs settling — interruptTurn only
-  // reaches the SDK's interrupt(), it is not a replacement for settleTurn.
+  // This fake never emits a terminator, so the interrupted turn is settled here
+  // by hand — the same job `interruptTurn`'s timed fallback does in production.
   claudeSessionPool.settleTurn('s8', 'aborted');
   await pending;
   claudeSessionPool.closeSession('s8');
@@ -1043,4 +1053,364 @@ test('closeAllSessions closes every live process, so shutdown cannot orphan one'
   assert.equal(second.state.closed, true);
   assert.equal(claudeSessionPool.hasLiveSession('shutdown-1'), false);
   assert.equal(claudeSessionPool.hasLiveSession('shutdown-2'), false);
+});
+
+/**
+ * Turn identity & abort semantics. One long-lived drain loop now serves many
+ * turns and answers "which turn is this frame for?" from a single mutable slot,
+ * so every defect below is a slot released too early or claimed too late.
+ *
+ * The measurement these tests are built on: an interrupted turn DOES emit a
+ * terminating `result` (`subtype: 'error_during_execution'`, within
+ * milliseconds — `spikes/streaming-input-mode/interrupt-result.mjs`), and
+ * `SDKResultMessage` carries no turn-correlation field. So a frame arriving
+ * after the slot has been reused cannot be attributed back to its own turn:
+ * the slot must never be vacant while the CLI may still be emitting for it.
+ */
+
+test('interruptTurn propagates a failed interrupt() instead of reporting success', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, state } = createFakeQuery(
+    [[{ type: 'assistant', text: 'working' }, { type: 'assistant', text: 'still working' }]],
+    { interruptFails: true },
+  );
+  const turnStarted = createDeferred();
+  const routed = [];
+
+  const pending = claudeSessionPool.runTurn({
+    appSessionId: 'int-fail',
+    userMessage: userMessage('long'),
+    sdkOptions: {},
+    onMessage: (m) => {
+      routed.push(m);
+      turnStarted.resolve();
+    },
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  await turnStarted.promise;
+
+  // Swallowing this made `abortClaudeSDKSession`'s catch unreachable — the only
+  // place that undoes `abortedSessionIds.add()`. The user was shown a clean
+  // "stopped" while the CLI kept generating an answer nobody would ever see.
+  await assert.rejects(
+    () => claudeSessionPool.interruptTurn('int-fail'),
+    /interrupt refused by the fake process/,
+  );
+  assert.equal(state.interrupted, true);
+  assert.equal(state.closed, false, 'a failed interrupt must not take the process down');
+
+  // The stop did not happen, so the run is still the user's run: its frames
+  // must keep flowing rather than being suppressed as "aborted".
+  await waitFor(() => routed.length === 2, { message: 'a non-interrupted turn keeps streaming' });
+
+  claudeSessionPool.settleTurn('int-fail', 'aborted');
+  await pending;
+  claudeSessionPool.closeSession('int-fail');
+});
+
+test('interruptTurn on a dead session is still a no-op, not a failure', async () => {
+  claudeSessionPool._resetForTests();
+  const factory = ({ prompt }) => {
+    const generator = (async function* run() {
+      for await (const _message of prompt) {
+        yield { type: 'result', subtype: 'success' };
+        return; // generator ends -> process gone
+      }
+    })();
+    generator.interrupt = async () => { throw new Error('the transport is gone'); };
+    generator.close = () => {};
+    return generator;
+  };
+
+  await claudeSessionPool.runTurn({
+    appSessionId: 'int-dead',
+    userMessage: userMessage('one'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  await waitFor(() => !claudeSessionPool.hasLiveSession('int-dead'), {
+    message: 'the session should be dead once its generator returned',
+  });
+  assert.equal(await claudeSessionPool.interruptTurn('int-dead'), false);
+  assert.equal(await claudeSessionPool.interruptTurn('never-existed'), false);
+});
+
+test('an aborted turn stops receiving frames but is still settled by its own terminator', async () => {
+  claudeSessionPool._resetForTests();
+  const postInterrupt = createDeferred();
+  const state = { closed: false };
+
+  const factory = ({ prompt }) => {
+    const generator = (async function* run() {
+      for await (const _message of prompt) {
+        yield { type: 'assistant', text: 'before-stop' };
+        // Released by the test AFTER interruptTurn has returned, so the
+        // ordering under test is fixed rather than left to microtask luck.
+        await postInterrupt.promise;
+        yield { type: 'assistant', text: 'after-stop' };
+        yield { type: 'result', subtype: 'error_during_execution' };
+      }
+    })();
+    generator.interrupt = async () => {};
+    generator.close = () => { state.closed = true; };
+    return generator;
+  };
+
+  const routed = [];
+  const turnStarted = createDeferred();
+  const pending = claudeSessionPool.runTurn({
+    appSessionId: 'abort-suppress',
+    userMessage: userMessage('long'),
+    sdkOptions: {},
+    onMessage: (m) => {
+      routed.push(m);
+      turnStarted.resolve();
+    },
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  await turnStarted.promise;
+  assert.equal(await claudeSessionPool.interruptTurn('abort-suppress'), true);
+  postInterrupt.resolve();
+
+  const result = await pending;
+  assert.equal(
+    result.subtype,
+    'error_during_execution',
+    'the turn must be settled by the CLI\'s own terminator, not by abort guessing',
+  );
+  assert.deepEqual(
+    routed.map((m) => m.text),
+    ['before-stop'],
+    'the user pressed Stop: no further text may appear, even though the slot is kept',
+  );
+  assert.equal(state.closed, true, 'nothing left to protect, so the settled turn closes the process');
+});
+
+test('an aborted turn whose terminator never arrives settles via the timed fallback', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  // No `result` at all — a FAILED interrupt is the one case that really
+  // produces no terminator, and the slot must not be held forever for it.
+  const { factory, state } = createFakeQuery([[{ type: 'assistant', text: 'working' }]]);
+  const turnStarted = createDeferred();
+
+  let settled = null;
+  const pending = claudeSessionPool.runTurn({
+    appSessionId: 'abort-fallback',
+    userMessage: userMessage('long'),
+    sdkOptions: {},
+    onMessage: () => turnStarted.resolve(),
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+  pending.then((result) => { settled = result; });
+
+  await turnStarted.promise;
+  assert.equal(await claudeSessionPool.interruptTurn('abort-fallback'), true);
+
+  await flushMicrotasks();
+  assert.equal(settled, null, 'the slot is deliberately still held: the real terminator may yet arrive');
+
+  t.mock.timers.tick(5000);
+  await flushMicrotasks();
+  assert.equal(settled?.subtype, 'aborted', 'the fallback must settle it, or the run hangs in "processing" forever');
+  await pending;
+
+  // And the fallback leaves the session in the same shape settleTurn does: an
+  // idle aborted session eventually closes rather than leaking.
+  assert.equal(state.closed, false, 'not synchronously — the grace window still applies');
+  t.mock.timers.tick(60000);
+  assert.equal(state.closed, true);
+
+  t.mock.timers.reset();
+});
+
+/**
+ * TOCTOU on the turn slot. The guard ran, then reconciliation awaited, then the
+ * slot was claimed inside the returned Promise's executor — so two calls for
+ * one session could both pass the guard and the second would overwrite the
+ * first's resolve/reject: the first's promise never settled (its run hangs in
+ * "processing") and its frames were delivered to the second caller's writer.
+ * Reachable in production because only the websocket path is serialised by
+ * `chatRunRegistry`; the REST entry point (`server/routes/agent.js`) is not.
+ */
+// Timeout, not an unbounded await: against the unfixed code the second call
+// suspends on the same gate as the first instead of rejecting, so
+// `assert.rejects` would never settle and the suite would hang rather than fail.
+test('a second turn cannot take over the slot while the first is still reconciling options', { timeout: 5000 }, async () => {
+  claudeSessionPool._resetForTests();
+  const gate = createDeferred();
+  const modes = [];
+  let turns = 0;
+
+  const factory = ({ prompt }) => {
+    const generator = (async function* run() {
+      for await (const _message of prompt) {
+        turns += 1;
+        if (turns === 1) {
+          yield { type: 'system', subtype: 'task_started', task_id: 'survivor' };
+          yield { type: 'result', subtype: 'success' };
+        } else {
+          yield { type: 'assistant', text: `turn-${turns}` };
+          yield { type: 'result', subtype: 'success' };
+        }
+      }
+    })();
+    generator.interrupt = async () => {};
+    generator.close = () => {};
+    generator.setPermissionMode = async (mode) => {
+      modes.push(mode);
+      await gate.promise;
+    };
+    return generator;
+  };
+
+  const common = {
+    appSessionId: 'toctou',
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  // Turn 1 leaves a live background task, so the session must be reconfigured
+  // in place from here on — closing it would kill the task.
+  await claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    sdkOptions: { permissionMode: 'default' },
+    onMessage: () => {},
+  });
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('toctou'), ['survivor']);
+
+  const firstFrames = [];
+  const first = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('two'),
+    sdkOptions: { permissionMode: 'plan' },
+    onMessage: (m) => firstFrames.push(m),
+  });
+
+  // Let the first call reach the gate inside setPermissionMode.
+  await waitFor(() => modes.length === 1, { message: 'the first turn must be suspended mid-reconcile' });
+
+  await assert.rejects(
+    () => claudeSessionPool.runTurn({
+      ...common,
+      userMessage: userMessage('three'),
+      sdkOptions: { permissionMode: 'plan' },
+      onMessage: () => {},
+    }),
+    /already has a turn in flight/,
+    'the slot must be claimed before the first await, not after it',
+  );
+
+  gate.resolve();
+  const result = await first;
+  assert.equal(result.subtype, 'success', 'the first caller\'s promise must still settle');
+  assert.deepEqual(firstFrames.map((m) => m.text), ['turn-2'], 'and its frames must reach its own writer');
+  assert.equal(turns, 2, 'the rejected turn must not have run');
+
+  claudeSessionPool.closeSession('toctou');
+});
+
+test('a turn sent while an aborted turn is still settling waits for it instead of throwing', async () => {
+  claudeSessionPool._resetForTests();
+  const postInterrupt = createDeferred();
+  let turns = 0;
+
+  const factory = ({ prompt }) => {
+    const generator = (async function* run() {
+      for await (const _message of prompt) {
+        turns += 1;
+        if (turns === 1) {
+          yield { type: 'system', subtype: 'task_started', task_id: 'survivor' };
+          yield { type: 'assistant', text: 'working' };
+          await postInterrupt.promise;
+          yield { type: 'result', subtype: 'error_during_execution' };
+        } else {
+          yield { type: 'assistant', text: 'second' };
+          yield { type: 'result', subtype: 'success' };
+        }
+      }
+    })();
+    generator.interrupt = async () => {};
+    generator.close = () => {};
+    return generator;
+  };
+
+  const common = {
+    appSessionId: 'stop-then-resend',
+    sdkOptions: {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  const turnStarted = createDeferred();
+  const first = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    onMessage: () => turnStarted.resolve(),
+  });
+
+  await turnStarted.promise;
+  assert.equal(await claudeSessionPool.interruptTurn('stop-then-resend'), true);
+
+  // The user pressed Stop and immediately re-sent. The aborted turn still
+  // holds the slot on purpose, so this must queue behind it, not error out.
+  const secondFrames = [];
+  const second = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('two'),
+    onMessage: (m) => secondFrames.push(m),
+  });
+
+  await flushMicrotasks();
+  postInterrupt.resolve();
+
+  assert.equal((await first).subtype, 'error_during_execution');
+  assert.equal((await second).subtype, 'success');
+  assert.deepEqual(secondFrames.map((m) => m.text), ['second'], 'the re-sent turn gets its own frames');
+  assert.equal(turns, 2, 'both turns ran, on the same process');
+
+  claudeSessionPool.closeSession('stop-then-resend');
+});
+
+test('genuine concurrency — a turn sent while a NON-aborted turn is in flight — still throws', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory } = createFakeQuery([
+    [{ type: 'assistant', text: 'working' }],
+    [{ type: 'result', subtype: 'success' }],
+  ]);
+  const turnStarted = createDeferred();
+
+  const common = {
+    appSessionId: 'concurrent',
+    sdkOptions: {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  const pending = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    onMessage: () => turnStarted.resolve(),
+  });
+
+  await turnStarted.promise;
+  await assert.rejects(
+    () => claudeSessionPool.runTurn({ ...common, userMessage: userMessage('two'), onMessage: () => {} }),
+    /already has a turn in flight/,
+    'nobody pressed Stop here — waiting would silently serialise two live runs',
+  );
+
+  claudeSessionPool.settleTurn('concurrent', 'aborted');
+  await pending;
+  claudeSessionPool.closeSession('concurrent');
 });

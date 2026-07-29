@@ -1012,44 +1012,33 @@ async function abortClaudeSDKSession(sessionId) {
     // terminal complete (the abort handler sends the aborted one).
     abortedSessionIds.add(sessionId);
 
-    // Call interrupt() on the query instance. This only interrupts the
-    // CURRENT turn — the process stays alive on purpose, because a
-    // background shell started earlier in this session must survive abort.
+    // Call interrupt() on the query instance (the pool's shim — it interrupts
+    // the CURRENT turn and nothing else). The process stays alive on purpose,
+    // because a background shell started earlier in this session must survive
+    // abort. A rejection lands in the catch below, which stands the run back up.
     await session.instance.interrupt();
 
-    // FIXME(turn-slot): the premise below is FALSE. This said "an interrupted
-    // turn emits no `result` (verified in the spike)", but re-measurement shows
-    // a `result` with subtype `error_during_execution` arrives within
-    // milliseconds — the original spike interrupted when no turn was in flight,
-    // so nothing was there to terminate. See
-    // `spikes/streaming-input-mode/interrupt-result.mjs`.
+    // Deliberately does NOT settle the turn. An interrupted turn terminates
+    // itself — a `result` with subtype `error_during_execution` arrives within
+    // milliseconds (measured: `spikes/streaming-input-mode/interrupt-result.mjs`;
+    // the earlier spike that concluded otherwise had interrupted with no turn
+    // in flight, so there was nothing to terminate). `SDKResultMessage` carries
+    // no turn-correlation field, so a frame arriving after the turn slot has
+    // been vacated cannot be attributed back to the turn it came from: the pool
+    // keeps the slot, stops forwarding that turn's frames to the UI, and lets
+    // the real terminator settle it. `interruptTurn` arms its own timed
+    // fallback for the one case that produces no terminator (a FAILED
+    // interrupt), so the run cannot hang in "processing" either way.
     //
-    // Settling here therefore vacates the turn slot while the CLI is still
-    // emitting, and `SDKResultMessage` carries no turn-correlation field, so a
-    // frame arriving after the slot is reused cannot be attributed to its own
-    // turn. The fix is to keep the slot and let the real terminator settle it,
-    // with a timed fallback for a FAILED `interrupt()` (the one case that
-    // really produces no terminator). Left in place for now because changing it
-    // is a behaviour change, not a comment fix.
-    //
-    // Keyed by `poolSessionId` (the app-level id), NOT `sessionId`
-    // (the provider-native id this function receives) — those are different
-    // key spaces; see the `poolSessionId` derivation in `queryClaudeSDK`.
-    //
-    // Deliberately NOT deciding here whether to close the pool session. A
+    // Also deliberately not deciding here whether to close the pool session. A
     // `task_started` the CLI already sent (but the pool's drain loop has not
     // routed yet) is invisible to any check made from out here — `interrupt()`
     // is awaited above, which yields the event loop, so by the time this line
     // runs a message can be sitting in the query's async iterator, not yet
     // reflected in `getLiveTaskIds`. Closing on that stale read would kill a
-    // background task that just started — the exact bug this plan exists to
-    // fix. `settleTurn` itself now arms the pool's own idle-close timer (see
-    // `claude-session-pool.js`), which runs inside the drain loop's ordering
-    // and re-checks `liveTaskIds` right before acting, 60s later — long
-    // enough that an in-flight message has certainly been routed by then.
-    if (session.poolSessionId) {
-      claudeSessionPool.settleTurn(session.poolSessionId, 'aborted');
-    }
+    // background task that just started. The pool's own idle-close timer,
+    // armed when the turn actually settles, runs inside the drain loop's
+    // ordering and re-checks `liveTaskIds` right before acting.
 
     // Update session status
     session.status = 'aborted';

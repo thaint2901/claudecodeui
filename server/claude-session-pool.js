@@ -17,6 +17,18 @@ import { createInputStream } from './claude-session-input-stream.js';
 const IDLE_GRACE_MS = 60000;
 
 /**
+ * How long an aborted turn may keep the slot without a terminator.
+ *
+ * An interrupted turn normally DOES terminate itself — a `result` with
+ * `subtype: 'error_during_execution'` arrives within milliseconds (measured:
+ * `spikes/streaming-input-mode/interrupt-result.mjs`) — and that terminator is
+ * what settles the turn. The one case that produces none is an interrupt that
+ * FAILED, so this is a backstop, not the normal route: without it the caller's
+ * promise would never settle and its run would sit in "processing" forever.
+ */
+const ABORT_SETTLE_FALLBACK_MS = 5000;
+
+/**
  * Option fields whose value must match the live process for a turn to be
  * allowed to reuse it, split by whether a RUNNING process can be reconfigured.
  *
@@ -56,12 +68,31 @@ const RELEVANT_OPTION_FIELDS = [...LIVE_APPLICABLE_OPTION_FIELDS, ...RECREATE_ON
 const live = new Map();
 
 /**
+ * @typedef {object} Turn
+ * @property {Function} onMessage
+ * @property {Promise<object>} promise - What `runTurn` returns to its caller.
+ * @property {Function} resolve
+ * @property {Function} reject
+ * @property {Promise<void>} settled - Resolves when this turn leaves the slot,
+ *   by any route. Awaited by a turn that arrives while an aborted one is still
+ *   settling, so a user who presses Stop and re-sends immediately does not get
+ *   a "turn in flight" error.
+ * @property {Function} notifySettled
+ * @property {boolean} aborted - The user pressed Stop. The turn keeps the slot
+ *   until its terminator arrives, but its frames stop reaching the UI.
+ * @property {NodeJS.Timeout | null} abortSettleTimer
+ * @property {boolean} promptSent - False while the turn has only RESERVED the
+ *   slot (claimed before reconciliation, which may still reject or recreate the
+ *   process). Nothing may be routed to, or settled on, a reserved turn.
+ */
+
+/**
  * @typedef {object} LiveSession
  * @property {string} appSessionId
  * @property {object} query
  * @property {ReturnType<typeof createInputStream>} input
  * @property {Set<string>} liveTaskIds
- * @property {{ onMessage: Function, resolve: Function, reject: Function } | null} currentTurn
+ * @property {Turn | null} currentTurn
  * @property {Function} onBetweenTurnMessage
  * @property {object} optionSnapshot - Normalized `RELEVANT_OPTION_FIELDS` as
  *   currently in force on this process (creation values, amended by whatever
@@ -352,14 +383,99 @@ function closeIfIdle(session) {
   destroy(session);
 }
 
+/**
+ * Builds the turn record. Both settlement handles exist by the time this
+ * returns — `new Promise`'s executor runs synchronously — which is what lets
+ * `runTurn` claim the slot BEFORE its first `await` instead of inside the
+ * executor several awaits later.
+ */
+function createTurn(onMessage) {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  let notifySettled;
+  const settled = new Promise((res) => {
+    notifySettled = res;
+  });
+  return {
+    onMessage,
+    promise,
+    resolve,
+    reject,
+    settled,
+    notifySettled,
+    aborted: false,
+    abortSettleTimer: null,
+    promptSent: false,
+  };
+}
+
+function clearAbortSettleFallback(turn) {
+  if (turn.abortSettleTimer) {
+    clearTimeout(turn.abortSettleTimer);
+    turn.abortSettleTimer = null;
+  }
+}
+
+/** Takes `turn` out of the slot. Every exit route goes through here. */
+function releaseTurn(session, turn) {
+  session.currentTurn = null;
+  clearAbortSettleFallback(turn);
+  turn.notifySettled();
+}
+
 function settleCurrentTurn(session, result) {
   const turn = session.currentTurn;
-  if (!turn) {
+  // A turn that has only reserved the slot has no prompt in the process yet, so
+  // nothing the process emits can belong to it.
+  if (!turn || !turn.promptSent) {
     return false;
   }
-  session.currentTurn = null;
+  releaseTurn(session, turn);
   turn.resolve(result);
   return true;
+}
+
+/**
+ * Arms the backstop that settles an aborted turn when no terminator ever
+ * arrives. Mirrors `armIdleTimerIfIdle`: arm-if-not-armed here, and the
+ * callback re-checks at fire time that the turn it was armed for is still the
+ * one in the slot rather than trusting the snapshot taken when it was armed.
+ */
+function armAbortSettleFallback(session, turn) {
+  if (turn.abortSettleTimer) {
+    return;
+  }
+  turn.abortSettleTimer = setTimeout(() => {
+    turn.abortSettleTimer = null;
+    if (session.currentTurn !== turn) {
+      return;
+    }
+    settleCurrentTurn(session, { type: 'result', subtype: 'aborted' });
+    armIdleTimerIfIdle(session);
+  }, ABORT_SETTLE_FALLBACK_MS);
+}
+
+/**
+ * Rejects whatever turn holds the slot because the process is gone.
+ *
+ * A turn that has only RESERVED the slot is released without being rejected:
+ * its caller is still inside `runTurn`, has not committed to this process, and
+ * will fall through to creating a fresh one. Rejecting it would fail a turn
+ * that is about to run correctly somewhere else.
+ */
+function rejectCurrentTurn(session, error) {
+  const turn = session.currentTurn;
+  if (!turn) {
+    return;
+  }
+  releaseTurn(session, turn);
+  if (turn.promptSent) {
+    turn.reject(error);
+  }
 }
 
 /**
@@ -394,7 +510,9 @@ function routeMessage(session, message) {
     return;
   }
 
-  if (session.currentTurn) {
+  const turn = session.currentTurn;
+
+  if (turn?.promptSent && !turn.aborted) {
     // A task settling while a LATER turn is in flight must still reach the
     // session sink. The in-turn path normalizes SDK messages by `message.role`
     // (claude-sessions.provider.ts), so a `system`/`task_notification` frame
@@ -404,7 +522,17 @@ function routeMessage(session, message) {
     if (isTaskNotification(message)) {
       session.onBetweenTurnMessage(message);
     }
-    session.currentTurn.onMessage(message);
+    turn.onMessage(message);
+    return;
+  }
+
+  if (turn?.promptSent) {
+    // The turn is aborted but deliberately still holds the slot until its own
+    // terminator arrives. The user pressed Stop, so nothing more may appear in
+    // the transcript — but a background task's settlement still has to get
+    // through, so this routes exactly like the between-turn path (whose sink
+    // forwards only `task_notification`).
+    session.onBetweenTurnMessage(message);
     return;
   }
 
@@ -421,19 +549,11 @@ async function drain(session) {
       routeMessage(session, message);
     }
   } catch (error) {
-    const turn = session.currentTurn;
-    session.currentTurn = null;
-    if (turn) {
-      turn.reject(error instanceof Error ? error : new Error(String(error)));
-    }
+    rejectCurrentTurn(session, error instanceof Error ? error : new Error(String(error)));
   } finally {
     // The process is gone. Reject any turn still waiting so the caller's
     // promise settles and its own safety net can complete the run.
-    const turn = session.currentTurn;
-    session.currentTurn = null;
-    if (turn) {
-      turn.reject(new Error('Claude session process ended before the turn completed'));
-    }
+    rejectCurrentTurn(session, new Error('Claude session process ended before the turn completed'));
     session.dead = true;
     clearIdleTimer(session);
     removeFromLiveIfCurrent(session);
@@ -487,34 +607,78 @@ export const claudeSessionPool = {
       session = undefined;
     }
 
-    if (session) {
-      if (session.currentTurn) {
+    if (session?.currentTurn) {
+      if (!session.currentTurn.aborted) {
         throw new Error(`Session "${appSessionId}" already has a turn in flight`);
       }
-
-      const nextSnapshot = snapshotOptions(sdkOptions);
-      const changed = differingFields(RELEVANT_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
-
-      if (changed.length > 0 && session.liveTaskIds.size === 0) {
-        // Nothing to protect. The pre-pool behaviour closed at turn end anyway,
-        // so a clean recreate costs nothing and is the only way to honour EVERY
-        // option — including the ones no control request can change.
-        destroy(session);
+      // An aborted turn keeps the slot until its terminator arrives (bounded by
+      // ABORT_SETTLE_FALLBACK_MS), so a user who presses Stop and re-sends
+      // immediately lands here. Waiting is the whole point: throwing would turn
+      // "keep the slot so the CLI's own terminator can settle it" into an error
+      // the user sees.
+      await session.currentTurn.settled;
+      session = live.get(appSessionId);
+      if (session?.dead) {
         session = undefined;
-      } else if (changed.length > 0) {
-        const unappliable = differingFields(RECREATE_ONLY_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
-        if (unappliable.length > 0) {
-          console.warn('[ClaudeSessionPool] keeping the live process for its background work, so these option changes cannot take effect until it closes', {
-            appSessionId,
-            fields: unappliable,
-          });
-        }
-        await applyLiveOptionChanges(session, nextSnapshot);
-        // Applying a control request yields the event loop; the process can die
-        // in that window.
-        if (session.dead) {
+      }
+      if (session?.currentTurn) {
+        // Someone else claimed the freed slot while we waited. That is genuine
+        // concurrency, not a Stop-then-resend.
+        throw new Error(`Session "${appSessionId}" already has a turn in flight`);
+      }
+    }
+
+    const turn = createTurn(onMessage);
+
+    if (session) {
+      // Claim the slot SYNCHRONOUSLY, before the first `await` below. The guard
+      // above and the claim used to be separated by reconciliation's awaits, so
+      // two calls for one `appSessionId` could both pass the guard and the
+      // second would overwrite the first's resolve/reject — the first caller's
+      // promise then never settled (its run hangs in "processing") and every
+      // frame from it went to the second caller's writer. Reachable in
+      // production: only the websocket path is serialised by `chatRunRegistry`,
+      // the REST entry point (server/routes/agent.js) is not.
+      session.currentTurn = turn;
+
+      try {
+        const nextSnapshot = snapshotOptions(sdkOptions);
+        const changed = differingFields(RELEVANT_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
+
+        if (changed.length > 0 && session.liveTaskIds.size === 0) {
+          // Nothing to protect. The pre-pool behaviour closed at turn end anyway,
+          // so a clean recreate costs nothing and is the only way to honour EVERY
+          // option — including the ones no control request can change.
+          // Hand the slot back first: `destroy` ends the drain loop, which
+          // rejects whatever turn it finds there, and this turn is about to run
+          // on the replacement process instead.
+          session.currentTurn = null;
+          destroy(session);
           session = undefined;
+        } else if (changed.length > 0) {
+          const unappliable = differingFields(RECREATE_ONLY_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
+          if (unappliable.length > 0) {
+            console.warn('[ClaudeSessionPool] keeping the live process for its background work, so these option changes cannot take effect until it closes', {
+              appSessionId,
+              fields: unappliable,
+            });
+          }
+          await applyLiveOptionChanges(session, nextSnapshot);
+          // Applying a control request yields the event loop; the process can die
+          // in that window. The drain loop's teardown releases a merely-reserved
+          // slot without rejecting it, so this turn is free to run on a fresh
+          // process below.
+          if (session.dead) {
+            session = undefined;
+          }
         }
+      } catch (error) {
+        // The turn is not going to run: release the slot we claimed, or the
+        // session is wedged for every later turn.
+        if (session?.currentTurn === turn) {
+          session.currentTurn = null;
+        }
+        throw error;
       }
     }
 
@@ -533,10 +697,10 @@ export const claudeSessionPool = {
 
     clearIdleTimer(session);
 
-    return new Promise((resolve, reject) => {
-      session.currentTurn = { onMessage, resolve, reject };
-      session.input.push(userMessage);
-    });
+    session.currentTurn = turn;
+    turn.promptSent = true;
+    session.input.push(userMessage);
+    return turn.promise;
   },
 
   hasLiveSession(appSessionId) {
@@ -549,9 +713,14 @@ export const claudeSessionPool = {
   },
 
   /**
-   * Settles an in-flight turn WITHOUT killing the process. Used by abort.
+   * Settles an in-flight turn WITHOUT killing the process.
    *
-   * Never closes synchronously — the caller (abort) can only ever hold a
+   * No longer on the abort path: abort interrupts and lets the CLI's own
+   * terminator settle the turn (see `interruptTurn`). This remains the manual
+   * escape hatch — and the mechanism `armAbortSettleFallback` reproduces — for
+   * a turn whose terminator never arrives.
+   *
+   * Never closes synchronously — an external caller can only ever hold a
    * stale view of `liveTaskIds`, since a message the CLI already sent (e.g.
    * `task_started`) may still be in flight, unrouted by this session's drain
    * loop, at the exact moment abort settles the turn. Deciding to close from
@@ -579,19 +748,36 @@ export const claudeSessionPool = {
    * survive. The underlying SDK query object never leaves the pool; callers
    * (abort) reach it only through this method. A missing/dead session is a
    * silent no-op: there is nothing left to interrupt.
+   *
+   * Does NOT settle the turn. An interrupted turn terminates itself — a
+   * `result` with `subtype: 'error_during_execution'` arrives within
+   * milliseconds (measured: `spikes/streaming-input-mode/interrupt-result.mjs`)
+   * — and `SDKResultMessage` carries no turn-correlation field, so a frame that
+   * arrives after the slot has been vacated cannot be attributed back to the
+   * turn it came from. Keeping the slot until that terminator arrives is the
+   * only way to route it correctly; the aborted turn just stops forwarding to
+   * the UI in the meantime, and `armAbortSettleFallback` covers the one case
+   * that really produces no terminator.
    */
   async interruptTurn(appSessionId) {
     const session = live.get(appSessionId);
     if (!session || session.dead) {
       return false;
     }
-    try {
-      await session.query.interrupt?.();
-    } catch (error) {
-      console.warn('[ClaudeSessionPool] interrupt() failed', {
-        appSessionId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+    const turn = session.currentTurn;
+
+    // A failed interrupt PROPAGATES on purpose. Swallowing it made the only
+    // caller's own catch — the sole place that undoes its "this run was
+    // aborted" bookkeeping — unreachable, so the user was shown a clean
+    // "stopped" while the CLI kept generating an answer whose every frame was
+    // then discarded. A rejection here lets that caller stand the run back up.
+    await session.query.interrupt?.();
+
+    // Marked only once the control request has landed: until then the stop has
+    // not happened, and a run that is still the user's run must keep streaming.
+    if (turn && session.currentTurn === turn && turn.promptSent) {
+      turn.aborted = true;
+      armAbortSettleFallback(session, turn);
     }
     return true;
   },
