@@ -436,14 +436,23 @@ abort, released automatically and never accumulating. **Document it; do not chan
 or removing the grace reopens exactly the race this design closed, in which abort kills a background
 task that had just started.
 
-**An abandoned turn's terminator can truncate the next turn's answer.** `ABORT_SETTLE_FALLBACK_MS`
-settles an aborted turn five seconds after an acknowledged interrupt that produced nothing, so its
-premise is that no terminator is coming. It is a guess, and when it is wrong the CLI's real terminator
-arrives while the *next* turn is live — indistinguishable from that turn's own, because no SDK message
-carries a turn-correlation field (`SDKResultMessage` has `uuid`, `session_id`, `num_turns`). The rule
-adopted is that **the first `result` always settles whatever turn holds the slot**, so the cost of a
-wrong guess is one turn's answer truncated (or, if it had emitted nothing yet, lost) and its run
-reported complete.
+**A stopped turn's tail can appear in the next turn's answer, and cut it short — once per outstanding
+terminator, so it can chain.** `ABORT_SETTLE_FALLBACK_MS` settles an aborted turn five seconds after an
+acknowledged interrupt that produced nothing, so its premise is that no terminator is coming. It is a
+guess, and when it is wrong the abandoned turn is still unwinding while the *next* turn is live — and
+nothing distinguishes their frames, because no SDK message carries a turn-correlation field
+(`SDKResultMessage` has `uuid`, `session_id`, `num_turns`). Two consequences, both accepted:
+
+- **Foreign content, not only truncation.** Every non-`result` frame goes to the live turn's writer, and
+  ccui runs with `includePartialMessages = true` (`server/claude-sdk.js`), so the stopped turn's
+  `assistant` text and `stream_event` deltas normalize into the **live** turn's transcript and streaming
+  buffer. The answer the user reads can contain the words of the turn they stopped.
+- **Then it is cut off, and the cut can repeat.** The rule adopted is that **the first `result` always
+  settles whatever turn holds the slot**, so a wrong guess ends the live turn early — truncated, or
+  blank if nothing of its own had arrived — and reports the run complete. That leaves the live turn's
+  OWN terminator outstanding, so a user who re-sends inside the window can be hit again, once per
+  outstanding terminator, for as long as they keep re-sending. A live background task keeps
+  `closeIfIdle` from ending the process, which is what lets the desync outlive several turns.
 
 Accepted after ranking it against the alternative that was tried and removed. That alternative — a
 terminator "debt" plus a swallow branch, built on the premise that the terminator *is* still coming —
@@ -456,16 +465,29 @@ it is the wrong direction: **a dead turn's tail leaking into a live turn is far 
 turn being swallowed**, and the second one must be impossible rather than merely unlikely.
 
 What remains of the debt is an observation, `owedTerminator` — one nullable record, armed only by the
-fallback, cleared by the first `result` the session sees afterwards or with the session itself. It
-never withholds a frame or a terminator from a live turn. It is read for two things only: to absorb a
-terminator arriving *between* turns, the one window where "this is not the live turn's result" is a
-fact rather than a guess (and where forwarding it would destroy, `IDLE_GRACE_MS` early, a process the
-user may be about to re-use); and to make both remaining guesses observable — one `console.warn` when
-a turn is settled while a terminator was outstanding, carrying the `appSessionId` and how many frames
-that turn had delivered (zero = total loss, non-zero = partial), and one when a task is attributed in
-the ambiguous window. By measurement the whole branch is the rare one: an interrupted turn terminates
-within milliseconds (`spikes/streaming-input-mode/interrupt-result.mjs`), so the fallback fires only in
-the unmeasured slow-unwind case.
+fallback. It never withholds a frame or a terminator from a live turn. It is read for two things only:
+to absorb a terminator arriving *between* turns, the one window where "this is not the live turn's
+result" is a fact rather than a guess (and where forwarding it would destroy, `IDLE_GRACE_MS` early, a
+process the user may be about to re-use); and to make both remaining guesses observable — one
+`console.warn` when a turn is settled while a terminator was outstanding, carrying the `appSessionId`,
+how many frames that turn had delivered (zero = total loss, non-zero = partial) and how many
+settlements this one desync has now consumed, plus one when a task is attributed in the ambiguous
+window. By measurement the whole branch is the rare one: an interrupted turn terminates within
+milliseconds (`spikes/streaming-input-mode/interrupt-result.mjs`), so the fallback fires only in the
+unmeasured slow-unwind case.
+
+Because the harm chains, the record follows it: a `result` that settles a turn which had delivered
+**nothing** re-arms the ledger (that turn's own terminator is now the outstanding one), so every blank
+answer in a chain is reported rather than only the first. A `result` that settles a turn which HAD
+produced output clears it, and so does one that arrives between turns. That asymmetry is deliberate and
+measured: in the case that armed the ledger — the abandoned terminator never comes at all — every later
+`result` arrives while its own turn is live, so the between-turns absorb is never reached, and an
+unconditional re-arm therefore warns on every turn and calls every task attribution a guess for the
+life of the process. Verified by making it unconditional: three consecutive healthy turns produced three
+warnings instead of one. Zero delivered frames is the discriminator because `includePartialMessages`
+means a turn the CLI is really answering streams deltas long before its terminator. Residual, disclosed:
+a chain that begins with a *partial* truncation clears the ledger at that first line, so a later blank
+turn in that particular chain is not reported.
 
 **Unmeasured interaction with the user's own `settings.json`.** ccui spawns with
 `settingSources = ['project', 'user', 'local']` (`server/claude-sdk.js:262`), so a freshly spawned

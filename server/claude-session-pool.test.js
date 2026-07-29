@@ -1644,6 +1644,161 @@ test('a stale terminator settles the live turn and says so, rather than being wi
 });
 
 /**
+ * Whole-round review, second pass. The desync WALKS FORWARD and the record has to
+ * walk with it: settling turn 2 with turn 1's `result` leaves turn 2's own
+ * terminator outstanding, so a user who re-sends into the window is hit again —
+ * and with a background task holding the process open, `closeIfIdle` cannot end it.
+ * Clearing the ledger on the borrowed settlement logged only the FIRST blank
+ * answer; a user reporting three in a row produced one line.
+ *
+ * The re-arm is gated on the frame count, and the gate is the half of this that is
+ * NOT obvious: in the case that armed the ledger in the first place (the abandoned
+ * terminator never comes at all), every later `result` arrives while its own turn
+ * is live, so the between-turns absorb — the only route that clears the ledger — is
+ * never reached. An unconditional re-arm would warn on every turn and call every
+ * task attribution a guess for the life of the process. The last assertion here is
+ * what pins that, and it fails if the gate is removed.
+ */
+test('a borrowed terminator re-arms the ledger, so every blank turn in the chain is reported', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const logged = captureConsoleWarnings(t);
+  const { factory, state, emit } = createInterleavableQuery();
+
+  const common = {
+    appSessionId: 'ledger-chain',
+    sdkOptions: {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  const firstFrames = [];
+  const first = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    taskOwner: 'alice',
+    onMessage: (m) => firstFrames.push(m),
+  });
+  // A task that never settles, so the process is held across the whole chain —
+  // which is the condition that lets the desync outlive several turns.
+  emit({ type: 'system', subtype: 'task_started', task_id: 'long-runner' });
+  emit({ type: 'assistant', text: 'before-stop' });
+  await waitFor(() => firstFrames.length === 2, { message: 'turn 1 must be streaming before the Stop' });
+
+  assert.equal(await claudeSessionPool.interruptTurn('ledger-chain'), true);
+  t.mock.timers.tick(5000);
+  await flushMicrotasks();
+  assert.equal((await first).subtype, 'aborted');
+
+  // Turn 2: turn 1's real terminator lands before turn 2 has said anything.
+  let secondSettled = null;
+  const second = claudeSessionPool.runTurn({ ...common, userMessage: userMessage('two'), onMessage: () => {} });
+  second.then((r) => { secondSettled = r; }, (e) => { secondSettled = e; });
+  await waitFor(() => state.prompts.length === 2, { message: 'turn 2\'s prompt must reach the process' });
+  emit({ type: 'result', subtype: 'error_during_execution' });
+  await flushMicrotasks();
+  assert.equal(secondSettled?.subtype, 'error_during_execution', 'turn 2 is settled, blank');
+  await second;
+
+  // Turn 3: the user re-sends, and turn 2's own terminator lands the same way.
+  let thirdSettled = null;
+  const third = claudeSessionPool.runTurn({ ...common, userMessage: userMessage('three'), onMessage: () => {} });
+  third.then((r) => { thirdSettled = r; }, (e) => { thirdSettled = e; });
+  await waitFor(() => state.prompts.length === 3, { message: 'turn 3 must not be refused' });
+  emit({ type: 'result', subtype: 'success' });
+  await flushMicrotasks();
+  assert.equal(thirdSettled?.subtype, 'success', 'turn 3 is settled, blank as well');
+  await third;
+
+  assert.equal(
+    logged.staleTerminator().length,
+    2,
+    'the second blank answer must be reported too — the record follows the desync, it does not describe only its first victim',
+  );
+  assert.deepEqual(
+    logged.staleTerminator().map((args) => [args[1].borrowedSettlements, args[1].framesDeliveredToTurn, args[1].terminatorStillOutstanding]),
+    [[1, 0, true], [2, 0, true]],
+    'and the chain is countable, so one fault does not read as three unrelated ones',
+  );
+
+  // The user stops re-sending. Turn 3's terminator now lands with the slot empty:
+  // the desync has healed, which is what makes the re-arm self-limiting.
+  emit({ type: 'result', subtype: 'success' });
+  await flushMicrotasks();
+  assert.equal(logged.staleTerminator().length, 2, 'the healing result is absorbed, not reported');
+
+  // Proof the ledger really is gone rather than merely quiet: an ordinary turn
+  // reports nothing, and the task it starts is not flagged as a guess.
+  const fourthFrames = [];
+  const fourth = claudeSessionPool.runTurn({ ...common, userMessage: userMessage('four'), taskOwner: 'bob', onMessage: (m) => fourthFrames.push(m) });
+  await waitFor(() => state.prompts.length === 4, { message: 'turn 4 must not be refused' });
+  emit({ type: 'system', subtype: 'task_started', task_id: 'bobs-task' });
+  emit({ type: 'assistant', text: 'turn-4 answer' });
+  emit({ type: 'result', subtype: 'success' });
+  assert.equal((await fourth).subtype, 'success');
+  assert.deepEqual(fourthFrames.map((m) => m.text ?? m.subtype), ['task_started', 'turn-4 answer']);
+  assert.equal(logged.staleTerminator().length, 2);
+  assert.deepEqual(logged.guessedTaskOwner(), [], 'a healthy turn on a long-held session must not have its attribution called a guess');
+
+  claudeSessionPool.closeSession('ledger-chain');
+  t.mock.timers.reset();
+});
+
+/**
+ * The other half of the gate: a settlement of a turn that HAD produced output is
+ * read as that turn's own terminator, so the ledger dies there. Without this the
+ * warn (and the ambiguous-attribution warn) would repeat on every turn for the
+ * life of a process held open by background work.
+ */
+test('a settlement of a turn that produced its own output clears the ledger instead of re-arming it', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const logged = captureConsoleWarnings(t);
+  const { factory, state, emit } = createInterleavableQuery();
+
+  const common = {
+    appSessionId: 'ledger-heals',
+    sdkOptions: {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  };
+
+  const firstFrames = [];
+  const first = claudeSessionPool.runTurn({ ...common, userMessage: userMessage('one'), onMessage: (m) => firstFrames.push(m) });
+  emit({ type: 'system', subtype: 'task_started', task_id: 'long-runner' });
+  emit({ type: 'assistant', text: 'before-stop' });
+  await waitFor(() => firstFrames.length === 2, { message: 'turn 1 must be streaming before the Stop' });
+
+  assert.equal(await claudeSessionPool.interruptTurn('ledger-heals'), true);
+  t.mock.timers.tick(5000);
+  await flushMicrotasks();
+  assert.equal((await first).subtype, 'aborted');
+
+  // Three ordinary turns in a row, each answering and terminating itself. Only the
+  // first can be ambiguous; the rest must be silent.
+  for (const [index, label] of ['two', 'three', 'four'].entries()) {
+    const frames = [];
+    const turn = claudeSessionPool.runTurn({ ...common, userMessage: userMessage(label), onMessage: (m) => frames.push(m) });
+    await waitFor(() => state.prompts.length === index + 2, { message: `turn ${index + 2} must not be refused` });
+    emit({ type: 'assistant', text: `${label} answer` });
+    emit({ type: 'result', subtype: 'success' });
+    assert.equal((await turn).subtype, 'success');
+    assert.deepEqual(frames.map((m) => m.text), [`${label} answer`]);
+  }
+
+  assert.equal(
+    logged.staleTerminator().length,
+    1,
+    'reported once and then done — an unconditional re-arm would report on all three',
+  );
+  assert.equal(logged.staleTerminator()[0][1].terminatorStillOutstanding, false);
+  assert.equal(logged.staleTerminator()[0][1].framesDeliveredToTurn, 1);
+
+  claudeSessionPool.closeSession('ledger-heals');
+  t.mock.timers.reset();
+});
+
+/**
  * Finding 3. Both exits from the old debt branch `return`ed before
  * `armIdleTimerIfIdle`/`closeIfIdle`, and those are the only two places that can
  * ever schedule a close. So a session whose LAST live task settled inside the

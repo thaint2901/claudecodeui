@@ -243,20 +243,27 @@ const live = new Map();
  *   that outlives its session is the same class of defect as the slot that
  *   outlived its turn.
  * @property {boolean} dead
- * @property {{ armedAt: number } | null} owedTerminator - Set when the abort
- *   fallback settled a turn WITHOUT the `result` the CLI still owed it, and
- *   cleared by the first `result` this session sees afterwards, whichever turn
- *   that one belongs to. A LEDGER, not a gate: it is read to absorb a terminator
- *   that arrives between turns and to say out loud when a settlement or an
- *   attribution was a guess — never to withhold a frame or a terminator from a
- *   live turn. `routeMessage` explains why that distinction is the whole point
- *   of this field, and `ABORT_SETTLE_FALLBACK_MS` why it can only ever be armed
- *   by a guess in the first place.
+ * @property {{ armedAt: number, borrowedCount: number } | null} owedTerminator -
+ *   Set when the abort fallback settled a turn WITHOUT the `result` the CLI still
+ *   owed it. A LEDGER, not a gate: it is read to absorb a terminator that arrives
+ *   between turns and to say out loud when a settlement or an attribution was a
+ *   guess — never to withhold a frame or a terminator from a live turn.
+ *   `routeMessage` explains why that distinction is the whole point of this field,
+ *   and `ABORT_SETTLE_FALLBACK_MS` why it can only ever be armed by a guess in the
+ *   first place.
  *
- *   Its bound is structural rather than timed: at most one entry (a scalar
- *   cannot be over-drawn), armed only by the fallback, cleared by the next
- *   `result` or with the session itself. Nothing waits on it, so nothing can
- *   wait on it forever — which is exactly what the queue it replaced could do.
+ *   Cleared by a `result` that arrives between turns (the desync healed), or by one
+ *   that settles a turn which had already produced output of its own (that turn's
+ *   own terminator, so nothing is outstanding). It is instead RE-ARMED, with
+ *   `borrowedCount` incremented, by one that settles a turn which had delivered
+ *   nothing: the record then follows the desync forward instead of describing only
+ *   its first victim. `routeMessage` has the argument for that asymmetry, which is
+ *   the difference between a self-limiting record and a permanent false alarm.
+ *
+ *   Its bound is structural rather than timed: at most one entry (a scalar cannot
+ *   be over-drawn), armed only by the fallback, and every route out of it is a
+ *   `result` — or the session's own death. Nothing waits on it, so nothing can wait
+ *   on it forever, which is exactly what the queue it replaced could do.
  */
 
 /**
@@ -915,7 +922,7 @@ function armAbortSettleFallback(session, turn) {
       // terminator is outstanding — as a note, not as a claim on anything the
       // next turn needs. `routeMessage` is where that restraint is spelled out,
       // and why the version of this line that DID hold a claim bricked sessions.
-      session.owedTerminator = { armedAt: Date.now() };
+      session.owedTerminator = { armedAt: Date.now(), borrowedCount: 0 };
     }
     armIdleTimerIfIdle(session);
   }, ABORT_SETTLE_FALLBACK_MS);
@@ -1022,10 +1029,20 @@ function routeMessage(session, message) {
      * every option available here is a heuristic and why the deciding question is
      * which one fails least badly.
      *
-     * The harm that buys, accepted knowingly: an abandoned turn that IS still
-     * unwinding can settle the live turn early and truncate its answer. It costs
-     * one turn; the swallow cost the session — and by measurement it is also the
-     * rarer branch, since an interrupted turn terminates within milliseconds
+     * The harm that buys, accepted knowingly and in full: an abandoned turn that
+     * IS still unwinding shares the live turn's transcript. Its `assistant` text
+     * and its `stream_event` deltas reach the live turn's writer (see `:1077` and
+     * `includePartialMessages` in `claude-sdk.js`), so the STOPPED turn's words can
+     * appear in the answer the user is reading, and then its `result` cuts that
+     * answer off — or ends it before a word of it arrived. And the cost is one turn
+     * per outstanding terminator, not one turn full stop: settling turn N with
+     * turn N-1's `result` leaves turn N's own terminator outstanding, so a user who
+     * keeps re-sending inside the window can be hit repeatedly (which is what the
+     * re-arm below makes visible).
+     *
+     * Still the lesser harm by a wide margin: the swallow cost the SESSION, this
+     * costs answers. And by measurement it is the rarer branch, since an
+     * interrupted turn terminates within milliseconds
      * (`spikes/streaming-input-mode/interrupt-result.mjs`), so the fallback only
      * fires at all in the unmeasured slow-unwind case. It is logged rather than
      * hidden, because silence is what this whole change set exists to remove.
@@ -1046,7 +1063,35 @@ function routeMessage(session, message) {
     }
 
     if (owed) {
-      session.owedTerminator = null;
+      // The desync WALKS FORWARD, and the record has to walk with it or only the
+      // first borrowed settlement is ever visible. If this `result` was the
+      // abandoned turn's, then the live turn we are about to settle with it is now
+      // itself owed a terminator — so the pipeline is off by one for as long as the
+      // user keeps re-sending inside the window, and a background task keeps
+      // `closeIfIdle` from ending it. Clearing here produced one log line for a
+      // user who saw three blank answers in a row.
+      //
+      // Re-armed on the FRAME COUNT rather than unconditionally, and that gate is
+      // load-bearing in the opposite direction. When the abandoned terminator
+      // genuinely never comes — the case `ABORT_SETTLE_FALLBACK_MS` exists for, and
+      // the one that armed this record — every later `result` arrives while its own
+      // turn is live, so the absorb branch above is never reached and it is the
+      // ONLY thing that clears the ledger between turns. An unconditional re-arm
+      // would therefore warn on every turn, and attribute every task ambiguously,
+      // for the whole life of a process — on exactly the long-held sessions this
+      // pool exists to protect, where nothing else ends them. Crying wolf on every
+      // healthy turn does not make the rare real event more visible; it buries it.
+      //
+      // Zero frames is the discriminator because it is the only evidence available:
+      // `includePartialMessages` is on (`claude-sdk.js`), so a turn the CLI is
+      // really answering streams deltas long before its terminator. A turn that has
+      // delivered nothing and receives a `result` most likely received someone
+      // else's — so the ledger survives a blank settlement and dies with an
+      // ordinary one, which is what makes it self-limiting.
+      const stillOutstanding = liveTurn.frameCount === 0;
+      session.owedTerminator = stillOutstanding
+        ? { armedAt: Date.now(), borrowedCount: owed.borrowedCount + 1 }
+        : null;
       console.warn('[ClaudeSessionPool] settling this turn on a `result` the session was still owed by an aborted turn; if this frame was that turn\'s, this turn\'s answer is truncated', {
         appSessionId: session.appSessionId,
         owedForMs: Date.now() - owed.armedAt,
@@ -1054,6 +1099,13 @@ function routeMessage(session, message) {
         // which is the strong signal that the frame belonged to the abandoned
         // turn rather than to this one. Non-zero is the milder truncation.
         framesDeliveredToTurn: liveTurn.frameCount,
+        // How many settlements this one desync has now consumed, so a user
+        // reporting "three blank answers" and a log showing three lines can be
+        // recognised as one fault rather than three.
+        borrowedSettlements: owed.borrowedCount + 1,
+        // False means this is believed to be the last of it: the turn had produced
+        // its own output, so the `result` was plausibly its own.
+        terminatorStillOutstanding: stillOutstanding,
       });
     }
 
