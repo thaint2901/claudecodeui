@@ -3258,29 +3258,44 @@ test('a session whose input the SDK closed is not reused, and its next turn stil
  * refuses only a `dead` session), and any turn still in its slot orphaned in
  * "processing" with Stop now retargeted at the replacement process.
  */
-test('an unusable session is closed, not abandoned: process closed, tasks reported, no later advisory', async (t) => {
-  claudeSessionPool._resetForTests();
-  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() });
-  captureConsoleErrors(t);
+/**
+ * The shared setup for the two tests below: drive one turn on a process that then
+ * has its prompt iterator torn down from the SDK's side while holding a background
+ * task, then send a second message, which is what forces `runTurn` to decide what
+ * to do with the now-unusable session.
+ *
+ * Two tests rather than one because assertions run in sequence: with both halves in
+ * one test, a revert failed the first assertion and the second half never executed,
+ * so it was pinned only by the first one still passing.
+ */
+async function driveRetiredSession(appSessionId, sinks) {
   const { factory, state } = createTornPromptQuery();
-
-  const lost = [];
-  const holdWarnings = [];
   const common = {
-    appSessionId: 'torn-retire',
+    appSessionId,
     sdkOptions: {},
     onBetweenTurnMessage: () => {},
-    onTaskLost: (event, meta) => lost.push({ ...event, ...meta }),
-    onHoldWarning: (event) => holdWarnings.push(event),
+    onTaskLost: () => {},
     taskOwner: 'alice',
     createQuery: factory,
+    ...sinks,
   };
 
   await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('turn one'), onMessage: () => {} });
   await waitFor(() => state.tornDown, { message: 'the SDK must have torn the prompt iterator down' });
-  assert.deepEqual(claudeSessionPool.getLiveTaskIds('torn-retire'), ['bg-1'], 'the session is holding a task');
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds(appSessionId), ['bg-1'], 'the session is holding a task');
 
   await claudeSessionPool.runTurn({ ...common, userMessage: userMessage('turn two'), onMessage: () => {} });
+  return state;
+}
+
+test('an unusable session is closed rather than abandoned, and its lost work is reported', async (t) => {
+  claudeSessionPool._resetForTests();
+  captureConsoleErrors(t);
+
+  const lost = [];
+  const state = await driveRetiredSession('torn-retire', {
+    onTaskLost: (event, meta) => lost.push({ ...event, ...meta }),
+  });
 
   assert.ok(
     state.closed.includes(1),
@@ -3294,9 +3309,23 @@ test('an unusable session is closed, not abandoned: process closed, tasks report
     'and its background work is lost, so it must be reported — `drain` will not, because we closed it',
   );
 
-  // Ten minutes on the fake clock: the abandoned session's hold check used to keep
-  // firing, telling the user a process was "still holding" when it was neither
-  // reachable nor running.
+  claudeSessionPool._resetForTests();
+});
+
+test('a retired session advises nobody about a hold ten minutes later', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() });
+  captureConsoleErrors(t);
+
+  // Asserted on its own, so a change that reopens ONLY this half still fails:
+  // the abandoned session's hold check used to keep firing (that callback refuses
+  // only a `dead` session), telling the user a process was "still holding" when it
+  // was neither reachable nor running.
+  const holdWarnings = [];
+  await driveRetiredSession('torn-retire-advisory', {
+    onHoldWarning: (event) => holdWarnings.push(event),
+  });
+
   for (let i = 0; i < 10; i += 1) {
     t.mock.timers.tick(60000);
   }
@@ -3437,6 +3466,177 @@ async function startTaskSession(appSessionId, { emit, factory }, task, extra = {
   await turn;
   return { settlements, betweenTurn };
 }
+
+/**
+ * A process whose message stream keeps delivering frames AFTER `close()`.
+ *
+ * `close()` terminates the CLI subprocess, but frames the SDK has already parsed
+ * can still be sitting in its iterator, and `drain`'s `for await` will hand them to
+ * `routeMessage` on a session that is now `dead`. The retire path is the one place
+ * where the generator is KNOWN to still be running when `destroy()` fires, so this
+ * shape is not merely theoretical there.
+ *
+ * `end()` is the test's own teardown, kept separate from `close()` precisely so
+ * "closed" and "finished" can be distinguished.
+ */
+function createPostDeathDeliveryQuery() {
+  const state = { prompts: [], closeCalls: 0, finished: false };
+  const outbox = [];
+  /** @type {Function | null} */
+  let wake = null;
+  const nudge = () => {
+    const resume = wake;
+    wake = null;
+    resume?.();
+  };
+  const emit = (message) => {
+    outbox.push(message);
+    nudge();
+  };
+
+  const factory = ({ prompt }) => {
+    void (async () => {
+      for await (const message of prompt) {
+        state.prompts.push(message.message.content);
+      }
+    })();
+
+    const generator = (async function* run() {
+      while (!state.finished) {
+        while (outbox.length > 0) {
+          yield outbox.shift();
+        }
+        if (state.finished) {
+          return;
+        }
+        await new Promise((resolve) => { wake = resolve; });
+      }
+    })();
+
+    generator.interrupt = async () => {};
+    // Deliberately does NOT end the generator: that is the whole construction.
+    generator.close = () => { state.closeCalls += 1; };
+    return generator;
+  };
+
+  return {
+    factory,
+    state,
+    emit,
+    end: () => { state.finished = true; nudge(); },
+  };
+}
+
+/*
+ * Fix-round-3: the last known route to the same leak. `flushPendingSettlements`
+ * deleted every record on death, and nothing in `routeMessage` refused a dead
+ * session — so a `task_notification` routed after the session died found no record,
+ * reported a null owner, and a null owner BROADCASTS: a second row, addressed to
+ * everyone, carrying the owner's task summary and the absolute host path of its
+ * output.
+ */
+test('a frame routed after the session died reaches no sink at all', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: Date.now() });
+  const query = createPostDeathDeliveryQuery();
+
+  const settlements = [];
+  const sinkCalls = [];
+  const turn = claudeSessionPool.runTurn({
+    appSessionId: 'post-death',
+    userMessage: userMessage('start a shell'),
+    sdkOptions: {},
+    onMessage: () => {},
+    onBetweenTurnMessage: (message, meta) => sinkCalls.push({ subtype: message.subtype, ...meta }),
+    onTaskSettledWithoutNotification: (event, meta) => settlements.push({ ...event, ...meta }),
+    taskOwner: 'alice',
+    createQuery: query.factory,
+  });
+  query.emit({ type: 'system', subtype: 'task_started', task_id: 'ghost', description: 'a long shell' });
+  query.emit({ type: 'result', subtype: 'success' });
+  await turn;
+
+  query.emit({ type: 'system', subtype: 'task_updated', task_id: 'ghost', patch: { status: 'completed' } });
+  await flushMicrotasks();
+  t.mock.timers.tick(2000);
+  assert.equal(settlements.length, 1, 'the window closed, so the owner has been told once');
+
+  // The session dies while its message stream is still being drained.
+  claudeSessionPool.closeSession('post-death');
+  assert.equal(query.state.closeCalls, 1);
+
+  // One frame the SDK had already parsed, arriving after that.
+  query.emit({
+    type: 'system',
+    subtype: 'task_notification',
+    task_id: 'ghost',
+    status: 'completed',
+    output_file: '/home/alice/.claude/tasks/ghost.output',
+  });
+  await flushMicrotasks();
+  t.mock.timers.tick(2000);
+
+  assert.deepEqual(
+    sinkCalls.filter((call) => call.subtype === 'task_notification'),
+    [],
+    'a dead session has already made every report it owes through its own teardown, so anything arriving '
+    + 'after that is unaccounted for and must not be forwarded — least of all with a null owner, which '
+    + 'broadcasts',
+  );
+  assert.equal(settlements.length, 1, 'and nothing is reported twice');
+
+  query.end();
+  await flushMicrotasks();
+  claudeSessionPool._resetForTests();
+  t.mock.timers.reset();
+});
+
+/*
+ * Fix-round-3: `normalizeOptionValue(undefined)` is `null` while `false` is `false`,
+ * so a caller that OMITTED `forkSubagent` gave its session a `null` snapshot that
+ * differed from every later ordinary turn's `false`. With `forkSubagent` now a
+ * refusing reason, that difference does not merely warn — it refuses the turn, and
+ * tells the user their process "was started for a /subtask" when it was not.
+ * Production was safe only because one caller happens to pass it at both sites.
+ */
+test('omitting forkSubagent means "not requested", not a difference from requesting it falsely', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory } = createFakeQuery([
+    [
+      { type: 'system', subtype: 'task_started', task_id: 'holding', description: 'a long shell' },
+      { type: 'result', subtype: 'success' },
+    ],
+  ]);
+
+  // Created by a caller that says nothing about /subtask at all.
+  await claudeSessionPool.runTurn({
+    appSessionId: 'stated-absent',
+    userMessage: userMessage('hello'),
+    sdkOptions: { cwd: '/tmp/x' },
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('stated-absent'), ['holding'], 'held, so nothing can recreate');
+
+  assert.deepEqual(
+    claudeSessionPool.pendingFreshProcessReasons('stated-absent', { cwd: '/tmp/x' }, { forkSubagent: false }),
+    [],
+    'an ordinary turn stating `false` must not differ from a session created without the field',
+  );
+  assert.deepEqual(
+    claudeSessionPool.pendingFreshProcessReasons('stated-absent', { cwd: '/tmp/x' }, {}),
+    [],
+    'and neither must one that omits it, which is the same statement',
+  );
+  assert.deepEqual(
+    claudeSessionPool.pendingFreshProcessReasons('stated-absent', { cwd: '/tmp/x' }, { forkSubagent: true }),
+    ['forkSubagent'],
+    'while a genuine /subtask request still differs — that is the difference worth reporting',
+  );
+
+  claudeSessionPool.closeSession('stated-absent');
+});
 
 /*
  * Fix-round-2 CRITICAL: `reportPendingSettlement` deleted the pending record —

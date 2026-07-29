@@ -396,14 +396,26 @@ function normalizeOptionValue(value) {
 /**
  * @param {object} sdkOptions
  * @param {object} [callerStated] Values for `CALLER_STATED_OPTION_FIELDS`, which
- *   `sdkOptions` cannot carry. Absent is the same as not requested.
+ *   `sdkOptions` cannot carry.
+ *
+ * Caller-stated fields are collapsed to a strict boolean rather than passed through
+ * `normalizeOptionValue`, and that is a correctness requirement, not tidiness:
+ * `normalizeOptionValue(undefined)` is `null` while `normalizeOptionValue(false)` is
+ * `false`, so a caller that OMITTED the field gave its session a snapshot that
+ * differed from every later turn stating `false`. `forkSubagent` is now a refusing
+ * reason (`FRESH_PROCESS_REQUIRED_REASONS` in `claude-sdk.js`), so that difference
+ * did not merely warn — it would refuse every ordinary turn on a held session and
+ * tell the user their process "was started for a /subtask" when it was not.
+ * Comparing `=== true` makes absent and `false` the same statement, which is what
+ * they mean, so the safety is structural instead of a property of there happening to
+ * be exactly one caller today.
  */
 function snapshotOptions(sdkOptions, callerStated = {}) {
   /** @type {Record<string, unknown>} */
   const snapshot = {};
   for (const field of RELEVANT_OPTION_FIELDS) {
     snapshot[field] = CALLER_STATED_OPTION_FIELDS.has(field)
-      ? normalizeOptionValue(callerStated[field])
+      ? callerStated?.[field] === true
       : normalizeOptionValue(sdkOptions?.[field]);
   }
   return snapshot;
@@ -1508,6 +1520,40 @@ function routeMessage(session, message) {
 
   const turn = session.currentTurn;
 
+  // Every route to the session sink goes through here, so the two reasons a frame
+  // may be withheld from it live in ONE place rather than being repeated at three
+  // call sites that have drifted apart before.
+  //
+  // 1. A settlement the pool has already announced. The transcript has no
+  //    update-in-place, so a second frame for one task id is a second row — and,
+  //    under the same id, two React children under one key.
+  // 2. A DEAD session. Its teardown has already made every report it owes (lost
+  //    tasks, flushed settlements), and it has dropped the records those reports
+  //    were built from — so a frame arriving afterwards is unaccounted for, and
+  //    would be forwarded with a null owner, which BROADCASTS: one user's task
+  //    summary and the absolute host path of its output to every connected client.
+  //    Reachable because `close()` ends the CLI but not the frames the SDK has
+  //    already parsed, and the retire path closes a session whose generator is
+  //    known to still be running.
+  const forwardToSessionSink = (frame) => {
+    if (duplicateSettlement) {
+      return;
+    }
+    if (session.dead) {
+      if (isTaskNotification(frame)) {
+        // Only for the one frame shape the sink would have acted on. Silence here
+        // is what the whole change set exists to remove, but warning for every
+        // frame a dying process happens to emit would bury it.
+        console.warn('[ClaudeSessionPool] dropping a background task settlement that arrived after this session died; its outcome was already reported by the session\'s own teardown', {
+          appSessionId: session.appSessionId,
+          taskId: frame.task_id,
+        });
+      }
+      return;
+    }
+    session.onBetweenTurnMessage(frame, sinkMeta);
+  };
+
   if (turn?.promptSent && !turn.aborted) {
     // A task settling while a LATER turn is in flight must still reach the
     // session sink. The in-turn path normalizes SDK messages by `message.role`
@@ -1515,8 +1561,8 @@ function routeMessage(session, message) {
     // normalizes to nothing — routing it only to the turn would make a
     // completion, a failure, or a reaper kill vanish silently, which is exactly
     // what goal 3 of the design forbids.
-    if (isTaskNotification(message) && !duplicateSettlement) {
-      session.onBetweenTurnMessage(message, sinkMeta);
+    if (isTaskNotification(message)) {
+      forwardToSessionSink(message);
     }
     turn.frameCount += 1;
     turn.onMessage(message);
@@ -1529,22 +1575,13 @@ function routeMessage(session, message) {
     // the transcript — but a background task's settlement still has to get
     // through, so this routes exactly like the between-turn path (whose sink
     // forwards only `task_notification`).
-    if (!duplicateSettlement) {
-      session.onBetweenTurnMessage(message, sinkMeta);
-    }
+    forwardToSessionSink(message);
     return;
   }
 
   // No turn in flight: this is the path that carries a background task's
   // completion to the UI after its turn already finished.
-  //
-  // The one frame withheld from the sink anywhere in this function is a
-  // settlement the pool has already announced: the transcript has no
-  // update-in-place, so a second frame for one task id is a second row (and,
-  // under the same id, two React children under one key).
-  if (!duplicateSettlement) {
-    session.onBetweenTurnMessage(message, sinkMeta);
-  }
+  forwardToSessionSink(message);
 
   armIdleTimerIfIdle(session);
 }

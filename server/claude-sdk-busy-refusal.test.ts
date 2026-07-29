@@ -341,9 +341,7 @@ test('/subtask on a live process whose task already settled recreates it instead
 // such a process cannot hold a task, so `closeIfIdle` destroys it at turn end and
 // the next turn always gets a fresh one — which is exactly why the fake constructs
 // the state directly: if that ever stops being true, this refuses instead of
-// quietly downgrading the feature. It is also what makes the third argument to
-// `pendingFreshProcessReasons` load-bearing: omit it and every ordinary turn on a
-// held session compares `false` against `null` and gets refused.
+// quietly downgrading the feature.
 test('an ordinary turn on a HELD /subtask process is refused, not silently stripped of run_in_background', async (t) => {
   claudeSessionPool._resetForTests();
   resetSdkState();

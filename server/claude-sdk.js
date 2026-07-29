@@ -341,12 +341,12 @@ function describeHeldProcessRefusal(poolSessionId, options, sdkOptions) {
   }
 
   const blocked = claudeSessionPool
-    // The third argument is load-bearing, not decorative: `forkSubagent` is not an
-    // `sdkOptions` field (see the pool's `CALLER_STATED_OPTION_FIELDS`), so the
-    // pool has no way to derive it, and it is now a refusing reason. Omit it and
-    // every ordinary turn on a held session compares `false` against `null`,
-    // reports a difference, and gets refused. It must be stated the same way here
-    // as at the `runTurn` call site or the two disagree.
+    // Stated rather than derived: `forkSubagent` is not an `sdkOptions` field (see
+    // the pool's `CALLER_STATED_OPTION_FIELDS`), so the pool cannot see it. Absent
+    // and `false` are the same statement there by construction, so a caller that
+    // forgot this argument would degrade to "no /subtask requested" — which is the
+    // safe reading — rather than to a false refusal. Passed explicitly anyway,
+    // because saying what this turn is is not the same as being defaulted.
     .pendingFreshProcessReasons(poolSessionId, sdkOptions, { forkSubagent: options.forkSubagent === true })
     .filter((reason) => FRESH_PROCESS_REQUIRED_REASONS.has(reason));
 
@@ -1189,16 +1189,24 @@ async function queryClaudeSDK(command, options = {}, ws) {
         : status === 'failed'
           ? `${label} — failed${error ? `: ${error}` : ''}.`
           : `${label} — finished.`;
-      // The two reasons are different claims and only one of them supports "the
-      // CLI reported nothing". `process-ended` means we closed or lost the process
-      // before a notification could be routed — which is also what happens to a
-      // task that completed normally and DID write its output file, so asserting
-      // "reported no result notification" there would be false. What is true on
-      // both paths is only that we have no path to the output.
+      // Both reasons mean "we have no path to the output", and NEITHER may claim
+      // more than that.
+      //
+      // `process-ended`: we closed or lost the process before a notification could
+      // be routed — which is also what happens to a task that completed normally
+      // and DID write its output file, so "reported no result" would be false.
+      //
+      // `notification-window-elapsed`: no notification arrived WITHIN the window.
+      // The unqualified version of this sentence ("reported no result notification
+      // for it") is exactly the case where one may yet arrive — the pool suppresses
+      // that late frame to keep the transcript at one row per command, so this row
+      // is the only thing the user sees and must not deny the notification's
+      // existence. "In time" is the whole claim the window supports.
       const provenance = reason === 'process-ended'
         ? 'The Claude CLI process ended before it said where the output went, so its output cannot be located '
           + 'from here.'
-        : 'The Claude CLI reported no result notification for it, so its output could not be located.';
+        : 'The Claude CLI did not report a result notification for it in time, so this row cannot point at its '
+          + 'output file.';
       emitBackgroundTaskEvent({
         sessionId: backgroundTaskSessionId,
         taskId,

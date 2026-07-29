@@ -501,15 +501,19 @@ test('a notification arriving after the grace window reaches nobody — not a se
     );
     t.mock.timers.tick(2000);
 
-    assert.equal(
-      clients.backgroundTaskFrames(clients.ownerFrames).length,
-      1,
-      'one background command, one row — the transcript has no update-in-place',
-    );
+    // The bystander count FIRST, deliberately. Assertions run in sequence, so with
+    // the row count first a revert failed there and this one never executed — the
+    // leak half would then have been pinned only by the other assertion passing,
+    // and it is the half that matters most.
     assert.equal(
       clients.backgroundTaskFrames(clients.otherFrames).length,
       0,
-      'and a bystander must never receive the owner\'s task summary or the absolute host output path',
+      'a bystander must never receive the owner\'s task summary or the absolute host output path',
+    );
+    assert.equal(
+      clients.backgroundTaskFrames(clients.ownerFrames).length,
+      1,
+      'and one background command means one row — the transcript has no update-in-place',
     );
   } finally {
     clients.dispose();
