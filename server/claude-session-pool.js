@@ -113,6 +113,11 @@ const live = new Map();
  *   turn 1's captured closures act on turn N's writer and settings.
  * @property {NodeJS.Timeout | null} idleTimer
  * @property {boolean} dead
+ * @property {number} owedTerminators - How many `result` messages are still
+ *   expected for turns the abort fallback settled without one. A counter, not a
+ *   flag: a second fallback can fire while a debt is outstanding (turn 2 aborted
+ *   too), and a flag would silently drop one debt, letting exactly the frame it
+ *   was meant to swallow through.
  */
 
 /** Order-insensitive for lists, so a reshuffled allowlist is not a "change". */
@@ -470,7 +475,13 @@ function armAbortSettleFallback(session, turn) {
     if (session.currentTurn !== turn) {
       return;
     }
-    settleCurrentTurn(session, { type: 'result', subtype: 'aborted' });
+    if (settleCurrentTurn(session, { type: 'result', subtype: 'aborted' })) {
+      // We just guessed that nothing more is coming for this turn, and the pool
+      // cannot tell "emitted nothing" from "has not emitted yet". Record the
+      // terminator we settled without, so that if the guess was wrong the tail
+      // is swallowed rather than misattributed to whoever claims the slot next.
+      session.owedTerminators += 1;
+    }
     armIdleTimerIfIdle(session);
   }, ABORT_SETTLE_FALLBACK_MS);
 }
@@ -517,8 +528,38 @@ function isTaskNotification(message) {
   return message?.type === 'system' && message?.subtype === 'task_notification';
 }
 
+/**
+ * The frames `trackTask` keys off. Session-scoped, not turn-scoped: they say
+ * what the PROCESS is still doing, which is why they are exempt from every
+ * turn-level suppression rule in `routeMessage`. Dropping one would let the pool
+ * close a process with a live shell in it — the thing this pool exists to stop.
+ */
+function isTaskLifecycle(message) {
+  return message?.type === 'system'
+    && (message.subtype === 'task_started'
+      || message.subtype === 'task_notification'
+      || message.subtype === 'task_updated');
+}
+
 function routeMessage(session, message) {
   trackTask(session, message);
+
+  if (session.owedTerminators > 0) {
+    // A turn the abort fallback settled early is still unwinding inside the CLI.
+    // Its tail cannot be told apart from the current turn's output — there is no
+    // turn-correlation field on any SDK message — so everything up to and
+    // including its terminator is swallowed, and the debt is cleared by that
+    // terminator. Task lifecycle is exempt (see `isTaskLifecycle`) and still
+    // reaches the session sink, which is where between-turn task events belong.
+    if (isTaskLifecycle(message)) {
+      session.onBetweenTurnMessage(message);
+      return;
+    }
+    if (message?.type === 'result') {
+      session.owedTerminators -= 1;
+    }
+    return;
+  }
 
   if (message?.type === 'result') {
     settleCurrentTurn(session, message);
@@ -598,6 +639,7 @@ function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTur
     turnContext: turnContext ?? null,
     idleTimer: null,
     dead: false,
+    owedTerminators: 0,
   };
 
   live.set(appSessionId, session);

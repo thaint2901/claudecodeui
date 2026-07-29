@@ -1383,6 +1383,129 @@ test('a turn sent while an aborted turn is still settling waits for it instead o
 });
 
 /**
+ * Fix-round-2. The abort fallback reintroduced Task A's own bug in a 5s-narrower
+ * window: it settles a turn the CLI may simply not have finished unwinding yet
+ * (an interrupt it acked but needs longer than ABORT_SETTLE_FALLBACK_MS to
+ * honour, e.g. a foreground tool call it will not abandon). The slot was then
+ * vacant, so a re-sent turn claimed it and inherited turn 1's tail: its frames
+ * were delivered to turn 2's caller and turn 1's `error_during_execution`
+ * settled turn 2 before turn 2 had emitted anything.
+ *
+ * The pool cannot tell "emitted nothing" from "has not emitted yet", and it has
+ * no correlation field to key on — so instead of guessing, a fallback settle
+ * records that one terminator is still OWED, and everything up to and including
+ * the next `result` is swallowed. Task-lifecycle frames are exempt: they are
+ * session-scoped, not turn-scoped, and they are what keeps a background shell's
+ * process alive.
+ */
+test('a fallback-settled turn\'s tail is swallowed instead of being attributed to the next turn', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const tailGate = createDeferred();
+  let turns = 0;
+
+  const factory = ({ prompt }) => {
+    const generator = (async function* run() {
+      for await (const _message of prompt) {
+        turns += 1;
+        if (turns === 1) {
+          yield { type: 'system', subtype: 'task_started', task_id: 'survivor' };
+          yield { type: 'assistant', text: 'before-stop' };
+          // The CLI acked the interrupt but keeps unwinding well past the
+          // fallback window; turn 2's prompt queues behind this, exactly as a
+          // single-conversation CLI would serialise it.
+          await tailGate.promise;
+          yield { type: 'system', subtype: 'task_notification', task_id: 'survivor', status: 'completed', output_file: '/tmp/survivor.out' };
+          yield { type: 'system', subtype: 'task_started', task_id: 'late-task' };
+          yield { type: 'assistant', text: 'turn-1 tail' };
+          yield { type: 'result', subtype: 'error_during_execution' };
+        } else {
+          yield { type: 'assistant', text: 'turn-2 answer' };
+          yield { type: 'result', subtype: 'success' };
+        }
+      }
+    })();
+    generator.interrupt = async () => {};
+    generator.close = () => {};
+    return generator;
+  };
+
+  const sink = [];
+  const common = {
+    appSessionId: 'fallback-debt',
+    sdkOptions: {},
+    onBetweenTurnMessage: (m) => sink.push(m),
+    createQuery: factory,
+  };
+
+  const turnStarted = createDeferred();
+  const firstFrames = [];
+  const first = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('one'),
+    onMessage: (m) => {
+      firstFrames.push(m);
+      // Stop only once the user has actually seen some of turn 1, so the
+      // suppression under test is the TAIL, not the whole turn.
+      if (m.type === 'assistant') {
+        turnStarted.resolve();
+      }
+    },
+  });
+
+  await turnStarted.promise;
+  assert.equal(await claudeSessionPool.interruptTurn('fallback-debt'), true);
+
+  // No terminator within the window: the fallback settles turn 1 and takes on a
+  // debt for the terminator that is still coming.
+  t.mock.timers.tick(5000);
+  await flushMicrotasks();
+  assert.equal((await first).subtype, 'aborted');
+
+  // The user re-sends. Turn 2 claims the now-free slot.
+  const secondFrames = [];
+  const second = claudeSessionPool.runTurn({
+    ...common,
+    userMessage: userMessage('two'),
+    onMessage: (m) => secondFrames.push(m),
+  });
+  await flushMicrotasks();
+
+  // Only now does turn 1 finish unwinding.
+  tailGate.resolve();
+
+  const result = await second;
+  assert.equal(
+    result.subtype,
+    'success',
+    'turn 1\'s terminator must not settle turn 2 — that is the misattribution this whole task exists to prevent',
+  );
+  assert.deepEqual(
+    secondFrames.map((m) => m.text ?? m.subtype),
+    ['turn-2 answer'],
+    'turn 1\'s tail must not appear in turn 2\'s transcript',
+  );
+  assert.deepEqual(firstFrames.map((m) => m.text ?? m.subtype), ['task_started', 'before-stop']);
+
+  // The exemption that matters: task lifecycle keeps flowing through the debt
+  // window, or the pool loses track of what is keeping the process alive.
+  assert.deepEqual(
+    sink.filter((m) => m.subtype === 'task_notification').map((m) => m.output_file),
+    ['/tmp/survivor.out'],
+    'a background task settling inside the debt window must still reach the session sink',
+  );
+  assert.deepEqual(
+    claudeSessionPool.getLiveTaskIds('fallback-debt'),
+    ['late-task'],
+    'and task tracking must stay accurate, or the process is closed under a live shell',
+  );
+
+  claudeSessionPool.closeSession('fallback-debt');
+  t.mock.timers.reset();
+});
+
+/**
  * Fix-round-1 finding 2. `interruptTurn` read `promptSent` AFTER awaiting
  * `interrupt()`, so it could not tell "the interrupt applied to this turn's
  * prompt" from "the interrupt reached the CLI before this prompt existed". A

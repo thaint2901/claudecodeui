@@ -330,13 +330,19 @@ function shouldRecaptureSessionId(isFork, announcedId, capturedId) {
  *   session-pool wiring) a pool handle exposing `interrupt()`. This function
  *   never inspects it, only forwards it.
  * @param {Object} deps.ws - The websocket writer; its `setSessionId` (if present) labels its outgoing events.
- * @param {(sessionId: string) => void} deps.removeSession
+ * @param {(sessionId: string, queryInstance: Object) => void} deps.removeSession -
+ *   Ownership-scoped: it is handed `queryInstance` so it can decline to retire an
+ *   entry that some other run has since registered under `oldId`.
  * @param {(sessionId: string, queryInstance: Object, writer?: Object) => void} deps.addSession
  * @param {() => void} deps.sendSessionCreated - Announces the new id to the client; caller controls once-only guarding.
  * @returns {string} `deps.newId`, so callers can reassign their captured-id variable in one line.
  */
 function recaptureForkSession({ oldId, newId, queryInstance, ws, removeSession, addSession, sendSessionCreated }) {
-  removeSession(oldId);
+  // Defensive narrowing, not a bug fix: no harmful interleaving is reachable
+  // here (the two conditions it would need are mutually exclusive), but the
+  // argument for that is subtle and this handle is registered under both ids, so
+  // the ownership test is free — and no future reader has to reconstruct it.
+  removeSession(oldId, queryInstance);
   addSession(newId, queryInstance, ws);
   setWriterSessionId(ws, newId);
   sendSessionCreated();
@@ -390,16 +396,11 @@ function addSession(sessionId, queryInstance, writer = null, poolSessionId = nul
 }
 
 /**
- * Removes a session from the active sessions map
- * @param {string} sessionId - Session identifier
- */
-function removeSession(sessionId) {
-  activeSessions.delete(sessionId);
-}
-
-/**
- * Removes a session entry only while `instance` is still the handle registered
- * under `sessionId` — i.e. only the run that owns the entry may retire it.
+ * Removes a session from the active sessions map, but only while `instance` is
+ * still the handle registered under `sessionId` — i.e. only the run that owns the
+ * entry may retire it. (Replaces an unconditional `removeSession`, which every
+ * call site turned out to need this test; there is deliberately no unguarded
+ * remover left to reach for.)
  *
  * `activeSessions` is keyed by the PROVIDER-native id and `addSession`
  * overwrites, so a Stop-then-resend puts two runs on one key: the aborted turn
@@ -874,7 +875,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
           newId: newSessionId,
           queryInstance: poolSessionHandle,
           ws,
-          removeSession,
+          removeSession: removeSessionIfOwnedBy,
           addSession: addSessionForPool,
           sendSessionCreated: () => {
             if (!sessionCreatedSent) {
