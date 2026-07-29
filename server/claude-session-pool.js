@@ -27,10 +27,16 @@ const IDLE_GRACE_MS = 60000;
  * shared `turnContext` object rather than through the closure the SDK captured
  * on turn 1.
  *
- * `RECREATE_ONLY_*` can only be honoured by a fresh `query()`: `cwd` and
- * `effort` are fixed at spawn, and a fork needs its own process (there is no
- * fork-mid-stream control request). When background work is live we refuse to
- * close, so those changes are reported and skipped rather than silently
+ * `RECREATE_ONLY_*` can only be honoured by a fresh `query()`: `cwd` is fixed at
+ * spawn, and a fork needs its own process (there is no fork-mid-stream control
+ * request). `effort` belongs here for a narrower reason than "fixed at spawn":
+ * `applyFlagSettings` does expose an `effortLevel` key, but its domain is
+ * SMALLER than the `effort` query option — `'low'|'medium'|'high'|'xhigh'`
+ * versus those plus `'max'` and numeric values — so a live push would silently
+ * mis-apply the values it cannot express. Reconciling only the overlapping
+ * subset would be worse than not reconciling: it would succeed for four values
+ * and quietly diverge for the rest. When background work is live we refuse to
+ * close, so these changes are reported and skipped rather than silently
  * pretended-applied.
  *
  * Deliberately NOT relevant:

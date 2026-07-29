@@ -233,12 +233,17 @@ turn, nor claim idle in a way that hides live work.
   `query()` options, so a fork spawns its own live session. The existing fork flow already creates a
   new app session, so this fits — but `recaptureForkSession` (`server/claude-sdk.js`) must be
   re-checked against the pool, since it remaps the provider id mid-stream.
-- **Approval semantics.** Under `permissionMode: 'default'` the spike saw `canUseTool` fire once
-  per session rather than once per turn. This does not affect current usage — the a30 session ran
-  `bypassPermissions` for all 1373 recorded hook payloads, and `bypassPermissions` skips
-  `canUseTool` entirely. But the persistent process fixes `permissionMode` at creation, so toggling
-  it mid-session must call `setPermissionMode()` (verified working) rather than relying on the next
-  turn spawning a fresh process.
+- **Approval semantics — RETRACTED, no risk here.** This entry claimed that under
+  `permissionMode: 'default'` the spike saw `canUseTool` fire once per session rather than once per
+  turn, and dismissed it on the grounds that a30 runs `bypassPermissions`. Both halves were unsound:
+  the observation was an artifact of comparing a gated command against one the CLI classifies as
+  safe, and the dismissal would not have covered a default deployment if the observation had held.
+  Re-measured with the same command shape in both turns and a guard requiring turn 1 to have been
+  gated (`spikes/streaming-input-mode/approval-per-turn.mjs`): `canUseTool` is consulted on **every**
+  turn, so a held process inherits no approvals and this matches `main`'s behaviour exactly.
+  What remains true is unrelated to approvals: the persistent process fixes `permissionMode` at
+  creation, so toggling it mid-session must call `setPermissionMode()` (verified working) rather than
+  relying on the next turn spawning a fresh process.
 
 ## Success criteria
 

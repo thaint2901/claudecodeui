@@ -53,11 +53,11 @@ One process served **3 turns** under a **single session id** — no id churn.
 | Probe | Result | Verdict |
 |---|---|---|
 | Hooks (`PreToolUse`) across turns | fired on turn 1 and turn 2 | ✅ works |
-| `canUseTool` across turns | fired **once** (turn 1), **not** on turn 2 | ⚠️ semantics change — see H1 |
+| `canUseTool` across turns | ~~fired once (turn 1), not on turn 2~~ **RETRACTED — fires every turn** | ✅ see H1 |
 | `backgroundTasks()` — the Ctrl-B equivalent | `true` | ✅ new capability unlocked |
 | `stopTask(id)` | works, emits `task_notification` `status=stopped` | ✅ |
 | `setPermissionMode()` | ok | ✅ |
-| `interrupt()` | ok, session usable afterwards — but **no `result` emitted** | ⚠️ see H2 |
+| `interrupt()` | ok, session usable afterwards; ~~no `result` emitted~~ **RETRACTED — a `result` IS emitted** | ⚠️ see H2 |
 | Fork mid-stream | no control method exists | ⚠️ see H3 |
 
 ### Q-B — RAM cost of a live session
@@ -69,17 +69,51 @@ a30 context (measured): 128 GB total, **75.6 GB available**, load avg 13.46, 185
 
 ## Hazards to design around (none is a blocker)
 
-**H1 — approval becomes per-session instead of per-turn.** `canUseTool` fired only on the first
-Bash call; the second turn's Bash was not re-checked. Today every ccui turn is a fresh process, so
-approvals never persist. In streaming mode they do — which matches interactive Claude Code, but it
-is a **behaviour change to a security-relevant default** (ccui ships Claude tools disabled by
-default). Must be an explicit, deliberate decision in the spec, not a side effect.
+**H1 — RETRACTED. Approval stays per-turn; there is no hazard here.**
 
-**H2 — `interrupt()` produces no turn terminator.** The interrupted turn emitted no `result`
-within 30s; the session remained fully usable and the next turn succeeded. ccui's run loop and
-`chatRunRegistry` currently key terminal state off the generator/`result`, so an abort would leave
-the run hanging. ccui already synthesises its own aborted-complete message via `abortedSessionIds`
-(`claude-sdk.js:897`), so this is tractable — but it must be wired deliberately.
+The original H1 claimed approval becomes per-session, because `canUseTool` fired on turn 1's Bash
+and not on turn 2's. That comparison was invalid: turn 1 ran a gated
+`bash -c 'for i in $(seq 1 90); …'` while turn 2 ran `echo turn2-alive`, which the CLI classifies as
+safe and never routes through `canUseTool` at all. Two different commands, so the difference said
+nothing about caching.
+
+Re-measured with the SAME command shape in both turns, and with a guard that refuses to answer
+unless turn 1 was actually gated (`approval-per-turn.mjs`):
+
+```
+TURN 1 canUseTool consulted: 1
+TURN 2 canUseTool consulted: 1
+>>> YES: approval is per TURN — the second turn was re-consulted.
+```
+
+So a held process does **not** inherit turn 1's approvals, and nothing a user can do escapes a
+prompt that would have prompted on `main`. The design spec's "Approval semantics" risk paragraph is
+retracted with this.
+
+**H2 — RETRACTED, and the correction inverts the design consequence.**
+
+The original H2 claimed an interrupted turn emits no terminator, which is why `claude-sdk.js` settles
+the turn itself on abort. Re-measured with a guard proving a turn was genuinely mid-flight (a
+`tool_use` seen, no `result` yet) before interrupting — `interrupt-result.mjs`:
+
+```
+[4.3s] tool_use Bash
+[8.0s] calling interrupt()…
+[8.0s] interrupt() resolved -> undefined
+[8.0s] RESULT subtype=error_during_execution
+```
+
+A `result` arrives in **milliseconds**, not never. The likely cause of the original reading is
+interrupting when no turn was in flight — there is then nothing to terminate, so nothing is emitted.
+
+This inverts the design consequence. Settling the turn ourselves on abort **vacates the turn slot
+while the CLI is still emitting**, and `SDKResultMessage` carries no turn-correlation field (only
+`uuid` / `session_id` / `num_turns`), so a frame arriving after the slot is reused cannot be
+attributed to the turn it belongs to. The pool should keep the slot until the real terminator lands,
+with a timed fallback for the one case that genuinely produces no terminator: `interrupt()` failing.
+
+Note `interrupt()` is `Promise<void>` on SDK 0.3.165 — the `interrupt_receipt_v1` capability and
+`SDKControlInterruptResponse` described in the current docs are not in this version.
 
 Related, and now documented rather than suspected: single-message mode **does not support
 real-time interruption** at all. So ccui's current Stop button deserves its own test regardless of
@@ -97,10 +131,18 @@ Streaming input mode is **viable**. Parity on background shells is real (Q-0), a
 unlocks Ctrl-B backgrounding, task stopping, and mid-session model/permission changes — all of
 which are unreachable today.
 
-Required guardrail: an **LRU cap on live processes plus idle eviction**, because 290 session rows
-× 320 MB is not a budget that exists. Suggested starting point: cap ~8–10 live sessions, evict
-after 10–15 min idle → ~3.2 GB, about 4% of a30's available RAM. Sessions beyond the cap fall back
-to today's per-turn `resume` path, which still works — it just cannot hold background shells.
+~~Required guardrail: an LRU cap on live processes plus idle eviction … cap ~8–10 live sessions,
+evict after 10–15 min idle.~~ **RETRACTED — no cap shipped, deliberately.**
+
+This recommendation rested on a premise the design then dropped: that RAM scales with *session rows*.
+It does not. The shipped pool is keep-alive-**on-demand** — a session with no background work closes
+its process at turn end exactly as before — so cost scales with sessions that actually have
+background work, and the 290 non-archived rows stop being the relevant number.
+
+An LRU cap or a maximum hold time would also evict by killing the user's running work, which is
+precisely the bug this design exists to fix. The repo owner's ruling is therefore **warn, never
+evict**, recorded under "Accepted risks" in the design spec. Read that section, not this paragraph,
+for the current policy.
 
 Not covered by this spike, and worth resolving in the spec:
 
@@ -145,3 +187,50 @@ outright. Neither disturbed the protected background task.
 **Caveat found while measuring:** successive `applyFlagSettings` calls *replace* the whole
 `permissions` object rather than merging — STEP 5's `{deny:[...]}` dropped STEP 3's `{ask:[...]}`.
 The pool therefore always sends a complete layer and clears with `permissions: null`.
+
+---
+
+## Correction probes, and why this directory now has a shared lib
+
+Two of this spike's three hazards (H1, H2) were wrong, for the same methodological reason: the probe
+had no way to distinguish "the hypothesis is false" from "the thing I meant to measure never
+happened". `live-deny.mjs` was the first script here to add that guard; the three probes below are
+built on `_probe-lib.mjs`, which makes it mandatory.
+
+| Probe | Question | Verdict |
+|---|---|---|
+| `approval-per-turn.mjs` | Is a tool approval per turn or per session on a held process? | per **turn** — H1 retracted |
+| `interrupt-result.mjs` | Does an interrupted turn emit a terminator? | yes, `error_during_execution` in ms — H2 retracted |
+| `task-classification.mjs` | Which tracked tasks can outlive their turn? | see below |
+
+`_probe-lib.mjs` encodes three rules, each of which exists because breaking it produced a wrong
+finding that reached a spec: **(1)** neutralise env at BOTH layers (`options.env` *and*
+`settingSources`), because `options.env` cannot remove what `settings.json` sets; **(2)** compare the
+same object/command shape in both arms; **(3)** always provide an `inconclusive` branch, printed
+first so it cannot be read as a result.
+
+### Task classification (`task-classification.mjs`)
+
+```
+task_started by task_type : {"local_bash":1,"local_agent":1}
+is_backgrounded reported  : (none)
+```
+
+A backgrounded Bash reports `task_type: 'local_bash'`; a subagent reports `'local_agent'` and, in
+this run, settled inside its own turn via `task_updated {status: 'completed'}`.
+
+Two consequences for the pool's `liveTaskIds`, both against narrowing the filter:
+
+- **`is_backgrounded` cannot be relied on** — the field exists in `SDKTaskUpdatedMessage.patch` but
+  was never emitted in this run.
+- **Filtering to `local_bash` only would under-hold.** Whether a subagent outlives its turn depends
+  on env: with `CLAUDE_CODE_FORK_SUBAGENT` set (true on the dev box via `~/.claude/settings.json`,
+  false on a30) subagents are backgrounded and DO outlive the turn, so holding the process for them
+  is correct. Dropping `local_agent` from the tracked set would kill them on exactly the hosts where
+  the flag is on.
+
+And there is no ground-truth query to reconcile against: `backgroundTasks(toolUseId?)` returns
+`Promise<boolean>` — it is the Ctrl-B *action*, not a listing of running tasks. So tracking every
+`task_started` (failing toward holding) stays the right default, and the real gap to close is that a
+task whose terminal frame never arrives holds the process **unobservably** — the fix is a long-hold
+warning, not a narrower filter and not eviction.

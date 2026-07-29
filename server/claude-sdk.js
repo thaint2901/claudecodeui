@@ -175,16 +175,26 @@ function mapCliOptionsToSDK(options = {}) {
   sdkOptions.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT = '1';
 
   // FORK_SUBAGENT lets Claude request subagent_type "fork" (inherited-context
-  // subagent, the /subtask mechanism), but per the docs it forces EVERY
-  // subagent launched during the run into the background. Background
-  // subagents lose the canUseTool approval channel, so any tool needing
-  // approval fails with "AbortError: Stream closed", and their results
-  // surface as duplicate task-notifications plus an "Async agent launched
-  // successfully..." boilerplate leaking into the Agent tool_result.
+  // subagent, the /subtask mechanism), but it forces EVERY subagent launched
+  // during the run into the background (docs, and measured). Backgrounded
+  // subagents return an "Async agent launched successfully..." launch stub as
+  // their whole Agent tool_result — one block, no answer, and no later
+  // tool_result arrives to replace it (measured: none within 40s). That is why
+  // this flag must NOT be set session-wide: it would strip the inline answer
+  // from every ordinary subagent's Result box.
+  //
   // CLAUDE_CODE_DISABLE_BACKGROUND_TASKS takes precedence over fork mode and
-  // keeps subagents foreground (docs-confirmed precedence rule) — but it also
-  // disables Bash run_in_background entirely, so it must stay scoped to
-  // /subtask runs only, not global.
+  // restores foreground subagents — so the answer comes back as a second
+  // tool_result with the usual [answer, metadata] pair (precedence rule stated
+  // in the docs and confirmed by measurement). But it also disables Bash
+  // run_in_background entirely, so it must stay scoped to /subtask runs only,
+  // never global.
+  //
+  // NOTE: an earlier version of this comment also claimed background subagents
+  // "lose the canUseTool approval channel" and fail with "AbortError: Stream
+  // closed". That clause is unverified and the docs state the opposite
+  // (background subagents still surface permission prompts), so do not rely on
+  // it. The two reasons above are the measured ones.
   if (forkSubagent === true) {
     sdkOptions.env.CLAUDE_CODE_FORK_SUBAGENT = '1';
     sdkOptions.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
@@ -1007,9 +1017,22 @@ async function abortClaudeSDKSession(sessionId) {
     // background shell started earlier in this session must survive abort.
     await session.instance.interrupt();
 
-    // An interrupted turn emits no `result` (verified in the spike), so
-    // `runTurn`'s promise would never settle on its own — settle it
-    // ourselves. Keyed by `poolSessionId` (the app-level id), NOT `sessionId`
+    // FIXME(turn-slot): the premise below is FALSE. This said "an interrupted
+    // turn emits no `result` (verified in the spike)", but re-measurement shows
+    // a `result` with subtype `error_during_execution` arrives within
+    // milliseconds — the original spike interrupted when no turn was in flight,
+    // so nothing was there to terminate. See
+    // `spikes/streaming-input-mode/interrupt-result.mjs`.
+    //
+    // Settling here therefore vacates the turn slot while the CLI is still
+    // emitting, and `SDKResultMessage` carries no turn-correlation field, so a
+    // frame arriving after the slot is reused cannot be attributed to its own
+    // turn. The fix is to keep the slot and let the real terminator settle it,
+    // with a timed fallback for a FAILED `interrupt()` (the one case that
+    // really produces no terminator). Left in place for now because changing it
+    // is a behaviour change, not a comment fix.
+    //
+    // Keyed by `poolSessionId` (the app-level id), NOT `sessionId`
     // (the provider-native id this function receives) — those are different
     // key spaces; see the `poolSessionId` derivation in `queryClaudeSDK`.
     //
