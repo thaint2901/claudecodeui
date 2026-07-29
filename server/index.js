@@ -32,6 +32,7 @@ import {
     abortClaudeSDKSession,
     resolveToolApproval,
     getPendingApprovalsForSession,
+    shutdownClaudeSessions,
 } from './claude-sdk.js';
 import {
     spawnCursor,
@@ -1663,6 +1664,17 @@ async function startServer() {
                 await closeSessionLockWatcher();
             } catch (err) {
                 console.error('[SessionLockWatcher] Error stopping watcher during shutdown:', err?.message || err);
+            }
+            try {
+                // Pooled `claude` processes deliberately outlive their turn to
+                // keep background shells alive, so they will NOT die on their
+                // own before the process.exit() below.
+                const closed = shutdownClaudeSessions();
+                if (closed > 0) {
+                    console.log(`[Claude] Closed ${closed} live session process(es) during shutdown`);
+                }
+            } catch (err) {
+                console.error('[Claude] Error closing live sessions during shutdown:', err?.message || err);
             }
             try {
                 await stopAllPlugins();

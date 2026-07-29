@@ -8,6 +8,12 @@ import type { MarkSessionIdle, MarkSessionProcessing } from '../../../hooks/useS
 import type { PendingPermissionRequest } from '../types/types';
 import type { ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
+import {
+  buildBackgroundTaskSummary,
+  isNonTranscriptKind,
+  resolveBackgroundTaskOutcome,
+  shouldSignalBackgroundTaskCompletion,
+} from '../utils/realtimeKinds';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -196,6 +202,60 @@ export function useChatRealtimeHandlers({
         case 'session_lock_state_changed':
           return;
 
+        // A background shell settled — possibly long after the turn that
+        // started it, possibly killed by the OS memory-pressure reaper. The
+        // raw frame has no `.id` (force-cast-unsafe, see `shouldPersist`
+        // below), so build a well-formed NormalizedMessage instead, mirroring
+        // 'protocol_error' above. `kind: 'task_notification'` is the existing
+        // compact left-aligned notification row (already used for the /fork
+        // background flow) — its `status` field drives a completed/failed dot
+        // color, and the summary text spells out which of the three outcomes
+        // this was plus the output file path when there is one, since that path
+        // is how the user retrieves the full output (a task lost with a dead CLI
+        // process has none). `showCompletionTitleIndicator`/
+        // `playNotificationSound` take no status parameter, so they fire the
+        // same way regardless of outcome — the transcript message is what
+        // actually distinguishes success from failure from a reaped task.
+        case 'background_task': {
+          // Fails toward "not a success" for an unrecognised status, and flags
+          // the one status that is not an outcome at all — see
+          // `resolveBackgroundTaskOutcome`.
+          const { status, outcome, advisory } = resolveBackgroundTaskOutcome(msg.status);
+
+          if (sid) {
+            sessionStore.appendRealtime(sid, {
+              // An advisory and the SAME task's eventual settlement are two rows
+              // about one task id, so the advisory namespaces its own. Duplicate
+              // ids are not deduped within `realtimeMessages` — they would give
+              // React two rows under one key.
+              id: `background_task_${advisory ? 'holding_' : ''}${(typeof msg.taskId === 'string' && msg.taskId) || Date.now()}`,
+              sessionId: sid,
+              timestamp: (typeof msg.timestamp === 'string' && msg.timestamp) || new Date().toISOString(),
+              provider,
+              kind: 'task_notification',
+              status,
+              summary: buildBackgroundTaskSummary(outcome, msg.summary, msg.outputFile),
+            } as NormalizedMessage);
+          }
+
+          // Both of these say "the thing you were waiting for is done" — the tab
+          // title indicator literally, the chime by being the same sound every
+          // completion makes. An advisory about work that is STILL RUNNING must
+          // not claim that; its transcript row is the whole notification.
+          //
+          // Deliberately NOT gated on `sid === activeViewSessionId`: the user
+          // backgrounded this work in order to go and do something else, so
+          // "settled in a session you are not looking at" is the case the
+          // notification exists for. The server already delivers these frames
+          // only to the owner's connections, so there is no longer anyone else
+          // to spare.
+          if (shouldSignalBackgroundTaskCompletion({ advisory })) {
+            showCompletionTitleIndicator();
+            void playNotificationSound();
+          }
+          return;
+        }
+
         default:
           break;
       }
@@ -239,7 +299,8 @@ export function useChatRealtimeHandlers({
 
       // --- All other messages: route to store ---
       const shouldPersist =
-        msg.kind !== 'complete'
+        !isNonTranscriptKind(msg.kind)
+        && msg.kind !== 'complete'
         && msg.kind !== 'status'
         && msg.kind !== 'permission_request'
         && msg.kind !== 'permission_cancelled';

@@ -11,6 +11,7 @@ import type {
   AnyRecord,
   AuthenticatedWebSocketRequest,
   LLMProvider,
+  RealtimeClientConnection,
 } from '@/shared/types.js';
 import { createNormalizedMessage, parseIncomingJsonObject } from '@/shared/utils.js';
 
@@ -115,25 +116,43 @@ function sendIfOpen(ws: WebSocket, payload: string): void {
 }
 
 /**
- * Reports a protocol-level failure to the requesting client.
+ * The protocol-error frame shape, in one place.
  *
  * Protocol errors deliberately use their own `kind` (instead of the provider
  * `error` message kind) so the frontend can distinguish "your request was
  * invalid" from "the model run produced an error" without inspecting text.
+ *
+ * Exported (and re-exported from the module barrel) because a provider runtime
+ * can also have to refuse a request it cannot honour — `queryClaudeSDK` refuses
+ * a turn that would need a fresh CLI process while a background task is holding
+ * the current one. Only the SHAPE is shared, not the send: this gateway writes
+ * straight to a raw `WebSocket`, whereas a runtime holds a `ChatSessionWriter`
+ * that takes the frame as an object and remaps its `sessionId` to the app id.
+ * Handing the writer to `sendProtocolError` would silently send nothing (a
+ * writer has no `readyState`).
  */
+export function createProtocolErrorFrame(
+  code: string,
+  error: string,
+  sessionId?: string | null
+): AnyRecord {
+  return {
+    kind: 'protocol_error',
+    code,
+    error,
+    sessionId: sessionId ?? null,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/** Reports a protocol-level failure to the requesting client. */
 function sendProtocolError(
   ws: WebSocket,
   code: string,
   error: string,
   sessionId?: string
 ): void {
-  sendJson(ws, {
-    kind: 'protocol_error',
-    code,
-    error,
-    sessionId: sessionId ?? null,
-    timestamp: new Date().toISOString(),
-  });
+  sendJson(ws, createProtocolErrorFrame(code, error, sessionId));
 }
 
 function readRequiredSessionId(data: AnyRecord): string | null {
@@ -377,6 +396,12 @@ async function handleChatSend(
       // Resume-only run: attachments belong to the original message, not this fork.
       images: [],
       sessionId: session.provider_session_id,
+      // The fork's OWN stable app-session row id — distinct from `sessionId`
+      // above (the PARENT's provider-native id, used only as the resume
+      // target). The Claude runtime's session pool keys its live process map
+      // on this id, never the provider-native one (forks reassign that
+      // mid-stream once the SDK announces the fork's own id).
+      appSessionId: forked.sessionId,
       resume: true,
       forkSession: true,
       cwd: session.project_path ?? undefined,
@@ -489,6 +514,11 @@ async function handleChatSend(
     // global upload store may reach the provider runtimes' file reads.
     images: filterImagesToUploadStore(clientOptions.images),
     sessionId: session.provider_session_id ?? undefined,
+    // The stable app-session row id, distinct from `sessionId` above. The
+    // Claude runtime's session pool keys its live process map on this id so
+    // background shells survive a mid-conversation provider-id change (forks
+    // reassign the provider id once the SDK announces the fork's own).
+    appSessionId: sessionId,
     resume: Boolean(session.provider_session_id),
     cwd: clientOptions.cwd ?? session.project_path ?? undefined,
     projectPath: session.project_path ?? clientOptions.projectPath,
@@ -659,9 +689,15 @@ export function handleChatConnection(
   dependencies: ChatWebSocketDependencies
 ): void {
   console.log('[INFO] Chat WebSocket connected');
-  connectedClients.add(ws);
 
   const userId = readRequestUserId(request);
+  // Stamp the identity onto the connection BEFORE it joins the set: a
+  // broadcaster carrying per-user content (background_task) reads it off the set
+  // entries, and the raw socket has no identity of its own. Mutating the socket
+  // rather than adding a parallel map keeps `connectedClients.delete(ws)` on
+  // close as the only cleanup there is.
+  (ws as RealtimeClientConnection).userId = userId;
+  connectedClients.add(ws);
 
   ws.on('message', async (rawMessage) => {
     try {

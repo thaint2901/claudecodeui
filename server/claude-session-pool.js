@@ -1,0 +1,2024 @@
+// server/claude-session-pool.js
+import { createInputStream } from './claude-session-input-stream.js';
+
+/**
+ * Owns the lifetime of live `claude` CLI processes, one per app session.
+ *
+ * Why this exists: ccui used to create a `query()` per turn, so the subprocess
+ * exited at turn end and took any background shell with it. The CLI only
+ * reaps background tasks once its input is closed, so this pool keeps the input
+ * stream open while background work is live and closes it otherwise. A session
+ * that never starts background work therefore behaves exactly as before.
+ *
+ * That hold is deliberately unbounded — nothing here ever ends a user's running
+ * task — so it is instead REPORTED once it gets long: see
+ * `HOLD_WARN_AFTER_MS`/`reportLongHeldTasks`.
+ *
+ * Deliberately knows nothing about normalized messages or websockets: callers
+ * pass `onMessage` / `onBetweenTurnMessage` and keep translation to themselves.
+ */
+
+const IDLE_GRACE_MS = 60000;
+
+/**
+ * How often a session that is holding its process open for background work
+ * re-examines that hold, and how long one task may hold it before the operator
+ * and the user are told.
+ *
+ * This check exists ONLY to report. It never closes, evicts, recreates or
+ * re-times anything, by an explicit ruling: every eviction rule — an LRU cap, a
+ * maximum hold time — kills the user's running work, which is the exact bug this
+ * pool was built to fix. So an unbounded hold stays an accepted risk, and the
+ * gap being closed here is that it used to be an INVISIBLE one.
+ *
+ * Why a periodic check is needed at all rather than a one-shot timer: nothing
+ * else ever reconsiders a hold. `closeIfIdle` CLEARS the idle timer while tasks
+ * are tracked and only `armIdleTimerIfIdle` re-arms it, which requires the set
+ * to become empty — so a task that never emits a terminal frame (wedged, killed
+ * out of band, or a shape we mis-track) left the process held with no mechanism
+ * scheduled to notice, for the life of the server. An operator found out at OOM.
+ */
+const HOLD_CHECK_INTERVAL_MS = 60000;
+const HOLD_WARN_AFTER_MS = 600000;
+
+/**
+ * How long an aborted turn may keep the slot without a terminator.
+ *
+ * The normal route is the terminator: an interrupted turn emits a `result` with
+ * `subtype: 'error_during_execution'` within milliseconds (measured:
+ * `spikes/streaming-input-mode/interrupt-result.mjs`), and that is what settles
+ * the turn. This covers the residual case of a CLI that ACKNOWLEDGED the
+ * interrupt and then emitted nothing — unmeasured, and unfalsifiable from in
+ * here, which is the point: a `result` that never comes cannot be waited on
+ * forever or the caller's promise never settles and the run sits in
+ * "processing" for the life of the process.
+ *
+ * Explicitly NOT the backstop for a FAILED interrupt, however tempting that
+ * reading is: a rejected `interrupt()` never marks the turn (see
+ * `interruptTurn`), so it never arms this timer — the stop did not happen, the
+ * run is still the user's run, and it terminates itself normally.
+ *
+ * Read the `owedTerminator` note in `routeMessage` before building anything else
+ * on top of this timer: firing it is a GUESS that no terminator is coming, and
+ * the one previous mechanism that answered that guess by assuming the opposite
+ * (a terminator "debt" the next turn had to pay off) bricked sessions outright.
+ */
+const ABORT_SETTLE_FALLBACK_MS = 5000;
+
+/**
+ * How long a task that settled via `task_updated` is given to produce the
+ * `task_notification` that normally follows, before the pool reports the
+ * settlement itself.
+ *
+ * A settling task announces itself TWICE and `task_updated` comes first —
+ * measured, reproducibly, `spikes/streaming-input-mode/task-settlement-frames.mjs`:
+ *
+ *   #1 task_started
+ *   #2 task_updated{"status":"completed","end_time":…}
+ *   #3 task_notification{status:completed,output_file:true}   ← 0 ms after #2
+ *
+ * Re-measured for a FAILING backgrounded command after the first version of this
+ * assumed the two matched: same frame set, same order, 1 ms lag
+ * (`task_updated{"status":"failed"}` then `task_notification{status:failed}`).
+ * `killed` remains UNMEASURED — memory pressure cannot be forced from a probe —
+ * which is one of the two reasons the code must not depend on the lag at all.
+ *
+ * Both facts are load-bearing and neither is inferable from `sdk.d.ts`:
+ *
+ * - Because there are two frames for one settlement, forwarding both would put
+ *   two rows in the transcript for one background command.
+ * - Because `task_updated` is FIRST, "report the first and suppress the second"
+ *   is the wrong rule: it would replace every ordinary task's rich notification
+ *   row — `task_notification` is the only frame carrying `output_file` and
+ *   `summary`, and that path is how the user retrieves the output — with a lean
+ *   one derived from a status patch. So the notification stays primary and the
+ *   `task_updated` settlement is held as a FALLBACK.
+ *
+ * What the fallback is for is the frame shape that has no notification at all:
+ * `patch.status: 'killed'` is the memory-pressure reaper's own signal, and a
+ * reaped task previously cleared the pool's tracking and reached no user at all —
+ * the design spec claims the opposite in writing, and "losses become visible,
+ * never silent" was unmet for exactly this shape.
+ *
+ * 2 s against a measured 0-1 ms is margin for a notification split across stdout
+ * chunks, not a guess at an unknown latency. Over-waiting costs a reaped task's
+ * row two seconds; under-waiting double-reports every healthy task, so the
+ * asymmetry is deliberate.
+ *
+ * And nothing here may treat the window as a GUARANTEE that a notification cannot
+ * arrive later. Two routes to one that does, neither excluded by any measurement:
+ * `killed` was never observed at all, and Node runs the timers phase BEFORE the
+ * poll phase, so any event-loop stall longer than the window fires this timer first
+ * and reads the buffered notification second. That is why the reported record is
+ * retained rather than deleted — see `PendingSettlement.reported`, and the
+ * broadcast that deleting it caused.
+ */
+const SETTLEMENT_NOTIFICATION_GRACE_MS = 2000;
+
+/**
+ * Option fields whose value must match the live process for a turn to be
+ * allowed to reuse it, split by whether a RUNNING process can be reconfigured.
+ *
+ * `LIVE_APPLICABLE_*` have a real mid-session mechanism: `setPermissionMode()`,
+ * `setModel()` and `applyFlagSettings()` are SDK control requests
+ * (streaming-input-only — which is exactly the mode this pool put us in), and a
+ * LOOSENED allow list additionally reaches our own approval callback through the
+ * shared `turnContext` object rather than through the closure the SDK captured
+ * on turn 1.
+ *
+ * `RECREATE_ONLY_*` can only be honoured by a fresh `query()`: `cwd` is fixed at
+ * spawn, and a fork needs its own process (there is no fork-mid-stream control
+ * request). `effort` belongs here for a narrower reason than "fixed at spawn":
+ * `applyFlagSettings` does expose an `effortLevel` key, but its domain is
+ * SMALLER than the `effort` query option — `'low'|'medium'|'high'|'xhigh'`
+ * versus those plus `'max'` and numeric values — so a live push would silently
+ * mis-apply the values it cannot express. Reconciling only the overlapping
+ * subset would be worse than not reconciling: it would succeed for four values
+ * and quietly diverge for the rest. When background work is live we refuse to
+ * close, so these changes are reported and skipped rather than silently
+ * pretended-applied.
+ *
+ * Deliberately NOT relevant:
+ * - `resume`: an artifact of process creation, not a behaviour knob. A live
+ *   process is by definition already on its session, and turn 2 of a brand-new
+ *   session always gains a `resume` value that turn 1 lacked — treating that as
+ *   a change would recreate (or warn) on every such turn for no benefit.
+ * - `env` / `mcpServers` / `hooks` / `canUseTool`: rebuilt per turn by
+ *   `mapCliOptionsToSDK`, so they differ by identity every time; MCP-server
+ *   parity across turns is an explicit non-goal of the design spec.
+ */
+const LIVE_APPLICABLE_OPTION_FIELDS = ['permissionMode', 'model', 'allowedTools', 'disallowedTools'];
+const RECREATE_ONLY_OPTION_FIELDS = ['cwd', 'effort', 'forkSession', 'resumeSessionAt', 'forkSubagent'];
+const RELEVANT_OPTION_FIELDS = [...LIVE_APPLICABLE_OPTION_FIELDS, ...RECREATE_ONLY_OPTION_FIELDS];
+
+/**
+ * Recreate-only settings that are NOT `sdkOptions` fields at all, so the caller
+ * has to state them and the pool compares the statement.
+ *
+ * `forkSubagent` — the /subtask mechanism — exists only as child env
+ * (`CLAUDE_CODE_FORK_SUBAGENT` + `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, set by
+ * `mapCliOptionsToSDK`). Neither of the two obvious ways to see it works:
+ *
+ * - Comparing `sdkOptions.env` wholesale is what the `env` exclusion above rules
+ *   out: it is a fresh `{...process.env}` snapshot every turn, so it differs by
+ *   identity on every single turn.
+ * - Comparing the two KEYS inside it reads the HOST's ambient flags, not this
+ *   turn's request. A process running inside a Claude Code session exports
+ *   `CLAUDE_CODE_FORK_SUBAGENT=1` to everything it spawns (see
+ *   `server/tests/claude-sdk-options.test.js`, which fails for exactly that
+ *   reason), so on such a host the derived value would be `'1'` on every turn and
+ *   the change would once again be invisible — silently, and only on some hosts.
+ *
+ * Deliberately NOT in `CONSUMED_AT_CREATION_OPTION_FIELDS`, unlike `forkSession`:
+ * the argument for consuming that one (a live fork IS already the branch, so the
+ * value is spent) has no counterpart here, because nothing about a running process
+ * consumes its own environment — a /subtask process still carries
+ * `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, which would take `run_in_background`
+ * away from any ordinary turn that reused it. That reverse direction happens to be
+ * unreachable today (a process holding nothing is destroyed at turn end by
+ * `closeIfIdle`, and a /subtask process cannot hold anything — its own env
+ * disables background tasks), so it is not what this field is FOR. But it costs
+ * one list entry to stay correct if either of those two facts ever changes, and
+ * the direction that is reachable — an ordinary live process receiving a /subtask
+ * during the idle grace after its last task settled — is the whole point.
+ */
+const CALLER_STATED_OPTION_FIELDS = new Set(['forkSubagent']);
+
+/**
+ * Recreate-only fields that a process CONSUMES as it is created, and which are
+ * therefore not a pending change once it exists — the same argument the `resume`
+ * exclusion above makes, one step further along: `resume` is excluded outright
+ * because it is never a behaviour knob, whereas forking IS one, but only in one
+ * direction.
+ *
+ * A live process created with `forkSession` is already the branch. Keeping the
+ * creation value in the snapshot made every LATER ordinary turn on that session
+ * compare `undefined` against `true` forever — a needless recreate when there
+ * was nothing to protect, and a `console.warn` on every single turn when there
+ * was. So the snapshot records them as already-consumed (null) at creation,
+ * which leaves the change detectable in the direction that still matters: a
+ * session that is NOT a fork receiving a fork request still differs, still
+ * recreates, and (when a background task forbids that) is still refused.
+ *
+ * What this must NOT be read as: "a fork-created process is always safe to
+ * reuse". `forkSession` was also, accidentally, the only field that noticed the
+ * EDIT-PROMPT fork drifting a process off its pool key's conversation — see
+ * `servesADifferentConversation`, which is what actually covers that, by
+ * identity rather than by flag.
+ */
+const CONSUMED_AT_CREATION_OPTION_FIELDS = ['forkSession', 'resumeSessionAt'];
+
+/**
+ * Synthetic reason reported beside the recreate-only FIELD names when the live
+ * process is no longer on the conversation the turn continues. Not an option
+ * field: no option records it, because the drift happens mid-stream inside the
+ * CLI (see `servesADifferentConversation`).
+ *
+ * The `reason:` prefix is not decoration. This value shares one flat namespace
+ * with the option field names in `pendingFreshProcessReasons`' output, and both
+ * are consumed by string membership (`FRESH_PROCESS_REQUIRED_REASONS.has`,
+ * `blocked.includes`). A bare `'conversation'` would silently MERGE with a future
+ * recreate-only option that happened to be named `conversation` — the drift
+ * message would then be emitted for a plain option change, and vice versa, with
+ * nothing anywhere to notice. No option field name can contain a colon, so the
+ * prefix makes the collision impossible rather than merely unlikely.
+ */
+export const CONVERSATION_DRIFT_REASON = 'reason:conversation-drift';
+
+/**
+ * Stamped as `.code` on the error `runTurn` throws when a turn arrives while
+ * another is genuinely in flight on the same session.
+ *
+ * Exists so the caller can tell that refusal apart from a real failure without
+ * matching on the message text. It is a REFUSAL: nothing was started and nothing
+ * is broken, so `queryClaudeSDK` reports it the same way it reports a
+ * background-task-held session — a coded `protocol_error` plus the terminal
+ * `complete` — instead of letting the internal sentence below reach the user as
+ * an `error` frame.
+ *
+ * Narrow by design: a turn that arrives while an ABORTED one is still settling
+ * waits for it (see `runTurn`), so what is left here is two callers running at
+ * once on one session — in practice a REST `/api/agent` call landing on a session
+ * the websocket path is already running, since only the websocket path is
+ * serialised by `chatRunRegistry`.
+ */
+export const TURN_IN_FLIGHT_ERROR_CODE = 'SESSION_TURN_ALREADY_RUNNING';
+
+function turnInFlightError(appSessionId) {
+  const error = new Error(`Session "${appSessionId}" already has a turn in flight`);
+  error.code = TURN_IN_FLIGHT_ERROR_CODE;
+  return error;
+}
+
+/** @type {Map<string, LiveSession>} */
+const live = new Map();
+
+/**
+ * @typedef {object} Turn
+ * @property {Function} onMessage
+ * @property {Promise<object>} promise - What `runTurn` returns to its caller.
+ * @property {Function} resolve
+ * @property {Function} reject
+ * @property {Promise<void>} settled - Resolves when this turn leaves the slot,
+ *   by any route. Awaited by a turn that arrives while an aborted one is still
+ *   settling, so a user who presses Stop and re-sends immediately does not get
+ *   a "turn in flight" error.
+ * @property {Function} notifySettled
+ * @property {boolean} aborted - The user pressed Stop. The turn keeps the slot
+ *   until its terminator arrives, but its frames stop reaching the UI.
+ * @property {NodeJS.Timeout | null} abortSettleTimer
+ * @property {boolean} promptSent - False while the turn has only RESERVED the
+ *   slot (claimed before reconciliation, which may still reject or recreate the
+ *   process). Nothing may be routed to, or settled on, a reserved turn.
+ * @property {number} frameCount - How many frames have been forwarded to
+ *   `onMessage`. Diagnostic only: it is what tells an operator, in the one log
+ *   line this file cannot make certain, whether a turn settled by a possibly
+ *   foreign `result` had shown the user anything at all (see `routeMessage`).
+ */
+
+/**
+ * @typedef {object} LiveSession
+ * @property {string} appSessionId
+ * @property {object} query
+ * @property {ReturnType<typeof createInputStream>} input
+ * @property {Map<string, LiveTask>} liveTaskIds - Keyed by task id. A Map rather
+ *   than a Set because a task lost with the process has to be REPORTED, and the
+ *   only human label for it (`task_started.description`) arrives on the frame
+ *   that starts it and nowhere else. A parallel map beside a Set would be two
+ *   structures to keep in sync, which is where divergence bugs live.
+ * @property {Turn | null} currentTurn
+ * @property {Function} onBetweenTurnMessage - Called `(message, { taskOwner })`.
+ *   `taskOwner` is the owner recorded for a task that this very message settled,
+ *   and null for everything else — read from the task record because `trackTask`
+ *   has already removed it by the time this runs.
+ * @property {Function | null} onTaskLost - Told about each task that died with
+ *   the process, as `(event, { taskOwner })`. Refreshed per turn like
+ *   `onBetweenTurnMessage`, so the report reaches whoever is currently watching
+ *   this session — but `taskOwner` comes from the TASK, not from the turn that
+ *   installed this callback.
+ * @property {Function | null} onHoldWarning - Told once about each task that has
+ *   held this process open past `HOLD_WARN_AFTER_MS`, as `(event, { taskOwner })`.
+ *   Refreshed per turn for the same reason as `onTaskLost`. Advisory only: the
+ *   pool takes no action on the hold before or after calling it.
+ * @property {Function | null} onTaskSettledWithoutNotification - Told about each
+ *   task whose settlement was announced ONLY by a `task_updated` status patch, as
+ *   `(event, { taskOwner })`. Refreshed per turn like the other two.
+ *   `patch.status: 'killed'` is the memory-pressure reaper's signal, and this is
+ *   the only route by which it reaches a user at all.
+ * @property {Map<string, PendingSettlement>} pendingSettlements - Settlements
+ *   announced by `task_updated` and waiting out `SETTLEMENT_NOTIFICATION_GRACE_MS`
+ *   to see whether the richer `task_notification` supersedes them. Bounded by the
+ *   number of tasks settling within that window, and every entry leaves it by one
+ *   of three routes: the notification arrives, the timer fires, or the session
+ *   dies (which flushes).
+ * @property {unknown} taskOwner - Opaque token for the CURRENT turn's owner,
+ *   refreshed per turn exactly like the callbacks above. Its only use is being
+ *   stamped onto each task this session starts; the pool never interprets it.
+ * @property {string | null} providerSessionId - The provider-native session id
+ *   the process is currently on, as last announced in its own message stream.
+ *   Null until it announces one. The pool otherwise knows nothing about provider
+ *   ids; this exists only to notice a process that has drifted off its key's
+ *   conversation (see `servesADifferentConversation`).
+ * @property {object} optionSnapshot - Normalized `RELEVANT_OPTION_FIELDS` as
+ *   currently in force on this process (creation values, amended by whatever
+ *   control requests have since been applied), except for the fields creation
+ *   itself consumed — see `creationSnapshot`.
+ * @property {string[]} spawnAllowedTools - The `--allowedTools` list this process
+ *   was spawned with, which the CLI auto-approves from for its whole lifetime.
+ * @property {{ ask: string[], deny: string[] } | null} appliedPermissions - The
+ *   flag-settings `permissions` layer last successfully pushed into the process.
+ * @property {object | null} turnContext - Mutable object the caller's captured
+ *   callbacks (`canUseTool`, hooks) read from. Updated IN PLACE on reuse so
+ *   turn 1's captured closures act on turn N's writer and settings.
+ * @property {NodeJS.Timeout | null} idleTimer
+ * @property {NodeJS.Timeout | null} holdCheckTimer - Exists exactly while this
+ *   session is holding its process open for tracked tasks. Kept in sync from one
+ *   place (`syncHoldCheckTimer`) and cleared on every death path, because a timer
+ *   that outlives its session is the same class of defect as the slot that
+ *   outlived its turn.
+ * @property {boolean} dead
+ * @property {{ armedAt: number, borrowedCount: number } | null} owedTerminator -
+ *   Set when the abort fallback settled a turn WITHOUT the `result` the CLI still
+ *   owed it. A LEDGER, not a gate: it is read to absorb a terminator that arrives
+ *   between turns and to say out loud when a settlement or an attribution was a
+ *   guess — never to withhold a frame or a terminator from a live turn.
+ *   `routeMessage` explains why that distinction is the whole point of this field,
+ *   and `ABORT_SETTLE_FALLBACK_MS` why it can only ever be armed by a guess in the
+ *   first place.
+ *
+ *   Cleared by a `result` that arrives between turns (the desync healed), or by one
+ *   that settles a turn which had already produced output of its own (that turn's
+ *   own terminator, so nothing is outstanding). It is instead RE-ARMED, with
+ *   `borrowedCount` incremented, by one that settles a turn which had delivered
+ *   nothing: the record then follows the desync forward instead of describing only
+ *   its first victim. `routeMessage` has the argument for that asymmetry, which is
+ *   the difference between a self-limiting record and a permanent false alarm.
+ *
+ *   Its bound is structural rather than timed: at most one entry (a scalar cannot
+ *   be over-drawn), armed only by the fallback, and every route out of it is a
+ *   `result` — or the session's own death. Nothing waits on it, so nothing can wait
+ *   on it forever, which is exactly what the queue it replaced could do.
+ */
+
+/**
+ * @typedef {object} LiveTask
+ * @property {string | null} description - The CLI's own short human label for
+ *   the task (measured: `"Echo t1-t10 with delays"` —
+ *   `spikes/streaming-input-mode/task-classification.mjs`). Null when the frame
+ *   carried none, so a report can say "a background task" instead of "null".
+ * @property {boolean} skipTranscript - The task is ambient housekeeping. Still
+ *   tracked (closing the process would kill it too) but deliberately kept out of
+ *   the transcript, exactly as its `task_notification` already is.
+ * @property {number} startedAt - `Date.now()` when its `task_started` frame was
+ *   routed. The only clock available: no SDK frame carries the task's own start
+ *   time, and the hold that matters is how long WE have been keeping the process
+ *   alive for it.
+ * @property {boolean} holdReported - This task's long-hold advisory has already
+ *   gone out. Per task, not per session and not per check: a warning that repeats
+ *   every minute is noise, and noise is how the previous silent failure hid.
+ * @property {unknown} owner - Whoever the caller says this task belongs to,
+ *   captured from `session.taskOwner` when its `task_started` frame was routed
+ *   and handed back with every report about it. Per TASK because a background
+ *   shell outlives turns, and the next turn on a shared session can be someone
+ *   else's: an owner read off "the current turn" addresses the latest user, which
+ *   is the same defect as telling everyone, narrowed to one wrong recipient.
+ *   Opaque to the pool — it is compared and interpreted only by the caller.
+ */
+
+/** Order-insensitive for lists, so a reshuffled allowlist is not a "change". */
+function normalizeOptionValue(value) {
+  if (Array.isArray(value)) {
+    return [...value].map(String).sort();
+  }
+  return value === undefined ? null : value;
+}
+
+/**
+ * @param {object} sdkOptions
+ * @param {object} [callerStated] Values for `CALLER_STATED_OPTION_FIELDS`, which
+ *   `sdkOptions` cannot carry.
+ *
+ * Caller-stated fields are collapsed to a strict boolean rather than passed through
+ * `normalizeOptionValue`, and that is a correctness requirement, not tidiness:
+ * `normalizeOptionValue(undefined)` is `null` while `normalizeOptionValue(false)` is
+ * `false`, so a caller that OMITTED the field gave its session a snapshot that
+ * differed from every later turn stating `false`. `forkSubagent` is now a refusing
+ * reason (`FRESH_PROCESS_REQUIRED_REASONS` in `claude-sdk.js`), so that difference
+ * did not merely warn — it would refuse every ordinary turn on a held session and
+ * tell the user their process "was started for a /subtask" when it was not.
+ * Comparing `=== true` makes absent and `false` the same statement, which is what
+ * they mean, so the safety is structural instead of a property of there happening to
+ * be exactly one caller today.
+ */
+function snapshotOptions(sdkOptions, callerStated = {}) {
+  /** @type {Record<string, unknown>} */
+  const snapshot = {};
+  for (const field of RELEVANT_OPTION_FIELDS) {
+    snapshot[field] = CALLER_STATED_OPTION_FIELDS.has(field)
+      ? callerStated?.[field] === true
+      : normalizeOptionValue(sdkOptions?.[field]);
+  }
+  return snapshot;
+}
+
+/**
+ * The snapshot to store on a process at the moment it is created: what it was
+ * spawned with, minus the fields spawning itself consumed (see
+ * `CONSUMED_AT_CREATION_OPTION_FIELDS`).
+ */
+function creationSnapshot(sdkOptions, callerStated) {
+  const snapshot = snapshotOptions(sdkOptions, callerStated);
+  for (const field of CONSUMED_AT_CREATION_OPTION_FIELDS) {
+    snapshot[field] = null;
+  }
+  return snapshot;
+}
+
+function differingFields(fields, current, next) {
+  return fields.filter((field) => JSON.stringify(current[field]) !== JSON.stringify(next[field]));
+}
+
+/**
+ * True when the live process is no longer on the conversation this turn asks to
+ * continue, so reusing it would write the turn into someone else's transcript.
+ *
+ * The case that makes this necessary is the EDIT-PROMPT fork. It runs under the
+ * PARENT's `appSessionId` — the pool key — but the SDK announces the branch's own
+ * provider session id mid-stream, and the run registry deliberately leaves the
+ * parent's app-id→provider-id mapping intact and inserts a separate branch row.
+ * So the process ends the turn serving the BRANCH while the pool key still names
+ * the parent. `resume` is a spawn argument: a process that is already running
+ * ignores it, so nothing else corrects this. Explicit `/fork` is unaffected —
+ * it runs under the fork's own new app session id, so key and conversation agree.
+ *
+ * An IDENTITY comparison, not a field comparison, which is why it can succeed
+ * where the `resume` field exclusion documented at the top of this file cannot:
+ * turn 2 of a brand-new session gains a `resume` value turn 1 lacked, but that
+ * value EQUALS the id the process announced, so nothing looks changed. Both
+ * sides must be known before a mismatch is claimed — a caller that asks for no
+ * particular conversation is asking for the one it is already on.
+ *
+ * LOAD-BEARING ASSUMPTION: a non-fork resume run announces the id it RESUMED.
+ * That is what makes `requested !== actual` mean "drift" rather than "normal".
+ * True as of CLI 2.1.220 / SDK 0.3.165, and `sdk.d.ts` declares no message type
+ * carrying a foreign session id — but it is an assumption about someone else's
+ * process, not an invariant this code can enforce. If a future CLI ever answered
+ * `--resume <id>` with a fresh id of its own, `session.providerSessionId` would
+ * diverge from every later turn's `resume` value and this function would return
+ * true forever. The symptom is specific enough to recognise from a single bug
+ * report: EVERY turn on a session that holds a background shell refused with the
+ * drift sentence ("has moved on to a branch of the conversation…" in
+ * `describeHeldProcessRefusal`), while the same session with no background work
+ * silently recreates its process on every single turn. If that ever shows up,
+ * check this assumption before anything else.
+ */
+function servesADifferentConversation(session, sdkOptions) {
+  const requested = sdkOptions?.resume;
+  const actual = session.providerSessionId;
+  return typeof requested === 'string' && requested !== ''
+    && typeof actual === 'string' && actual !== ''
+    && requested !== actual;
+}
+
+/**
+ * Derives the flag-settings `permissions` layer a live process needs so that
+ * THIS turn's tool settings are the ones actually enforced.
+ *
+ * The problem it solves: the CLI keeps the `--allowedTools` allowlist it was
+ * spawned with and auto-approves against it WITHOUT calling `canUseTool`
+ * (measured — `spikes/streaming-input-mode/live-deny.mjs` STEP 1). So refreshing
+ * `turnContext.allowedTools` cannot tighten anything: our callback is never
+ * reached for a tool the CLI already considers allowed. Only a rule pushed into
+ * the CLI's own permission engine can.
+ *
+ * The mapping is chosen to reproduce a freshly spawned process exactly, which is
+ * what every turn used to get before this pool existed:
+ *
+ * - A tool the user has since UN-CHECKED means "prompt me" in ccui — `canUseTool`
+ *   falls through to a `permission_request` for anything on neither list. So it
+ *   becomes an `ask` rule, which the CLI routes back through `canUseTool`
+ *   (measured: STEP 4 → PROMPTED). A `deny` here would be stricter than main and
+ *   would take away the user's ability to approve on demand.
+ * - A tool on `disallowedTools` means "never" — `canUseTool` returns `deny`. So it
+ *   becomes a `deny` rule, which the CLI refuses outright (measured: STEP 6 →
+ *   "Permission to use Bash has been denied."). Pushing it is what makes a tool
+ *   ALREADY in the spawn allowlist actually disallowable mid-session.
+ * - A tool the user has since CHECKED needs nothing here: it is not in the spawn
+ *   allowlist, so the CLI asks us, and `turnContext.allowedTools` says yes.
+ *
+ * Returns `null` when no flag layer is needed, so the caller can clear ours and
+ * fall back to the user's own settings files rather than leaving an empty object
+ * sitting above them.
+ */
+function derivePermissionOverrides(spawnAllowedTools, nextSnapshot) {
+  const nextAllowed = new Set(nextSnapshot.allowedTools ?? []);
+  const deny = [...(nextSnapshot.disallowedTools ?? [])];
+  const denySet = new Set(deny);
+  const ask = spawnAllowedTools.filter((entry) => !nextAllowed.has(entry) && !denySet.has(entry));
+
+  if (ask.length === 0 && deny.length === 0) {
+    return null;
+  }
+  return { ask, deny };
+}
+
+/**
+ * True when `next` restricts something `applied` did not. Used to decide whether
+ * a FAILED `applyFlagSettings` must reject the turn: failing to install a new
+ * restriction means running under permissions the user has already revoked, so
+ * that is fail-closed. Failing to install a pure relaxation only means the user
+ * gets asked when they need not have been, which is safe to proceed with.
+ */
+function addsRestriction(applied, next) {
+  const appliedAsk = new Set(applied?.ask ?? []);
+  const appliedDeny = new Set(applied?.deny ?? []);
+  // A `deny` is stricter than an `ask`, so an entry moving from ask to deny is a
+  // tightening even though it was already restricted.
+  return (
+    (next?.deny ?? []).some((entry) => !appliedDeny.has(entry))
+    || (next?.ask ?? []).some((entry) => !appliedAsk.has(entry) && !appliedDeny.has(entry))
+  );
+}
+
+/**
+ * Pushes `session`'s tool permissions into the RUNNING process's flag-settings
+ * layer. No-op when the derived layer already matches what was last applied.
+ *
+ * `applyFlagSettings` shallow-merges top-level keys, so a second call replaces
+ * the whole `permissions` object — the derived layer is therefore always sent
+ * complete, never as a delta, and cleared with `null` rather than `{}`.
+ */
+async function applyToolPermissionsToLiveProcess(session, nextSnapshot) {
+  const next = derivePermissionOverrides(session.spawnAllowedTools, nextSnapshot);
+  if (JSON.stringify(next) === JSON.stringify(session.appliedPermissions)) {
+    return true;
+  }
+
+  const tightening = addsRestriction(session.appliedPermissions, next);
+
+  if (typeof session.query.applyFlagSettings !== 'function') {
+    if (tightening) {
+      throw new Error(
+        `Cannot apply the current tool permissions to the live Claude session "${session.appSessionId}": `
+        + 'this SDK build exposes no applyFlagSettings() control request, and the process must stay alive '
+        + 'for its background work. Refusing to run the turn, because the CLI would auto-approve tools '
+        + 'you have just turned off. Wait for the background task to finish, or stop it, and retry.',
+      );
+    }
+    console.warn('[ClaudeSessionPool] no applyFlagSettings(); a relaxed tool permission cannot reach the live process', {
+      appSessionId: session.appSessionId,
+    });
+    return false;
+  }
+
+  try {
+    await session.query.applyFlagSettings({ permissions: next });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (tightening) {
+      throw new Error(
+        `Cannot apply the current tool permissions to the live Claude session "${session.appSessionId}" `
+        + `(${detail}). The process must stay alive for its background work, so refusing to run the turn `
+        + 'rather than let the CLI auto-approve tools you have just turned off. Wait for the background '
+        + 'task to finish, or stop it, and retry.',
+      );
+    }
+    console.warn('[ClaudeSessionPool] applyFlagSettings() failed while relaxing tool permissions', {
+      appSessionId: session.appSessionId,
+      error: detail,
+    });
+    return false;
+  }
+
+  session.appliedPermissions = next;
+  return true;
+}
+
+/**
+ * Reconfigures a RUNNING process to the new turn's options.
+ *
+ * Only reached when the session has live background work, i.e. when closing and
+ * recreating would kill the very task this pool exists to protect.
+ *
+ * Both permission-carrying fields are fail-closed: a failure to apply
+ * `permissionMode` or the tool permissions rejects the turn instead of running
+ * it, because either one silently proceeding would evaluate the turn against
+ * settings the user has already abandoned — `bypassPermissions` skips the
+ * approval callback entirely inside the CLI, and the CLI's spawn-time allowlist
+ * auto-approves without calling it. `model` is not a safety boundary, so a
+ * failure there is logged and the turn proceeds.
+ */
+async function applyLiveOptionChanges(session, nextSnapshot) {
+  const changed = differingFields(LIVE_APPLICABLE_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
+
+  if (changed.includes('permissionMode')) {
+    const mode = nextSnapshot.permissionMode ?? 'default';
+    if (typeof session.query.setPermissionMode !== 'function') {
+      throw new Error(
+        `Cannot switch the live Claude session "${session.appSessionId}" to permission mode "${mode}": `
+        + 'this SDK build exposes no setPermissionMode() control request, and the process must stay '
+        + 'alive for its background work. Refusing to run the turn under the previous mode.',
+      );
+    }
+    await session.query.setPermissionMode(mode);
+  }
+
+  if (changed.includes('model')) {
+    try {
+      await session.query.setModel?.(nextSnapshot.model ?? undefined);
+    } catch (error) {
+      console.warn('[ClaudeSessionPool] setModel() failed; the live session keeps its previous model', {
+        appSessionId: session.appSessionId,
+        model: nextSnapshot.model,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  // Loosening the tool lists needs no control request — `canUseTool` reads them
+  // per invocation from `session.turnContext`, which the caller refreshes every
+  // turn. TIGHTENING them does, because the CLI auto-approves from its
+  // spawn-time allowlist without ever calling us. This pushes the current lists
+  // into the CLI's own permission engine; on failure it throws, which rejects
+  // the turn rather than running it under permissions the user has revoked.
+  let permissionsApplied = true;
+  if (changed.includes('allowedTools') || changed.includes('disallowedTools')) {
+    permissionsApplied = await applyToolPermissionsToLiveProcess(session, nextSnapshot);
+  }
+
+  for (const field of changed) {
+    // A skipped or failed (relaxation) push leaves `appliedPermissions` behind
+    // `nextSnapshot`. Advancing `optionSnapshot` here anyway would make the
+    // NEXT turn's identical request compare as "unchanged" and never retry the
+    // push — the process would keep enforcing the stale rule for its whole
+    // life. Leaving these two fields stale keeps them showing up in `changed`
+    // (both here and in the caller's outer diff) until a push actually lands.
+    if (!permissionsApplied && (field === 'allowedTools' || field === 'disallowedTools')) {
+      continue;
+    }
+    session.optionSnapshot[field] = nextSnapshot[field];
+  }
+}
+
+function clearIdleTimer(session) {
+  if (session.idleTimer) {
+    clearTimeout(session.idleTimer);
+    session.idleTimer = null;
+  }
+}
+
+function clearHoldCheckTimer(session) {
+  if (session.holdCheckTimer) {
+    clearInterval(session.holdCheckTimer);
+    session.holdCheckTimer = null;
+  }
+}
+
+/**
+ * Reports any task that has now held this process open past the threshold, and
+ * does nothing else. Read this as a pure observer: it must not close, destroy,
+ * recreate or re-time the session it is describing.
+ */
+function reportLongHeldTasks(session) {
+  if (session.dead) {
+    // Belt and braces. Every death path clears this timer, but "a timer fired
+    // for a session that no longer exists" is this file's oldest defect shape,
+    // so the callback refuses a dead session as well as being cancelled by one —
+    // and `drain` deliberately leaves `liveTaskIds` populated on death, so a
+    // leaked interval would otherwise report a hold on a process that is gone.
+    clearHoldCheckTimer(session);
+    return;
+  }
+
+  const now = Date.now();
+  /** @type {Array<[string, LiveTask]>} */
+  const due = [];
+  let oldestStartedAt = now;
+  for (const [taskId, task] of session.liveTaskIds) {
+    oldestStartedAt = Math.min(oldestStartedAt, task.startedAt);
+    if (!task.holdReported && now - task.startedAt >= HOLD_WARN_AFTER_MS) {
+      task.holdReported = true;
+      due.push([taskId, task]);
+    }
+  }
+
+  if (due.length === 0) {
+    return;
+  }
+
+  console.warn('[ClaudeSessionPool] this session is still holding a Claude CLI process open for background work; nothing will end it automatically', {
+    appSessionId: session.appSessionId,
+    heldTaskCount: session.liveTaskIds.size,
+    oldestHeldForMs: now - oldestStartedAt,
+    // Every held task, not just the newly-due ones: the question an operator is
+    // actually asking is "what is keeping this subprocess alive", and a list
+    // filtered to whatever crossed the line this minute answers a different one.
+    tasks: [...session.liveTaskIds].map(([taskId, task]) => ({
+      taskId,
+      description: task.description,
+      heldForMs: now - task.startedAt,
+    })),
+  });
+
+  for (const [taskId, task] of due) {
+    // Same rule `reportLostTasks` applies: ambient housekeeping is counted for
+    // the operator but never put in the conversation, since the user did not ask
+    // for it and cannot act on it.
+    if (task.skipTranscript) {
+      continue;
+    }
+    try {
+      session.onHoldWarning?.(
+        { taskId, description: task.description, heldForMs: now - task.startedAt },
+        { taskOwner: task.owner },
+      );
+    } catch (reportError) {
+      // One sink throwing must not cost the remaining tasks their advisory, for
+      // the same reason `reportLostTasks` guards each call: the caller's callback
+      // reaches a websocket fan-out.
+      console.error('[ClaudeSessionPool] failed to report a long-held background task', {
+        appSessionId: session.appSessionId,
+        taskId,
+        error: reportError instanceof Error ? reportError.message : String(reportError),
+      });
+    }
+  }
+}
+
+/**
+ * Makes the hold check exist exactly while this session has tracked tasks.
+ *
+ * One place rather than an arm/clear call beside each mutation of
+ * `liveTaskIds`: three separate call sites is how that invariant drifts, and the
+ * cost of re-deriving it is a `Map.size` read.
+ */
+function syncHoldCheckTimer(session) {
+  if (session.dead || session.liveTaskIds.size === 0) {
+    clearHoldCheckTimer(session);
+    return;
+  }
+  if (session.holdCheckTimer) {
+    return;
+  }
+  session.holdCheckTimer = setInterval(() => reportLongHeldTasks(session), HOLD_CHECK_INTERVAL_MS);
+  // A repeating timer keeps the event loop alive by itself, so a missed clear
+  // would stop the server from ever exiting. `unref` makes the worst case a
+  // stale timer instead of a hung process; the clears are still what cancel it.
+  session.holdCheckTimer.unref?.();
+}
+
+/**
+ * Removes `session` from `live` only if it is still the entry stored at its
+ * own key. `destroy()` and `drain()`'s `finally` both race a superseding
+ * session created for the same `appSessionId` (e.g. `closeSession()` runs
+ * synchronously, but the old session's async generator does not actually
+ * finish until a later microtask) — an unconditional `live.delete()` would
+ * delete the NEW session's entry instead of a stale one that's already gone.
+ */
+function removeFromLiveIfCurrent(session) {
+  if (live.get(session.appSessionId) === session) {
+    live.delete(session.appSessionId);
+  }
+}
+
+/**
+ * True when this session can no longer be handed a turn.
+ *
+ * `dead` is the flag every pool-driven close sets, and covers every route the
+ * pool itself takes. `input.closed` covers the one it does not: the SDK owns the
+ * other end of the prompt iterator, and if its `streamInput` leaves the
+ * `for await` — for any reason of its own — it invokes `return()` on our
+ * iterator, which closes the stream (see `claude-session-input-stream.js`). That
+ * leaves `closed === true` with `dead === false`, and `push` is then a silent
+ * no-op: a turn handed to such a session claims the slot, pushes a prompt into
+ * nothing, and returns a promise that nothing can ever settle. The abort fallback
+ * does not cover it either, because that turn was never aborted.
+ *
+ * So the accessor is READ here, which is the whole reason it exists. `runTurn`
+ * then falls through to a fresh process — and hands the old session to
+ * `retireUnusableSession`, which is where the "then what happens to it" half of
+ * this lives. Do not treat "unusable" as "already dealt with": nothing has set
+ * `dead`, so nothing has cleaned up after it.
+ */
+function isUnusable(session) {
+  return Boolean(session.dead || session.input.closed);
+}
+
+/**
+ * Closes a session `runTurn` must not hand a turn to, and says what it cost.
+ *
+ * Dropping the reference is NOT enough, and the first version of this did exactly
+ * that. `createLiveSession` overwrites the key in `live`, so an
+ * `input.closed`-but-not-`dead` session becomes unreachable while still fully
+ * alive, and three things then outlive it: the ~320 MB CLI subprocess, which
+ * nothing ever calls `close()` on and which `closeAllSessions()` can no longer
+ * see; its hold-check interval, which self-clears only for a `dead` session and so
+ * keeps firing — telling the user ten minutes later that a process is "still
+ * holding" when it is neither reachable nor, by then, running; and any turn still
+ * in its slot, whose caller used to get a rejection it could act on and would
+ * otherwise sit in "processing" with the Stop button now retargeted at the
+ * replacement process.
+ *
+ * So it goes through `destroy()` like every other route out of a session's life.
+ * The consequence to be deliberate about: `destroy()` sets `dead` first, which is
+ * exactly how `drain` tells "we closed it" from "it died", so `drain` will NOT
+ * report the tasks this session was holding. They are still lost — the input is
+ * closed, so the CLI is going away and taking them with it — so the report is made
+ * from here instead, once, after teardown. An earlier comment claimed the drain
+ * loop would cover this; that is only true while OUR input drives the generator,
+ * which is precisely what has stopped being true.
+ */
+function retireUnusableSession(session) {
+  if (session.dead) {
+    // Already closed by whatever killed it, and that route owns the reporting.
+    return;
+  }
+  const lostTaskCount = session.liveTaskIds.size;
+  destroy(session);
+  reportLostTasks(
+    session,
+    new Error(
+      lostTaskCount > 0
+        ? 'the Claude CLI closed this session\'s input stream, so the session could no longer be given a '
+          + 'prompt and its background work could not be kept alive'
+        : 'the Claude CLI closed this session\'s input stream, so the session could no longer be given a prompt',
+    ),
+  );
+}
+
+/**
+ * The bookkeeping every route out of a live session's life owes, in one place:
+ * flag it dead, cancel both of its timers, and take it out of the live map if it
+ * is still the entry stored there.
+ *
+ * Shared by `destroy()` (we closed it) and `drain()`'s `finally` (it ended on its
+ * own, which never goes through `destroy`). Those two used to do the same steps
+ * independently, and the hold-check timer had already been added to only one of
+ * them once — a fifth step landing in one copy and not the other is the failure
+ * this collapses. What each caller keeps for itself is what makes it different:
+ * `destroy` also tears the process down, `drain` reads `dead` BEFORE calling this
+ * (that read is how it tells "we closed it" from "it died"), rejects its turn
+ * first so the caller's promise settles before anything reports, and reports lost
+ * tasks after — deliberately last, so nothing in reporting can leave a dead
+ * session in the live map.
+ */
+function markSessionDead(session) {
+  session.dead = true;
+  clearIdleTimer(session);
+  clearHoldCheckTimer(session);
+  // The third timer, and the one this helper's own contract ("cancel both of its
+  // timers") used to miss: an aborted turn still holding the slot has a pending
+  // abort-settle fallback, which is not `unref`'d and is reachable from both
+  // callers — `closeAllSessions()` at shutdown and `closeSession()` while a Stop
+  // is settling. Left armed it would fire against a dead session, settle a turn
+  // on it and arm a 60 s idle timer on it; every downstream callback re-checks
+  // `dead`, so nothing incorrect happens today, but "a timer that outlives its
+  // session" is this file's oldest defect shape and closing that gap is exactly
+  // why this helper exists. The slot itself is left set on purpose: `drain`'s
+  // `finally` still has to find the turn there to reject its caller.
+  if (session.currentTurn) {
+    clearAbortSettleFallback(session.currentTurn);
+  }
+  // The fourth: a settlement inside its grace window. Its entry survives on
+  // purpose — both callers flush it AFTER teardown, so the report still happens —
+  // but its timer must not, or it fires against a dead session.
+  clearPendingSettlementTimers(session);
+  removeFromLiveIfCurrent(session);
+}
+
+function destroy(session) {
+  markSessionDead(session);
+  session.input.close();
+  try {
+    session.query.close?.();
+  } catch (error) {
+    console.warn('[ClaudeSessionPool] close() failed', {
+      appSessionId: session.appSessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  // Last, deliberately, for the same reason `drain` reports last: teardown
+  // correctness outranks reporting, and nothing in a caller's sink may be able to
+  // leave this session half-closed.
+  flushPendingSettlements(session);
+}
+
+/**
+ * Live-task bookkeeping, driven by typed SDK messages rather than tool_result
+ * prose. A missed announcement would leave the set empty and let us close the
+ * process — killing the very task we are trying to protect — so this must not
+ * depend on string matching.
+ */
+function trackTask(session, message) {
+  const outcome = applyTaskLifecycle(session, message);
+  // The hold check's lifetime follows `liveTaskIds`, so it is re-derived
+  // wherever that map is touched — arming when the first task registers and
+  // clearing when the last one settles.
+  syncHoldCheckTimer(session);
+  return outcome;
+}
+
+/**
+ * Applies this message to the session's task bookkeeping and returns a
+ * `TaskLifecycleOutcome` describing what it did.
+ *
+ * There is a return value at all because the record is gone by the time any sink
+ * runs: `routeMessage` tracks before it forwards (task lifecycle must be applied
+ * even for messages that are otherwise suppressed), so a sink that wanted to know
+ * who a settling task belonged to — or whether its outcome had already been
+ * announced — could no longer look either up.
+ */
+/**
+ * Who a task announced RIGHT NOW belongs to: the owner of the turn that is
+ * running, or — between turns — of the last turn that ran, which is the same
+ * field. `session.taskOwner` is refreshed per turn and never cleared, so it
+ * still names the aborted turn's owner after the abort backstop vacated the
+ * slot, and the case per-task ownership was introduced for costs nothing: a
+ * `task_started` from that turn's tail, arriving with the slot empty because
+ * nobody has pushed a prompt since, is attributed to the turn that started it.
+ *
+ * It is a GUESS in exactly one window — an abandoned turn's tail announcing a
+ * task AFTER the next prompt has been pushed — and no correlation field exists
+ * to settle it (`SDKResultMessage` carries `uuid`, `session_id`, `num_turns`;
+ * none of them tie a frame to a turn). All three candidate answers are wrong
+ * some of the time, so this picks the one that is wrong least often and least
+ * badly:
+ *
+ * - The RUNNING turn (this): wrong only if the interrupted turn started NEW
+ *   background work while unwinding — while the running turn is the one the CLI
+ *   is actually executing, and the overwhelmingly likelier source of a
+ *   `task_started`.
+ * - The turn that OWES a terminator: what an earlier fix chose, on the ground
+ *   that a single-conversation CLI serialises turns. It is the same leak aimed
+ *   at the common case instead of the rare one — with a debt outstanding, EVERY
+ *   task the running turn started was reported to the user who had left (found
+ *   by whole-round review, finding 2). Worse, that debt could stand forever, so
+ *   the misattribution had no end.
+ * - `null` ("unknown owner"): looks like the cautious choice and is the worst
+ *   one. The caller BROADCASTS an unknown owner's task — its summary and the
+ *   absolute host path of its output — to every connected client
+ *   (`emitBackgroundTaskEvent`), so declaring uncertainty exposes more, not less.
+ *
+ * A guess is therefore unavoidable here; being silent about it is not, so the
+ * one window where this is a guess logs it (requirement: no silent degradation).
+ */
+function ownerForNewlyStartedTask(session, taskId) {
+  if (session.owedTerminator && session.currentTurn?.promptSent) {
+    console.warn('[ClaudeSessionPool] attributing a new background task to the running turn while an aborted turn\'s terminator is still outstanding; if the task came from that turn\'s tail, this owner is wrong', {
+      appSessionId: session.appSessionId,
+      taskId,
+      owedForMs: Date.now() - session.owedTerminator.armedAt,
+    });
+  }
+  return session.taskOwner ?? null;
+}
+
+/**
+ * What `applyTaskLifecycle` says about a message that announced nothing about a
+ * task's life. Frozen and shared: `routeMessage` runs for every frame the process
+ * emits, and the overwhelming majority are this.
+ *
+ * @typedef {object} TaskLifecycleOutcome
+ * @property {unknown} taskOwner - The owner recorded for a task this very message
+ *   SETTLED, or null. Read here rather than at the sinks because the settling
+ *   frame is what removes the record.
+ * @property {boolean} duplicateSettlement - This frame announces a settlement the
+ *   pool has ALREADY reported to the caller, so it must not reach the session
+ *   sink. Only a `task_notification` arriving after the grace window closed can
+ *   set it; forwarding that frame would put a second row in the transcript for one
+ *   background command.
+ */
+const NO_TASK_LIFECYCLE = Object.freeze({ taskOwner: null, duplicateSettlement: false });
+
+function applyTaskLifecycle(session, message) {
+  if (message?.type !== 'system') {
+    return NO_TASK_LIFECYCLE;
+  }
+  if (message.subtype === 'task_started' && typeof message.task_id === 'string') {
+    // `description` is the only label this frame carries that a human can read:
+    // `task_started` has no `output_file` (only `task_notification` does), so a
+    // task lost with the process can be named but never located.
+    session.liveTaskIds.set(message.task_id, {
+      description: typeof message.description === 'string' && message.description ? message.description : null,
+      skipTranscript: message.skip_transcript === true,
+      startedAt: Date.now(),
+      holdReported: false,
+      // Whoever's turn started it, for the whole life of the task. A task the
+      // pool never saw start (no `task_started` routed) has no record at all, so
+      // its settlement reports a null owner — the caller's documented
+      // unknown-owner path, and deliberately NOT a guess at the current turn's
+      // user, which is the mistake this field removes.
+      owner: ownerForNewlyStartedTask(session, message.task_id),
+    });
+    return NO_TASK_LIFECYCLE;
+  }
+  if (message.subtype === 'task_notification' && typeof message.task_id === 'string') {
+    // Two places to look, and the SECOND one is the fix for a real
+    // misattribution: the terminal `task_updated` arrives FIRST (measured — see
+    // `SETTLEMENT_NOTIFICATION_GRACE_MS`), so by the time the notification lands
+    // the task is no longer in `liveTaskIds`. Reading only that map returned a
+    // null owner for every ordinary background task, and a null owner
+    // BROADCASTS — the task's summary and the absolute host path of its output
+    // went to every connected client, which is the exact exposure the
+    // per-task-owner work was meant to close.
+    //
+    // The second lookup has to work for a settlement the grace window has ALREADY
+    // reported, not just a live one, which is why `reportPendingSettlement` keeps
+    // its record instead of deleting it: two things are needed from that record
+    // and they are separate concerns. Who owns the task — so a frame that does
+    // get forwarded is never addressed to "unknown", i.e. to everyone. And that
+    // the settlement was already announced — so this frame is suppressed rather
+    // than adding a second row for one background command.
+    const stillLive = session.liveTaskIds.get(message.task_id);
+    session.liveTaskIds.delete(message.task_id);
+    const alreadySettled = stillLive ? null : takePendingSettlement(session, message.task_id);
+    return {
+      taskOwner: (stillLive ?? alreadySettled?.task)?.owner ?? null,
+      duplicateSettlement: alreadySettled?.reported === true,
+    };
+  }
+  if (message.subtype === 'task_updated' && typeof message.task_id === 'string') {
+    const status = message.patch?.status;
+    if (status === 'completed' || status === 'failed' || status === 'killed') {
+      const settling = session.liveTaskIds.get(message.task_id);
+      session.liveTaskIds.delete(message.task_id);
+      if (settling) {
+        // Only for a task the pool was actually tracking. "Not tracked here"
+        // means the notification already reported this settlement and removed
+        // it, so opening a fallback would double-report — and it cannot mean
+        // "never started", because the pool routes this process's messages from
+        // its very first one, so every task it can see settle it also saw start.
+        openPendingSettlement(session, message.task_id, settling, message.patch);
+      }
+      return { taskOwner: settling?.owner ?? null, duplicateSettlement: false };
+    }
+  }
+  return NO_TASK_LIFECYCLE;
+}
+
+/**
+ * @typedef {object} PendingSettlement
+ * @property {LiveTask} task - The record the settling frame removed, kept because
+ *   the only human label for the task (`task_started.description`) and its owner
+ *   live there and nowhere on `task_updated`.
+ * @property {'completed' | 'failed' | 'killed'} status - The CLI's own word, passed
+ *   through unmapped: the pool does not know the wire vocabulary its caller emits.
+ * @property {string | null} error - `patch.error`, which only `failed` carries.
+ * @property {NodeJS.Timeout | null} timer
+ * @property {boolean} reported - The caller has already been told about this
+ *   settlement, so the entry now exists ONLY as memory: who the task belonged to,
+ *   and that its outcome has been announced. Both are needed by a
+ *   `task_notification` that arrives after the window closed — the first so the
+ *   frame is never addressed to "unknown owner", which broadcasts, and the second
+ *   so it is suppressed instead of adding a second row.
+ *
+ *   Deleting the record at report time instead — the first version of this — meant
+ *   a late notification found nothing in either map, reported a null owner, and
+ *   handed one user's task summary and the absolute host path of its output to
+ *   every connected client, plus a second transcript row. Two routes to a late
+ *   notification, neither excluded: the measured 0 ms lag was measured for
+ *   `completed` only, and Node runs the timers phase BEFORE the poll phase, so any
+ *   event-loop stall longer than the window fires the fallback first and reads the
+ *   buffered notification second.
+ *
+ *   Retained entries are forgotten when the notification arrives or the session
+ *   dies, so the bound is the number of settlements whose notification never came
+ *   during one process's life — in practice the reaped tasks, which is the shape
+ *   this whole mechanism exists for.
+ */
+
+/**
+ * Why the pool is reporting a settlement itself rather than forwarding the CLI's
+ * own notification. Passed through to the caller because the two are NOT the same
+ * claim and only one of them supports "the CLI reported no result for this task":
+ * `NOTIFICATION_WINDOW_ELAPSED` is that fact, whereas `PROCESS_ENDED` means we
+ * closed or lost the process before any notification could be routed — which is
+ * also true of a task that completed normally and did write its output file.
+ */
+const SETTLEMENT_REASON = Object.freeze({
+  NOTIFICATION_WINDOW_ELAPSED: 'notification-window-elapsed',
+  PROCESS_ENDED: 'process-ended',
+});
+
+/**
+ * Records a settlement announced by `task_updated` and starts the grace window in
+ * which the richer `task_notification` may still supersede it.
+ */
+function openPendingSettlement(session, taskId, task, patch) {
+  if (session.pendingSettlements.has(taskId)) {
+    return;
+  }
+  /** @type {PendingSettlement} */
+  const pending = {
+    task,
+    status: patch?.status,
+    error: typeof patch?.error === 'string' && patch.error ? patch.error : null,
+    timer: null,
+    reported: false,
+  };
+  session.pendingSettlements.set(taskId, pending);
+  pending.timer = setTimeout(() => {
+    pending.timer = null;
+    if (session.pendingSettlements.get(taskId) === pending) {
+      reportPendingSettlement(session, taskId, pending, SETTLEMENT_REASON.NOTIFICATION_WINDOW_ELAPSED);
+    }
+  }, SETTLEMENT_NOTIFICATION_GRACE_MS);
+  // Same reasoning as the hold check's timer: a missed clear must not be able to
+  // stop the server from exiting. The clears are still what cancel it.
+  pending.timer.unref?.();
+}
+
+function clearPendingSettlementTimer(pending) {
+  if (pending.timer) {
+    clearTimeout(pending.timer);
+    pending.timer = null;
+  }
+}
+
+/**
+ * Forgets a settlement entirely, returning what was known about it.
+ *
+ * Called when the `task_notification` arrives — whether that is inside the window
+ * (the healthy path, and the overwhelmingly common one, where the notification
+ * supersedes a report that has not happened yet) or after it closed (where the
+ * record's `reported` flag is what stops the frame becoming a second row). Either
+ * way the CLI has now had its say about this task, so there is nothing left to
+ * remember.
+ */
+function takePendingSettlement(session, taskId) {
+  const pending = session.pendingSettlements.get(taskId);
+  if (!pending) {
+    return null;
+  }
+  session.pendingSettlements.delete(taskId);
+  clearPendingSettlementTimer(pending);
+  return pending;
+}
+
+/**
+ * Tells the caller about a settlement whose `task_notification` has not come, so
+ * the outcome reaches the user the same way a notified one does.
+ *
+ * The record is marked rather than deleted — see `PendingSettlement.reported` for
+ * what a late notification still needs from it, and what deleting it cost.
+ *
+ * `skipTranscript` is filtered here for the same reason `reportLostTasks` and
+ * `reportLongHeldTasks` filter it: ambient housekeeping is tracked (closing the
+ * process would kill it too) but deliberately kept out of the conversation, and
+ * the reaper killing one is not something the user asked about or can act on.
+ */
+function reportPendingSettlement(session, taskId, pending, reason) {
+  clearPendingSettlementTimer(pending);
+  if (pending.reported) {
+    return;
+  }
+  // Set BEFORE the sink runs, not after: a sink that throws must not leave the
+  // settlement looking unannounced, or a late notification would report it again.
+  pending.reported = true;
+  if (pending.task.skipTranscript) {
+    return;
+  }
+  try {
+    session.onTaskSettledWithoutNotification?.(
+      {
+        taskId,
+        description: pending.task.description,
+        status: pending.status,
+        error: pending.error,
+        reason,
+      },
+      { taskOwner: pending.task.owner },
+    );
+  } catch (reportError) {
+    // Guarded per task like every other report here: the caller's callback
+    // reaches a websocket fan-out, so it can fail for reasons that have nothing
+    // to do with the next settlement in the map.
+    console.error('[ClaudeSessionPool] failed to report a background task that settled without a notification', {
+      appSessionId: session.appSessionId,
+      taskId,
+      error: reportError instanceof Error ? reportError.message : String(reportError),
+    });
+  }
+}
+
+/**
+ * Reports every settlement not yet reported, and forgets all of them.
+ *
+ * Called on both death paths. Reporting, because the task HAS settled — that is a
+ * known fact, not a guess — and the notification that would have superseded the
+ * report can no longer arrive on a process that is gone, so dropping it would
+ * reopen the silence this mechanism exists to close, inside a two-second window.
+ * Forgetting, because the owner memory an already-reported entry exists for is
+ * only useful while frames can still arrive, and none can now.
+ */
+function flushPendingSettlements(session) {
+  for (const [taskId, pending] of [...session.pendingSettlements]) {
+    reportPendingSettlement(session, taskId, pending, SETTLEMENT_REASON.PROCESS_ENDED);
+    session.pendingSettlements.delete(taskId);
+  }
+}
+
+function clearPendingSettlementTimers(session) {
+  for (const pending of session.pendingSettlements.values()) {
+    if (pending.timer) {
+      clearTimeout(pending.timer);
+      pending.timer = null;
+    }
+  }
+}
+
+/** Closes the session unless background work still needs the process alive. */
+function closeIfIdle(session) {
+  if (session.dead || session.currentTurn) {
+    return;
+  }
+  if (session.liveTaskIds.size > 0) {
+    clearIdleTimer(session);
+    return;
+  }
+  destroy(session);
+}
+
+/**
+ * Builds the turn record. Both settlement handles exist by the time this
+ * returns — `new Promise`'s executor runs synchronously — which is what lets
+ * `runTurn` claim the slot BEFORE its first `await` instead of inside the
+ * executor several awaits later.
+ */
+function createTurn(onMessage) {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  let notifySettled;
+  const settled = new Promise((res) => {
+    notifySettled = res;
+  });
+  return {
+    onMessage,
+    promise,
+    resolve,
+    reject,
+    settled,
+    notifySettled,
+    aborted: false,
+    abortSettleTimer: null,
+    promptSent: false,
+    frameCount: 0,
+  };
+}
+
+function clearAbortSettleFallback(turn) {
+  if (turn.abortSettleTimer) {
+    clearTimeout(turn.abortSettleTimer);
+    turn.abortSettleTimer = null;
+  }
+}
+
+/**
+ * Takes `turn` out of the slot and wakes anything waiting on its settlement.
+ *
+ * Used by every route that settles a turn the process was actually running. The
+ * two routes that abandon a turn the process never ran — the recreate branch and
+ * the reconciliation `catch` in `runTurn` — null the slot directly instead:
+ * their turn is either about to run elsewhere or about to be thrown out of, so
+ * announcing it as "settled" would be a lie to any future waiter.
+ */
+function releaseTurn(session, turn) {
+  session.currentTurn = null;
+  clearAbortSettleFallback(turn);
+  turn.notifySettled();
+}
+
+function settleCurrentTurn(session, result) {
+  const turn = session.currentTurn;
+  // A turn that has only reserved the slot has no prompt in the process yet, so
+  // nothing the process emits can belong to it.
+  if (!turn || !turn.promptSent) {
+    return false;
+  }
+  releaseTurn(session, turn);
+  turn.resolve(result);
+  return true;
+}
+
+/**
+ * Arms the backstop that settles an aborted turn if the CLI acknowledged the
+ * interrupt and then never terminated the turn. Mirrors `armIdleTimerIfIdle`:
+ * arm-if-not-armed here, and the
+ * callback re-checks at fire time that the turn it was armed for is still the
+ * one in the slot rather than trusting the snapshot taken when it was armed.
+ */
+function armAbortSettleFallback(session, turn) {
+  if (turn.abortSettleTimer) {
+    return;
+  }
+  turn.abortSettleTimer = setTimeout(() => {
+    turn.abortSettleTimer = null;
+    if (session.currentTurn !== turn) {
+      return;
+    }
+    if (settleCurrentTurn(session, { type: 'result', subtype: 'aborted' })) {
+      // We just guessed that nothing more is coming for this turn, and the pool
+      // cannot tell "emitted nothing" from "has not emitted yet". Record that a
+      // terminator is outstanding — as a note, not as a claim on anything the
+      // next turn needs. `routeMessage` is where that restraint is spelled out,
+      // and why the version of this line that DID hold a claim bricked sessions.
+      session.owedTerminator = { armedAt: Date.now(), borrowedCount: 0 };
+    }
+    armIdleTimerIfIdle(session);
+  }, ABORT_SETTLE_FALLBACK_MS);
+}
+
+/**
+ * Rejects whatever turn holds the slot because the process is gone.
+ *
+ * A turn that has only RESERVED the slot is released without being rejected:
+ * its caller is still inside `runTurn`, has not committed to this process, and
+ * will fall through to creating a fresh one. Rejecting it would fail a turn
+ * that is about to run correctly somewhere else.
+ */
+function rejectCurrentTurn(session, error) {
+  const turn = session.currentTurn;
+  if (!turn) {
+    return;
+  }
+  releaseTurn(session, turn);
+  if (turn.promptSent) {
+    turn.reject(error);
+  }
+}
+
+/**
+ * Arms the idle-close timer if nothing is currently tracked as live and no
+ * timer is already pending. Deliberately does NOT decide anything itself —
+ * `closeIfIdle` (run only when the timer fires, `IDLE_GRACE_MS` later) is the
+ * sole place that actually closes, and it re-reads `liveTaskIds` at that
+ * later point rather than trusting the snapshot taken when the timer was
+ * armed. That distinction matters: a caller outside the drain loop (e.g.
+ * abort) can only ever see a stale/incomplete `liveTaskIds` snapshot, since a
+ * message the CLI already sent may not have been routed through
+ * `routeMessage` yet. Arming a deferred check — instead of closing on that
+ * stale snapshot — gives any in-flight message the whole grace window to
+ * arrive and register before the close decision is actually made.
+ */
+function armIdleTimerIfIdle(session) {
+  if (session.liveTaskIds.size === 0 && !session.idleTimer) {
+    session.idleTimer = setTimeout(() => closeIfIdle(session), IDLE_GRACE_MS);
+  }
+}
+
+function isTaskNotification(message) {
+  return message?.type === 'system' && message?.subtype === 'task_notification';
+}
+
+/**
+ * Records which provider conversation the process is CURRENTLY on, from the
+ * `session_id` the SDK stamps on its messages.
+ *
+ * Deliberately the most recent announcement rather than the first: a fork
+ * announces the BRANCH's id on its first `system/init` and never re-announces
+ * the parent's, and `claude-sdk.js`'s own capture tolerates either arrival order
+ * (`shouldRecaptureSessionId`), so "first" would leave the pool believing a
+ * drifted process is still on the conversation its key names — the exact bug
+ * `servesADifferentConversation` exists to catch. A non-fork process announcing
+ * a different id later would recreate needlessly, but that is the same
+ * conclusion by a different route: the process would no longer be on the
+ * conversation the key names.
+ */
+function trackProviderSessionId(session, message) {
+  if (typeof message?.session_id === 'string' && message.session_id) {
+    session.providerSessionId = message.session_id;
+  }
+}
+
+function routeMessage(session, message) {
+  trackProviderSessionId(session, message);
+  // Unconditionally, and before any routing decision below: task lifecycle is
+  // session-scoped, not turn-scoped — it says what the PROCESS is still doing, so
+  // no turn-level rule may suppress it. Missing one would let the pool close a
+  // process with a live shell in it, which is the thing this pool exists to stop.
+  //
+  // The owner is captured here rather than at the sinks for the same ordering
+  // reason: by the time a sink sees the message, the settling task's record has
+  // already been removed.
+  const { taskOwner, duplicateSettlement } = trackTask(session, message);
+  const sinkMeta = { taskOwner };
+
+  if (message?.type === 'result') {
+    /*
+     * THE CONTRADICTION THIS BRANCH RESOLVES — do not re-introduce the other side.
+     *
+     * `ABORT_SETTLE_FALLBACK_MS` fires only when the CLI acked an interrupt and
+     * then emitted nothing for five seconds: its premise is that the terminator
+     * is NOT coming. An earlier fix took the opposite premise at the very same
+     * moment — it recorded a terminator "debt" and swallowed every later frame
+     * until that terminator arrived. Whenever the fallback's own premise was the
+     * true one the debt was never repaid, and nothing anywhere expired it: the
+     * NEXT turn was swallowed whole (no frames, no log line), its `result` was
+     * consumed as the repayment so `runTurn`'s promise never settled and the slot
+     * was never vacated, and every message after that was refused with a
+     * turn-in-flight error. Pressing Stop settled the hung turn but armed a fresh
+     * debt, so the turn after that was swallowed too. A rare truncation had been
+     * traded for a permanently bricked session.
+     *
+     * So the ledger never withholds anything a live turn needs. The rule is
+     * absolute and is the invariant to preserve if this code is touched again:
+     * THE FIRST `result` ALWAYS SETTLES WHATEVER TURN HOLDS THE SLOT. Withholding
+     * is only safe for a mechanism that knows when to stop, and no such knowledge
+     * exists in here — there is no turn-correlation field on any SDK message
+     * (`SDKResultMessage` carries `uuid`, `session_id`, `num_turns`), which is why
+     * every option available here is a heuristic and why the deciding question is
+     * which one fails least badly.
+     *
+     * The harm that buys, accepted knowingly and in full: an abandoned turn that
+     * IS still unwinding shares the live turn's transcript. Its `assistant` text
+     * and its `stream_event` deltas reach the live turn's writer (see `:1077` and
+     * `includePartialMessages` in `claude-sdk.js`), so the STOPPED turn's words can
+     * appear in the answer the user is reading, and then its `result` cuts that
+     * answer off — or ends it before a word of it arrived. And the cost is one turn
+     * per outstanding terminator, not one turn full stop: settling turn N with
+     * turn N-1's `result` leaves turn N's own terminator outstanding, so a user who
+     * keeps re-sending inside the window can be hit repeatedly (which is what the
+     * re-arm below makes visible).
+     *
+     * Still the lesser harm by a wide margin: the swallow cost the SESSION, this
+     * costs answers. And by measurement it is the rarer branch, since an
+     * interrupted turn terminates within milliseconds
+     * (`spikes/streaming-input-mode/interrupt-result.mjs`), so the fallback only
+     * fires at all in the unmeasured slow-unwind case. It is logged rather than
+     * hidden, because silence is what this whole change set exists to remove.
+     */
+    const owed = session.owedTerminator;
+    const liveTurn = session.currentTurn?.promptSent ? session.currentTurn : null;
+
+    if (owed && !liveTurn) {
+      // The abandoned turn's terminator arrived between turns — the one window
+      // where "this is not the live turn's result" is a fact rather than a guess,
+      // because there is no live turn to be wrong about. Absorbing it costs
+      // nobody anything and keeps `closeIfIdle` from destroying, IDLE_GRACE_MS
+      // early, a process the user may be about to re-use. Still arms the deferred
+      // close, so this exit leaves the close path reachable like every other one.
+      session.owedTerminator = null;
+      armIdleTimerIfIdle(session);
+      return;
+    }
+
+    if (owed) {
+      // The desync WALKS FORWARD, and the record has to walk with it or only the
+      // first borrowed settlement is ever visible. If this `result` was the
+      // abandoned turn's, then the live turn we are about to settle with it is now
+      // itself owed a terminator — so the pipeline is off by one for as long as the
+      // user keeps re-sending inside the window, and a background task keeps
+      // `closeIfIdle` from ending it. Clearing here produced one log line for a
+      // user who saw three blank answers in a row.
+      //
+      // Re-armed on the FRAME COUNT rather than unconditionally, and that gate is
+      // load-bearing in the opposite direction. When the abandoned terminator
+      // genuinely never comes — the case `ABORT_SETTLE_FALLBACK_MS` exists for, and
+      // the one that armed this record — every later `result` arrives while its own
+      // turn is live, so the absorb branch above is never reached and it is the
+      // ONLY thing that clears the ledger between turns. An unconditional re-arm
+      // would therefore warn on every turn, and attribute every task ambiguously,
+      // for the whole life of a process — on exactly the long-held sessions this
+      // pool exists to protect, where nothing else ends them. Crying wolf on every
+      // healthy turn does not make the rare real event more visible; it buries it.
+      //
+      // Zero frames is the discriminator because it is the only evidence available:
+      // `includePartialMessages` is on (`claude-sdk.js`), so a turn the CLI is
+      // really answering streams deltas long before its terminator. A turn that has
+      // delivered nothing and receives a `result` most likely received someone
+      // else's — so the ledger survives a blank settlement and dies with an
+      // ordinary one, which is what makes it self-limiting.
+      const stillOutstanding = liveTurn.frameCount === 0;
+      session.owedTerminator = stillOutstanding
+        ? { armedAt: Date.now(), borrowedCount: owed.borrowedCount + 1 }
+        : null;
+      console.warn('[ClaudeSessionPool] settling this turn on a `result` the session was still owed by an aborted turn; if this frame was that turn\'s, this turn\'s answer is truncated', {
+        appSessionId: session.appSessionId,
+        owedForMs: Date.now() - owed.armedAt,
+        // Zero means the live turn had shown the user nothing when this arrived,
+        // which is the strong signal that the frame belonged to the abandoned
+        // turn rather than to this one. Non-zero is the milder truncation.
+        framesDeliveredToTurn: liveTurn.frameCount,
+        // How many settlements this one desync has now consumed, so a user
+        // reporting "three blank answers" and a log showing three lines can be
+        // recognised as one fault rather than three.
+        borrowedSettlements: owed.borrowedCount + 1,
+        // False means this is believed to be the last of it: the turn had produced
+        // its own output, so the `result` was plausibly its own.
+        terminatorStillOutstanding: stillOutstanding,
+      });
+    }
+
+    settleCurrentTurn(session, message);
+    closeIfIdle(session);
+    return;
+  }
+
+  const turn = session.currentTurn;
+
+  // Every route to the session sink goes through here, so the two reasons a frame
+  // may be withheld from it live in ONE place rather than being repeated at three
+  // call sites that have drifted apart before.
+  //
+  // 1. A settlement the pool has already announced. The transcript has no
+  //    update-in-place, so a second frame for one task id is a second row — and,
+  //    under the same id, two React children under one key.
+  // 2. A DEAD session. Its teardown has already made every report it owes (lost
+  //    tasks, flushed settlements), and it has dropped the records those reports
+  //    were built from — so a frame arriving afterwards is unaccounted for, and
+  //    would be forwarded with a null owner, which BROADCASTS: one user's task
+  //    summary and the absolute host path of its output to every connected client.
+  //    Reachable because `close()` ends the CLI but not the frames the SDK has
+  //    already parsed, and the retire path closes a session whose generator is
+  //    known to still be running.
+  const forwardToSessionSink = (frame) => {
+    if (duplicateSettlement) {
+      return;
+    }
+    if (session.dead) {
+      if (isTaskNotification(frame)) {
+        // Only for the one frame shape the sink would have acted on. Silence here
+        // is what the whole change set exists to remove, but warning for every
+        // frame a dying process happens to emit would bury it.
+        console.warn('[ClaudeSessionPool] dropping a background task settlement that arrived after this session died; its outcome was already reported by the session\'s own teardown', {
+          appSessionId: session.appSessionId,
+          taskId: frame.task_id,
+        });
+      }
+      return;
+    }
+    session.onBetweenTurnMessage(frame, sinkMeta);
+  };
+
+  if (turn?.promptSent && !turn.aborted) {
+    // A task settling while a LATER turn is in flight must still reach the
+    // session sink. The in-turn path normalizes SDK messages by `message.role`
+    // (claude-sessions.provider.ts), so a `system`/`task_notification` frame
+    // normalizes to nothing — routing it only to the turn would make a
+    // completion, a failure, or a reaper kill vanish silently, which is exactly
+    // what goal 3 of the design forbids.
+    if (isTaskNotification(message)) {
+      forwardToSessionSink(message);
+    }
+    turn.frameCount += 1;
+    turn.onMessage(message);
+    return;
+  }
+
+  if (turn?.promptSent) {
+    // The turn is aborted but deliberately still holds the slot until its own
+    // terminator arrives. The user pressed Stop, so nothing more may appear in
+    // the transcript — but a background task's settlement still has to get
+    // through, so this routes exactly like the between-turn path (whose sink
+    // forwards only `task_notification`).
+    forwardToSessionSink(message);
+    return;
+  }
+
+  // No turn in flight: this is the path that carries a background task's
+  // completion to the UI after its turn already finished.
+  forwardToSessionSink(message);
+
+  armIdleTimerIfIdle(session);
+}
+
+/**
+ * Says out loud that the process died and takes its tracked tasks down with it.
+ *
+ * This used to be entirely silent, which recreated the bug this pool exists to
+ * fix through a new mechanism: between turns `currentTurn` is `null`, so the only
+ * thing `drain`'s error path did — reject the turn — dropped the error on the
+ * floor. No log line for the operator, and no frame for the user, who had been
+ * told they would be notified when the task completed and so waited forever.
+ *
+ * A `skipTranscript` task is counted in the log but not reported: it is ambient
+ * housekeeping ccui deliberately keeps out of the conversation (the same rule
+ * `forwardBetweenTurnMessage` applies to its notifications), and surfacing it
+ * only on the failure path would put a row the user never asked for — and cannot
+ * act on — into the transcript.
+ */
+function reportLostTasks(session, error) {
+  const lost = [...session.liveTaskIds.entries()];
+
+  console.error('[ClaudeSessionPool] the Claude CLI process ended unexpectedly; any background task it was still running is lost', {
+    appSessionId: session.appSessionId,
+    lostTaskCount: lost.length,
+    // Logged unconditionally, including with zero tasks and with a turn in
+    // flight: the turn's own rejection tells one caller, and nothing at all
+    // tells the operator that a ~320 MB subprocess just disappeared.
+    error: error ? error.message : 'the message stream ended without an error',
+  });
+
+  for (const [taskId, task] of lost) {
+    if (task.skipTranscript) {
+      continue;
+    }
+    try {
+      session.onTaskLost?.({ taskId, description: task.description }, { taskOwner: task.owner });
+    } catch (reportError) {
+      // One sink throwing must not cost the remaining tasks their report. The
+      // caller's callback reaches a websocket fan-out, so it can fail for
+      // reasons that have nothing to do with the next task in this list.
+      console.error('[ClaudeSessionPool] failed to report a lost background task', {
+        appSessionId: session.appSessionId,
+        taskId,
+        error: reportError instanceof Error ? reportError.message : String(reportError),
+      });
+    }
+  }
+}
+
+async function drain(session) {
+  /** The throw that ended the stream, if it ended by throwing. */
+  let streamError = null;
+  try {
+    for await (const message of session.query) {
+      routeMessage(session, message);
+    }
+  } catch (error) {
+    streamError = error instanceof Error ? error : new Error(String(error));
+    rejectCurrentTurn(session, streamError);
+  } finally {
+    // `destroy()` sets `dead` before the generator unwinds, so a flag still
+    // false here means the process ended on its OWN — crash, OOM kill, killed
+    // out of band — rather than because we closed it. Only that is a loss:
+    // `closeAllSessions` (shutdown) and the recreate branch both close on
+    // purpose, with nothing left to notify in the first case and nothing lost in
+    // the second.
+    const unexpected = !session.dead;
+
+    // The process is gone. Reject any turn still waiting so the caller's
+    // promise settles and its own safety net can complete the run.
+    rejectCurrentTurn(session, new Error('Claude session process ended before the turn completed'));
+    // Same four steps `destroy` performs, in the same order — including clearing
+    // the hold-check timer, because this is the path a process that died on its
+    // OWN takes and it never goes through `destroy`.
+    markSessionDead(session);
+
+    // Last, deliberately: teardown correctness outranks reporting, so nothing
+    // below can leave a dead session sitting in the live map. `liveTaskIds` is
+    // left populated — the session is out of the map, so it is unreachable, and
+    // clearing it would only hide a teardown bug from `getLiveTaskIds`.
+    // Unconditionally, unlike `reportLostTasks`: a settlement in its grace window
+    // is owed a report however the process ended, including a close we asked for.
+    // `destroy()` already flushed in that case, so this is the path for a process
+    // that ended on its own.
+    flushPendingSettlements(session);
+
+    if (unexpected) {
+      reportLostTasks(session, streamError);
+    }
+  }
+}
+
+function createLiveSession({ appSessionId, sdkOptions, callerStated, turnContext, onBetweenTurnMessage, onTaskLost, onHoldWarning, onTaskSettledWithoutNotification, taskOwner, createQuery }) {
+  const input = createInputStream();
+  const query = createQuery({ prompt: input, options: sdkOptions });
+
+  /** @type {LiveSession} */
+  const session = {
+    appSessionId,
+    query,
+    input,
+    liveTaskIds: new Map(),
+    pendingSettlements: new Map(),
+    providerSessionId: null,
+    currentTurn: null,
+    onBetweenTurnMessage,
+    onTaskLost: onTaskLost ?? null,
+    onHoldWarning: onHoldWarning ?? null,
+    onTaskSettledWithoutNotification: onTaskSettledWithoutNotification ?? null,
+    taskOwner: taskOwner ?? null,
+    optionSnapshot: creationSnapshot(sdkOptions, callerStated),
+    // The allowlist the CLI was SPAWNED with — the set it will auto-approve from
+    // for the whole life of the process, regardless of what `optionSnapshot`
+    // later says. Frozen here because `optionSnapshot.allowedTools` is rewritten
+    // on every reconcile, and it is the spawn-time list that has to be countered.
+    spawnAllowedTools: [...(snapshotOptions(sdkOptions, callerStated).allowedTools ?? [])],
+    appliedPermissions: null,
+    turnContext: turnContext ?? null,
+    idleTimer: null,
+    holdCheckTimer: null,
+    dead: false,
+    owedTerminator: null,
+  };
+
+  live.set(appSessionId, session);
+  void drain(session);
+  return session;
+}
+
+export const claudeSessionPool = {
+  /**
+   * Runs one turn, reusing the session's live process when there is one.
+   * Resolves with that turn's SDK `result` message.
+   *
+   * A reused process must never keep running turn 1's options: the SDK holds
+   * the `query()` options it was constructed with, so a user who switches
+   * permission mode or unchecks a tool would otherwise be silently evaluated
+   * against the settings they just abandoned. Reconciliation happens before the
+   * prompt is pushed — recreate when nothing is at stake, reconfigure in place
+   * when background work must survive.
+   */
+  async runTurn({ appSessionId, userMessage, sdkOptions, forkSubagent, turnContext, onMessage, onBetweenTurnMessage, onTaskLost, onHoldWarning, onTaskSettledWithoutNotification, taskOwner, createQuery }) {
+    // The values `snapshotOptions` cannot read off `sdkOptions` — see
+    // `CALLER_STATED_OPTION_FIELDS`.
+    const callerStated = { forkSubagent };
+
+    let session = live.get(appSessionId);
+    if (session && isUnusable(session)) {
+      retireUnusableSession(session);
+      session = undefined;
+    }
+
+    if (session?.currentTurn) {
+      if (!session.currentTurn.aborted) {
+        throw turnInFlightError(appSessionId);
+      }
+      // An aborted turn keeps the slot until its terminator arrives (bounded by
+      // ABORT_SETTLE_FALLBACK_MS), so a user who presses Stop and re-sends
+      // immediately lands here. Waiting is the whole point: throwing would turn
+      // "keep the slot so the CLI's own terminator can settle it" into an error
+      // the user sees.
+      await session.currentTurn.settled;
+      session = live.get(appSessionId);
+      if (session && isUnusable(session)) {
+        retireUnusableSession(session);
+        session = undefined;
+      }
+      if (session?.currentTurn) {
+        // Someone else claimed the freed slot while we waited. That is genuine
+        // concurrency, not a Stop-then-resend.
+        throw turnInFlightError(appSessionId);
+      }
+    }
+
+    const turn = createTurn(onMessage);
+
+    if (session) {
+      // Claim the slot SYNCHRONOUSLY, before the first `await` below. The guard
+      // above and the claim used to be separated by reconciliation's awaits, so
+      // two calls for one `appSessionId` could both pass the guard and the
+      // second would overwrite the first's resolve/reject — the first caller's
+      // promise then never settled (its run hangs in "processing") and every
+      // frame from it went to the second caller's writer. Reachable in
+      // production: only the websocket path is serialised by `chatRunRegistry`,
+      // the REST entry point (server/routes/agent.js) is not.
+      session.currentTurn = turn;
+
+      try {
+        const nextSnapshot = snapshotOptions(sdkOptions, callerStated);
+        const changed = differingFields(RELEVANT_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
+        // No option field can say this, because it happens inside the CLI after
+        // the process was spawned: an edit-prompt fork leaves the process on the
+        // BRANCH's transcript while this key still names the parent. Reusing it
+        // would file the turn under the wrong conversation, which is worse than
+        // running it with stale options.
+        const drifted = servesADifferentConversation(session, sdkOptions);
+
+        if ((changed.length > 0 || drifted) && session.liveTaskIds.size === 0) {
+          // Nothing to protect. The pre-pool behaviour closed at turn end anyway,
+          // so a clean recreate costs nothing and is the only way to honour EVERY
+          // option — including the ones no control request can change.
+          // Hand the slot back first: `destroy` ends the drain loop, which
+          // rejects whatever turn it finds there, and this turn is about to run
+          // on the replacement process instead.
+          session.currentTurn = null;
+          destroy(session);
+          session = undefined;
+        } else if (changed.length > 0 || drifted) {
+          // Reached only when background work forbids the recreate. A drifted
+          // conversation cannot be fixed by any control request, so this reports
+          // it and runs on — the same warn-and-skip contract as an unappliable
+          // option field. `queryClaudeSDK` refuses the turn before it ever gets
+          // here; a caller that does not is choosing the lesser of two evils and
+          // is told so.
+          const unappliable = [
+            ...differingFields(RECREATE_ONLY_OPTION_FIELDS, session.optionSnapshot, nextSnapshot),
+            ...(drifted ? [CONVERSATION_DRIFT_REASON] : []),
+          ];
+          if (unappliable.length > 0) {
+            console.warn('[ClaudeSessionPool] keeping the live process for its background work, so these option changes cannot take effect until it closes', {
+              appSessionId,
+              fields: unappliable,
+            });
+          }
+          await applyLiveOptionChanges(session, nextSnapshot);
+          // Applying a control request yields the event loop; the process can die
+          // in that window. Hand the slot back as well as dropping our own
+          // reference: this turn is about to run on a fresh process, and a dying
+          // session that still holds it will reject it from its drain loop's
+          // teardown — telling the caller "process ended before the turn
+          // completed" about a turn generating normally somewhere else.
+          if (isUnusable(session)) {
+            if (session.currentTurn === turn) {
+              session.currentTurn = null;
+            }
+            retireUnusableSession(session);
+            session = undefined;
+          }
+        }
+      } catch (error) {
+        // The turn is not going to run: release the slot we claimed, or the
+        // session is wedged for every later turn.
+        if (session?.currentTurn === turn) {
+          session.currentTurn = null;
+        }
+        throw error;
+      }
+    }
+
+    if (session) {
+      // Keep the sink pointed at the newest caller so between-turn events reach
+      // whoever is currently watching, and refresh the shared turn context IN
+      // PLACE so the approval callback the SDK captured on turn 1 resolves this
+      // turn's writer and this turn's allow/deny lists.
+      session.onBetweenTurnMessage = onBetweenTurnMessage;
+      session.onTaskLost = onTaskLost ?? null;
+      session.onHoldWarning = onHoldWarning ?? null;
+      session.onTaskSettledWithoutNotification = onTaskSettledWithoutNotification ?? null;
+      // Refreshed with the sinks, and for the same reason — but it applies only
+      // to tasks THIS turn starts. Tasks already tracked keep the owner recorded
+      // when they started, which is what stops one user's task being reported to
+      // whoever took the next turn on a shared session.
+      session.taskOwner = taskOwner ?? null;
+      if (session.turnContext && turnContext) {
+        Object.assign(session.turnContext, turnContext);
+      }
+    } else {
+      session = createLiveSession({ appSessionId, sdkOptions, callerStated, turnContext, onBetweenTurnMessage, onTaskLost, onHoldWarning, onTaskSettledWithoutNotification, taskOwner, createQuery });
+    }
+
+    clearIdleTimer(session);
+
+    session.currentTurn = turn;
+    turn.promptSent = true;
+    session.input.push(userMessage);
+    return turn.promise;
+  },
+
+  hasLiveSession(appSessionId) {
+    const session = live.get(appSessionId);
+    return Boolean(session && !isUnusable(session));
+  },
+
+  /**
+   * Everything about this turn that the process currently live for
+   * `appSessionId` cannot honour: the `RECREATE_ONLY_OPTION_FIELDS` that differ,
+   * plus `CONVERSATION_DRIFT_REASON` when the process is no longer on the
+   * conversation the turn continues. Empty when there is no live process
+   * (nothing to be stale against) or nothing differs.
+   *
+   * Read-only: it answers the question, it does not act on it. The caller
+   * decides what each reason means, because that depends on the reason —
+   * `runTurn` recreates for any of them when nothing is at stake, and
+   * `queryClaudeSDK` refuses the turn for the subset where running anyway would
+   * silently do something else. The comparisons live here because the state they
+   * read does (snapshot normalization, which fields creation consumed, and the
+   * announced provider id); duplicating them in the caller is how the two drift
+   * apart.
+   */
+  pendingFreshProcessReasons(appSessionId, sdkOptions, callerStated) {
+    const session = live.get(appSessionId);
+    if (!session || isUnusable(session)) {
+      return [];
+    }
+    return [
+      ...differingFields(RECREATE_ONLY_OPTION_FIELDS, session.optionSnapshot, snapshotOptions(sdkOptions, callerStated)),
+      ...(servesADifferentConversation(session, sdkOptions) ? [CONVERSATION_DRIFT_REASON] : []),
+    ];
+  },
+
+  /** Ids only — `liveTaskIds` also carries each task's label, which no caller wants. */
+  getLiveTaskIds(appSessionId) {
+    const session = live.get(appSessionId);
+    return session ? [...session.liveTaskIds.keys()] : [];
+  },
+
+  /**
+   * Settles an in-flight turn WITHOUT killing the process.
+   *
+   * No longer on the abort path: abort interrupts and lets the CLI's own
+   * terminator settle the turn (see `interruptTurn`). This remains the manual
+   * escape hatch — and the mechanism `armAbortSettleFallback` reproduces — for
+   * a turn whose terminator never arrives.
+   *
+   * Never closes synchronously — an external caller can only ever hold a
+   * stale view of `liveTaskIds`, since a message the CLI already sent (e.g.
+   * `task_started`) may still be in flight, unrouted by this session's drain
+   * loop, at the exact moment abort settles the turn. Deciding to close from
+   * outside on that stale snapshot would risk killing a background task that
+   * just registered — instead this only arms the same deferred idle-close
+   * check `routeMessage` uses between turns, which re-reads `liveTaskIds`
+   * `IDLE_GRACE_MS` later, from inside the drain loop's own ordering, by
+   * which point any in-flight message has certainly been routed.
+   */
+  settleTurn(appSessionId, reason) {
+    const session = live.get(appSessionId);
+    if (!session) {
+      return false;
+    }
+    const settled = settleCurrentTurn(session, { type: 'result', subtype: reason });
+    if (settled) {
+      armIdleTimerIfIdle(session);
+    }
+    return settled;
+  },
+
+  /**
+   * Interrupts the CURRENT turn without closing the input stream or killing
+   * the process — a background shell started earlier in the session must
+   * survive. The underlying SDK query object never leaves the pool; callers
+   * (abort) reach it only through this method. A missing/dead session is a
+   * silent no-op: there is nothing left to interrupt.
+   *
+   * Does NOT settle the turn. An interrupted turn terminates itself — a
+   * `result` with `subtype: 'error_during_execution'` arrives within
+   * milliseconds (measured: `spikes/streaming-input-mode/interrupt-result.mjs`)
+   * — and `SDKResultMessage` carries no turn-correlation field, so a frame that
+   * arrives after the slot has been vacated cannot be attributed back to the
+   * turn it came from. Keeping the slot until that terminator arrives is the
+   * only way to route it correctly; the aborted turn just stops forwarding to
+   * the UI in the meantime, and `armAbortSettleFallback` bounds the wait for a
+   * CLI that acks the interrupt and then emits nothing.
+   */
+  async interruptTurn(appSessionId) {
+    const session = live.get(appSessionId);
+    if (!session || session.dead) {
+      return false;
+    }
+    const turn = session.currentTurn;
+    // Read BEFORE the await, not after. A turn that has only reserved the slot
+    // has no prompt in the process yet, so an interrupt cannot apply to it — and
+    // by the time the control request is acknowledged, that same turn may have
+    // been pushed and be running. Deciding from a post-await read would mark a
+    // turn the CLI never interrupted: the user's fresh prompt would run to
+    // completion with every frame suppressed, and the abort fallback would be
+    // armed against a live turn, free to vacate the slot mid-emission.
+    const wasInFlight = Boolean(turn?.promptSent);
+
+    // A failed interrupt PROPAGATES on purpose. Swallowing it made the only
+    // caller's own catch — the sole place that undoes its "this run was
+    // aborted" bookkeeping — unreachable, so the user was shown a clean
+    // "stopped" while the CLI kept generating an answer whose every frame was
+    // then discarded. A rejection here lets that caller stand the run back up.
+    await session.query.interrupt?.();
+
+    // Marked only once the control request has landed: until then the stop has
+    // not happened, and a run that is still the user's run must keep streaming.
+    if (wasInFlight && session.currentTurn === turn) {
+      turn.aborted = true;
+      armAbortSettleFallback(session, turn);
+    }
+    return true;
+  },
+
+  closeSession(appSessionId) {
+    const session = live.get(appSessionId);
+    if (session) {
+      destroy(session);
+    }
+  },
+
+  /**
+   * Closes every live session. Called on server shutdown.
+   *
+   * Not a leak backstop: the SDK already registers one `process.on('exit')`
+   * handler that SIGTERMs every child it spawned (`V2`/`W2` in `sdk.mjs`), so an
+   * abrupt exit does not orphan the ~320 MB `claude` process either way.
+   *
+   * And — stated plainly because a previous version of this comment claimed the
+   * opposite, twice — it does NOT give each CLI a chance to reap its own
+   * background shells. `destroy()` closes the input and then calls
+   * `query.close()` in the same tick, which `sdk.d.ts` documents as forcefully
+   * ending the query "including the CLI subprocess" (and
+   * `claude-session-pool.test.js` pins that call), with `process.exit(0)` following
+   * shortly after. Nothing awaits anything, so the CLI never gets an event-loop
+   * turn in which to notice its input closed and sweep. Its background shells are
+   * orphaned to the OS exactly as they would be on a bare SIGTERM.
+   *
+   * What this IS for is our own side: every session's timers are cancelled, its
+   * pending settlement reports are flushed, the live map is emptied, and the caller
+   * gets a count it can log — deterministically, instead of leaving all of it to an
+   * exit handler that only kills processes. Giving the CLI a real drain window would
+   * mean awaiting between the two closes and delaying shutdown by that window; that
+   * is a deliberate non-goal, not an oversight.
+   * @returns {number} How many sessions were closed.
+   */
+  closeAllSessions() {
+    const sessions = [...live.values()];
+    for (const session of sessions) {
+      destroy(session);
+    }
+    live.clear();
+    return sessions.length;
+  },
+
+  _resetForTests() {
+    claudeSessionPool.closeAllSessions();
+  },
+};
