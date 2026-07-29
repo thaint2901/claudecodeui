@@ -340,7 +340,12 @@ function describeHeldProcessRefusal(poolSessionId, options, sdkOptions) {
   }
 
   const blocked = claudeSessionPool
-    .pendingFreshProcessReasons(poolSessionId, sdkOptions)
+    // `forkSubagent` is stated rather than read off `sdkOptions` for the reason
+    // spelled out below and in the pool's `CALLER_STATED_OPTION_FIELDS`. Passing
+    // it keeps this comparison honest even though the /subtask refusal itself is
+    // decided from the raw option: without it a process spawned FOR a subtask
+    // would report a spurious difference on every later turn.
+    .pendingFreshProcessReasons(poolSessionId, sdkOptions, { forkSubagent: options.forkSubagent === true })
     .filter((reason) => FRESH_PROCESS_REQUIRED_REASONS.has(reason));
 
   const reasons = [];
@@ -1151,15 +1156,55 @@ async function queryClaudeSDK(command, options = {}, ws) {
       });
     };
 
+    // Reached when a task's settlement was announced ONLY by a `task_updated`
+    // status patch — no `task_notification` followed it within the pool's grace
+    // window. `patch.status: 'killed'` is the memory-pressure reaper's own signal,
+    // and until this existed such a task reached no user at all: the pool cleared
+    // its tracking and `forwardBetweenTurnMessage` forwards only notifications.
+    const reportSettledBackgroundTask = ({ taskId, description, status, error }, meta) => {
+      const label = description ?? 'A background task';
+      // `killed` is not part of the wire vocabulary — `stopped` is, and the
+      // frontend already renders it as "was stopped (likely reaped under memory
+      // pressure)". Mapping it to `completed` or `failed` would either claim a
+      // success that did not happen or report a failure that did not.
+      const wireStatus = status === 'killed' ? 'stopped' : status;
+      const detail = status === 'killed'
+        ? `${label} — stopped before it finished, most likely reaped to free memory.`
+        : status === 'failed'
+          ? `${label} — failed${error ? `: ${error}` : ''}.`
+          : `${label} — finished.`;
+      emitBackgroundTaskEvent({
+        sessionId: backgroundTaskSessionId,
+        taskId,
+        ownerUserId: meta?.taskOwner ?? null,
+        // An unrecognised status must not become a green tick: the frontend fails
+        // toward "not a success", so passing the CLI's word straight through is
+        // the safe default for a value this code does not know.
+        status: wireStatus,
+        // No `outputFile`: `task_updated.patch` carries no path (only
+        // `task_notification` does), and inventing one would point the user at a
+        // file that may not exist.
+        summary: `${detail} The Claude CLI reported no result notification for it, so its output could `
+          + 'not be located.',
+      });
+    };
+
     const turnResult = await claudeSessionPool.runTurn({
       appSessionId: poolSessionId,
       userMessage: await buildPromptPayload(command, options.images, options.cwd),
       sdkOptions,
+      // Stated separately because it is not an `sdkOptions` field at all:
+      // `mapCliOptionsToSDK` turns it into child env, which the pool cannot
+      // compare (see `CALLER_STATED_OPTION_FIELDS`). Without this the pool could
+      // not see a /subtask arriving on a live process and reused it, so
+      // `CLAUDE_CODE_FORK_SUBAGENT` never reached the CLI.
+      forkSubagent: options.forkSubagent === true,
       turnContext,
       onMessage: handleSdkMessage,
       onBetweenTurnMessage: forwardBetweenTurnMessage,
       onTaskLost: reportLostBackgroundTask,
       onHoldWarning: reportHeldBackgroundTask,
+      onTaskSettledWithoutNotification: reportSettledBackgroundTask,
       taskOwner: turnOwnerUserId,
       createQuery: createQueryWithHookFallback,
     });
@@ -1331,10 +1376,16 @@ async function abortClaudeSDKSession(sessionId) {
  *
  * Called from the server's shutdown handler. Not a leak backstop — the SDK
  * already SIGTERMs every child it spawned from its own `process.on('exit')`
- * handler, so the ~320 MB process does not survive us either way. The value is
- * in HOW it dies: a SIGTERM'd CLI never reaches the `inputClosed` branch where it
- * reaps its own background tasks, so those shells get left behind. Closing the
- * input stream first gives each CLI the chance to clean up after itself.
+ * handler, so the ~320 MB process does not survive us either way.
+ *
+ * It does NOT let each CLI reap its own background shells first, whatever an
+ * earlier version of this comment said: the pool closes the input and calls
+ * `query.close()` in the same tick, and that call forcefully terminates the CLI
+ * subprocess (`sdk.d.ts`), with `process.exit(0)` right behind it — so the CLI
+ * never gets an event-loop turn in which to notice. Those shells are orphaned to
+ * the OS. See `claudeSessionPool.closeAllSessions` for what closing actually buys
+ * (our own timers, reports and bookkeeping, deterministically) and why a real
+ * drain window is a non-goal.
  * @returns {number} How many live sessions were closed.
  */
 function shutdownClaudeSessions() {

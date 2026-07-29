@@ -36,6 +36,20 @@ const sdkState = {
   closeCalls: 0,
   /** Prompts actually pushed into each process, in order. */
   promptsPerProcess: [] as string[][],
+  /**
+   * Whether each process backgrounds a shell on its first turn — true for every
+   * test about a HELD process, false for the two that need the opposite state (a
+   * live process holding nothing). A /subtask process in particular cannot hold
+   * one at all: its env carries `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`.
+   */
+  startsBackgroundTask: true,
+  /**
+   * Whether the backgrounded shell then SETTLES between turns. That is the only
+   * way to reach a process that is live while holding nothing: an idle process is
+   * destroyed at turn end (`closeIfIdle`), and only a task settling between turns
+   * arms the 60 s idle grace instead.
+   */
+  settlesBackgroundTask: false,
 };
 
 // `mock.module`'s `namedExports` replaces the whole module, so the real exports
@@ -61,14 +75,26 @@ mock.module('@anthropic-ai/claude-agent-sdk', {
             // A backgrounded shell: from here on the process must stay alive,
             // which is exactly what makes a fresh-process-only option change
             // impossible to honour.
-            yield {
-              type: 'system',
-              subtype: 'task_started',
-              task_id: `bg-shell-${processIndex}`,
-              description: 'Echo t1-t10 with delays',
-            };
+            if (sdkState.startsBackgroundTask) {
+              yield {
+                type: 'system',
+                subtype: 'task_started',
+                task_id: `bg-shell-${processIndex}`,
+                description: 'Echo t1-t10 with delays',
+              };
+            }
           }
           yield { type: 'result', subtype: 'success' };
+          if (turn === 1 && sdkState.startsBackgroundTask && sdkState.settlesBackgroundTask) {
+            yield {
+              type: 'system',
+              subtype: 'task_notification',
+              task_id: `bg-shell-${processIndex}`,
+              status: 'completed',
+              output_file: `/tmp/bg-shell-${processIndex}.output`,
+              summary: 'Echo t1-t10 with delays',
+            };
+          }
         }
       })();
 
@@ -136,6 +162,8 @@ function resetSdkState() {
   sdkState.queryCalls.length = 0;
   sdkState.closeCalls = 0;
   sdkState.promptsPerProcess.length = 0;
+  sdkState.startsBackgroundTask = true;
+  sdkState.settlesBackgroundTask = false;
 }
 
 test('/subtask on a session holding a background task is refused, not silently downgraded', async (t) => {
@@ -227,6 +255,81 @@ test('/subtask on a session with no live background task runs normally', async (
     'a fresh process is exactly where /subtask CAN be honoured — the refusal must not reach here',
   );
   assert.ok(ws.sent.some((frame) => frame.kind === 'complete' && frame.exitCode === 0));
+
+  claudeSessionPool._resetForTests();
+});
+
+// The refusal above fires on `getLiveTaskIds().length > 0`. That leaves the
+// LIVE-BUT-UNTRACKED window: a task settling BETWEEN turns arms the 60 s idle
+// grace instead of closing (an idle process is destroyed at turn end, so this is
+// the only way to reach it), and in that window the pool happily reuses the
+// process. `forkSubagent` appears in NO compared option field — it is child env,
+// and `sdkOptions.env` is rebuilt every turn — so nothing noticed the change:
+// `CLAUDE_CODE_FORK_SUBAGENT` never reached the CLI and the subtask ran without
+// the inherited context that is its entire point. No refusal, no warning.
+//
+// Refusing is wrong here — there is nothing left to protect — so the answer is the
+// one the pool already applies to every other fresh-process-only option: recreate.
+test('/subtask on a live process whose task already settled recreates it instead of silently losing its env', async () => {
+  claudeSessionPool._resetForTests();
+  resetSdkState();
+  sdkState.settlesBackgroundTask = true;
+
+  const first = createFakeWs();
+  await queryClaudeSDK(
+    'start a long shell in the background',
+    {
+      appSessionId: 'subtask-untracked',
+      cwd,
+      images: [],
+      model: 'sonnet',
+      permissionMode: 'bypassPermissions',
+      toolsSettings: { allowedTools: ['Bash'], disallowedTools: [], skipPermissions: false },
+    },
+    first,
+  );
+
+  // The settlement lands after the turn's own `result`, so give the drain loop the
+  // event-loop turns it needs to route it.
+  for (let tick = 0; tick < 50 && claudeSessionPool.getLiveTaskIds('subtask-untracked').length > 0; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(claudeSessionPool.hasLiveSession('subtask-untracked'), true, 'the process must still be live');
+  assert.deepEqual(
+    claudeSessionPool.getLiveTaskIds('subtask-untracked'),
+    [],
+    'and hold nothing — otherwise this is the already-covered refusal case',
+  );
+  assert.equal(sdkState.queryCalls.length, 1);
+
+  const ws = createFakeWs();
+  await queryClaudeSDK(
+    'Run a subtask: summarize the conversation so far',
+    {
+      appSessionId: 'subtask-untracked',
+      sessionId: 'busy-provider-1',
+      cwd,
+      images: [],
+      model: 'sonnet',
+      permissionMode: 'bypassPermissions',
+      toolsSettings: { allowedTools: ['Bash'], disallowedTools: [], skipPermissions: false },
+      forkSubagent: true,
+    },
+    ws,
+  );
+
+  assert.equal(refusal(ws), undefined, `nothing was at stake, so nothing should be refused: ${JSON.stringify(ws.sent)}`);
+  assert.equal(sdkState.queryCalls.length, 2, 'the pool must notice the env-only change and spawn a fresh process');
+  assert.equal(
+    (sdkState.queryCalls[1].options.env as Record<string, string>).CLAUDE_CODE_FORK_SUBAGENT,
+    '1',
+    'which is the only way the /subtask env can reach the CLI at all',
+  );
+  assert.deepEqual(
+    sdkState.promptsPerProcess[1],
+    ['Run a subtask: summarize the conversation so far'],
+    'and the subtask prompt must run on THAT process, not the old one',
+  );
 
   claudeSessionPool._resetForTests();
 });

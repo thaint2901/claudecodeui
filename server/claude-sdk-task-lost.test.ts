@@ -231,6 +231,209 @@ test('a task still holding the CLI process open past ten minutes reaches the cli
   }
 });
 
+// A task can settle through a `task_updated` status patch INSTEAD of a
+// `task_notification`, and `patch.status: 'killed'` is the memory-pressure
+// reaper's own signal. The pool cleared its tracking on that frame while
+// `forwardBetweenTurnMessage` forwards only notifications, so such a task reached
+// no user at all — the design spec asserts the opposite in writing, and goal 3
+// ("losses become visible, never silent") was unmet for exactly this shape.
+//
+// Timers are faked for the grace window only, because the notification the window
+// waits for cannot arrive on a task the reaper killed.
+test('a task killed by the reaper — announced only by task_updated — reaches the client as stopped, not as a success', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: Date.now() });
+  const ws = createFakeWs(OWNER_USER_ID);
+
+  const frames: Frame[] = [];
+  const client = {
+    readyState: WS_OPEN_STATE,
+    userId: OWNER_USER_ID,
+    send: (data: string) => { frames.push(JSON.parse(data) as Frame); },
+  };
+  connectedClients.add(client);
+
+  frameScripts.push(async function* script() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-killed-provider-1', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'task-killed-1',
+      description: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+    // The reaper's signal, between turns, and the ONLY frame this task ever gets.
+    yield {
+      type: 'system',
+      subtype: 'task_updated',
+      task_id: 'task-killed-1',
+      patch: { status: 'killed', end_time: Date.now() },
+    };
+  });
+
+  try {
+    await queryClaudeSDK(
+      'start something in the background',
+      { appSessionId: 'task-killed-app-1', cwd: os.tmpdir(), images: [], permissionMode: 'bypassPermissions' },
+      ws,
+    );
+
+    await waitFor(() => claudeSessionPool.getLiveTaskIds('task-killed-app-1').length === 0);
+    assert.equal(
+      frames.filter((f) => f.kind === 'background_task').length,
+      0,
+      'nothing may be reported while the notification could still supersede it',
+    );
+
+    t.mock.timers.tick(2000);
+
+    const frame = frames.find((f) => f.kind === 'background_task') as Frame;
+    assert.ok(frame, 'a reaped task must reach the user, which is the whole finding');
+    assert.equal(frame.sessionId, 'task-killed-app-1');
+    assert.equal(frame.taskId, 'task-killed-1');
+    assert.equal(
+      frame.status,
+      'stopped',
+      '`killed` is not a completion and not a failure — the frontend renders `stopped` as a reaped task',
+    );
+    assert.match(String(frame.summary), /Echo t1-t10 with delays/, 'the row must say WHICH task');
+    assert.match(String(frame.summary), /reaped to free memory/i, 'and that it was killed, not finished');
+    assert.equal(Object.hasOwn(frame, 'outputFile'), false, '`task_updated.patch` carries no output path');
+    assert.equal(
+      frames.filter((f) => f.kind === 'background_task').length,
+      1,
+      'one settlement, one row',
+    );
+  } finally {
+    connectedClients.delete(client);
+    claudeSessionPool._resetForTests();
+    t.mock.timers.reset();
+  }
+});
+
+// The measured production shape: a healthy task announces its settlement TWICE,
+// `task_updated{completed}` first and `task_notification` 0 ms later
+// (`spikes/streaming-input-mode/task-settlement-frames.mjs`). Only the
+// notification carries `output_file` and `summary`, so the pair must collapse to
+// the notification's row — reporting the first frame and suppressing the second
+// would downgrade every ordinary background task, and reporting both would put two
+// rows in the transcript for one command.
+test('a task that settles through BOTH frames produces exactly one row, the notification\'s', async (t) => {
+  claudeSessionPool._resetForTests();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: Date.now() });
+  const ws = createFakeWs(OWNER_USER_ID);
+
+  const frames: Frame[] = [];
+  const client = {
+    readyState: WS_OPEN_STATE,
+    userId: OWNER_USER_ID,
+    send: (data: string) => { frames.push(JSON.parse(data) as Frame); },
+  };
+  connectedClients.add(client);
+
+  frameScripts.push(async function* script() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-both-provider-1', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'task-both-1',
+      description: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+    yield {
+      type: 'system',
+      subtype: 'task_updated',
+      task_id: 'task-both-1',
+      patch: { status: 'completed', end_time: Date.now() },
+    };
+    yield {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'task-both-1',
+      status: 'completed',
+      output_file: '/home/alice/.claude/tasks/task-both-1.output',
+      summary: 'Echo t1-t10 with delays',
+    };
+  });
+
+  try {
+    await queryClaudeSDK(
+      'start something in the background',
+      { appSessionId: 'task-both-app-1', cwd: os.tmpdir(), images: [], permissionMode: 'bypassPermissions' },
+      ws,
+    );
+
+    await waitFor(() => frames.some((frame) => frame.kind === 'background_task'));
+    t.mock.timers.tick(2000);
+
+    const settled = frames.filter((f) => f.kind === 'background_task');
+    assert.equal(settled.length, 1, 'two frames announce one settlement, so the user gets one row');
+    assert.equal(settled[0].status, 'completed');
+    assert.equal(
+      settled[0].outputFile,
+      '/home/alice/.claude/tasks/task-both-1.output',
+      'and it must be the notification\'s row — the leaner task_updated row has no path to the output',
+    );
+  } finally {
+    connectedClients.delete(client);
+    claudeSessionPool._resetForTests();
+    t.mock.timers.reset();
+  }
+});
+
+// Same pair, and the misattribution it was quietly causing: the terminal
+// `task_updated` removed the task record, so the notification 0 ms later found
+// nothing and reported a NULL owner — which `emitBackgroundTaskEvent` broadcasts.
+// Every ordinary background task's summary and absolute host output path therefore
+// went to every connected client, defeating the owner scoping entirely.
+test('the notification after a terminal task_updated still knows the task\'s owner', async () => {
+  claudeSessionPool._resetForTests();
+  const clients = createTwoUserClients();
+
+  frameScripts.push(async function* script() {
+    yield { type: 'system', subtype: 'init', session_id: 'task-owner-pair-provider', slash_commands: [] };
+    yield {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'task-owner-pair-1',
+      description: 'Echo t1-t10 with delays',
+    };
+    yield { type: 'result', subtype: 'success' };
+    yield {
+      type: 'system',
+      subtype: 'task_updated',
+      task_id: 'task-owner-pair-1',
+      patch: { status: 'completed', end_time: Date.now() },
+    };
+    yield {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'task-owner-pair-1',
+      status: 'completed',
+      output_file: '/home/alice/.claude/tasks/task-owner-pair-1.output',
+      summary: 'Echo t1-t10 with delays',
+    };
+  });
+
+  try {
+    await queryClaudeSDK(
+      'start something in the background',
+      { ...TWO_USER_OPTIONS, appSessionId: 'task-owner-pair-app' },
+      createFakeWs(OWNER_USER_ID),
+    );
+
+    await waitFor(() => clients.backgroundTaskFrames(clients.ownerFrames).length > 0);
+    assert.equal(
+      clients.backgroundTaskFrames(clients.otherFrames).length,
+      0,
+      'the owner is known, so this must not fall back to a broadcast',
+    );
+  } finally {
+    clients.dispose();
+    claudeSessionPool._resetForTests();
+  }
+});
+
 // `emitBackgroundTaskEvent` scopes delivery to the task's owner, but only the
 // producer can say who that is, and the only available answer is the user whose
 // turn set the work going — carried by the run writer. The service's own tests

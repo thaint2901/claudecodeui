@@ -32,7 +32,15 @@ test('waits for a push instead of ending, then resumes', async () => {
   let settled = false;
   void pending.then(() => { settled = true; });
 
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Microtasks, not a wall-clock sleep. Every route by which this promise could
+  // settle — `close()`, `return()`, a `push` — resolves it through the microtask
+  // queue and never through a timer, so flushing that queue is a COMPLETE check
+  // rather than a guess that 50 ms is long enough. A 50 ms sleep also cannot fail
+  // fast: it pays the wait even when the code is correct, which is what the pool's
+  // close-policy tests were converted away from.
+  for (let tick = 0; tick < 50; tick += 1) {
+    await Promise.resolve();
+  }
   assert.equal(settled, false, 'must not end just because the queue is empty');
 
   stream.push(msg('late'));

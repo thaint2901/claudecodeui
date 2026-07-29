@@ -17,6 +17,10 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+// This directory's one resolver for the CLI binary: `CLAUDE_CLI_PATH` first, then the
+// conventional install location. This file used to hardcode one developer's home
+// directory, which made it unrunnable for anyone else.
+import { claudeExecutable } from './_probe-lib.mjs';
 
 const CWD = path.join(os.tmpdir(), `spike-streaming-${process.pid}`);
 fs.mkdirSync(CWD, { recursive: true });
@@ -82,7 +86,7 @@ const q = query({
     env,
     permissionMode: 'default',            // force canUseTool to be exercised
     allowedTools: [],
-    pathToClaudeCodeExecutable: '/home/thaint/.local/bin/claude',
+    pathToClaudeCodeExecutable: claudeExecutable(),
     hooks: {
       Notification: [{
         matcher: '',
