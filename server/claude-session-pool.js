@@ -86,8 +86,22 @@ const RELEVANT_OPTION_FIELDS = [...LIVE_APPLICABLE_OPTION_FIELDS, ...RECREATE_ON
  * which leaves the change detectable in the direction that still matters: a
  * session that is NOT a fork receiving a fork request still differs, still
  * recreates, and (when a background task forbids that) is still refused.
+ *
+ * What this must NOT be read as: "a fork-created process is always safe to
+ * reuse". `forkSession` was also, accidentally, the only field that noticed the
+ * EDIT-PROMPT fork drifting a process off its pool key's conversation — see
+ * `servesADifferentConversation`, which is what actually covers that, by
+ * identity rather than by flag.
  */
 const CONSUMED_AT_CREATION_OPTION_FIELDS = ['forkSession', 'resumeSessionAt'];
+
+/**
+ * Synthetic reason reported beside the recreate-only FIELD names when the live
+ * process is no longer on the conversation the turn continues. Not an option
+ * field: no option records it, because the drift happens mid-stream inside the
+ * CLI (see `servesADifferentConversation`).
+ */
+export const CONVERSATION_DRIFT_REASON = 'conversation';
 
 /** @type {Map<string, LiveSession>} */
 const live = new Map();
@@ -126,6 +140,11 @@ const live = new Map();
  * @property {Function | null} onTaskLost - Told about each task that died with
  *   the process. Refreshed per turn like `onBetweenTurnMessage`, so the report
  *   reaches whoever is currently watching this session.
+ * @property {string | null} providerSessionId - The provider-native session id
+ *   the process is currently on, as last announced in its own message stream.
+ *   Null until it announces one. The pool otherwise knows nothing about provider
+ *   ids; this exists only to notice a process that has drifted off its key's
+ *   conversation (see `servesADifferentConversation`).
  * @property {object} optionSnapshot - Normalized `RELEVANT_OPTION_FIELDS` as
  *   currently in force on this process (creation values, amended by whatever
  *   control requests have since been applied), except for the fields creation
@@ -189,6 +208,34 @@ function creationSnapshot(sdkOptions) {
 
 function differingFields(fields, current, next) {
   return fields.filter((field) => JSON.stringify(current[field]) !== JSON.stringify(next[field]));
+}
+
+/**
+ * True when the live process is no longer on the conversation this turn asks to
+ * continue, so reusing it would write the turn into someone else's transcript.
+ *
+ * The case that makes this necessary is the EDIT-PROMPT fork. It runs under the
+ * PARENT's `appSessionId` — the pool key — but the SDK announces the branch's own
+ * provider session id mid-stream, and the run registry deliberately leaves the
+ * parent's app-id→provider-id mapping intact and inserts a separate branch row.
+ * So the process ends the turn serving the BRANCH while the pool key still names
+ * the parent. `resume` is a spawn argument: a process that is already running
+ * ignores it, so nothing else corrects this. Explicit `/fork` is unaffected —
+ * it runs under the fork's own new app session id, so key and conversation agree.
+ *
+ * An IDENTITY comparison, not a field comparison, which is why it can succeed
+ * where the `resume` field exclusion documented at the top of this file cannot:
+ * turn 2 of a brand-new session gains a `resume` value turn 1 lacked, but that
+ * value EQUALS the id the process announced, so nothing looks changed. Both
+ * sides must be known before a mismatch is claimed — a caller that asks for no
+ * particular conversation is asking for the one it is already on.
+ */
+function servesADifferentConversation(session, sdkOptions) {
+  const requested = sdkOptions?.resume;
+  const actual = session.providerSessionId;
+  return typeof requested === 'string' && requested !== ''
+    && typeof actual === 'string' && actual !== ''
+    && requested !== actual;
 }
 
 /**
@@ -597,7 +644,28 @@ function isTaskLifecycle(message) {
       || message.subtype === 'task_updated');
 }
 
+/**
+ * Records which provider conversation the process is CURRENTLY on, from the
+ * `session_id` the SDK stamps on its messages.
+ *
+ * Deliberately the most recent announcement rather than the first: a fork
+ * announces the BRANCH's id on its first `system/init` and never re-announces
+ * the parent's, and `claude-sdk.js`'s own capture tolerates either arrival order
+ * (`shouldRecaptureSessionId`), so "first" would leave the pool believing a
+ * drifted process is still on the conversation its key names — the exact bug
+ * `servesADifferentConversation` exists to catch. A non-fork process announcing
+ * a different id later would recreate needlessly, but that is the same
+ * conclusion by a different route: the process would no longer be on the
+ * conversation the key names.
+ */
+function trackProviderSessionId(session, message) {
+  if (typeof message?.session_id === 'string' && message.session_id) {
+    session.providerSessionId = message.session_id;
+  }
+}
+
 function routeMessage(session, message) {
+  trackProviderSessionId(session, message);
   trackTask(session, message);
 
   if (session.owedTerminators > 0) {
@@ -748,6 +816,7 @@ function createLiveSession({ appSessionId, sdkOptions, turnContext, onBetweenTur
     query,
     input,
     liveTaskIds: new Map(),
+    providerSessionId: null,
     currentTurn: null,
     onBetweenTurnMessage,
     onTaskLost: onTaskLost ?? null,
@@ -824,8 +893,14 @@ export const claudeSessionPool = {
       try {
         const nextSnapshot = snapshotOptions(sdkOptions);
         const changed = differingFields(RELEVANT_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
+        // No option field can say this, because it happens inside the CLI after
+        // the process was spawned: an edit-prompt fork leaves the process on the
+        // BRANCH's transcript while this key still names the parent. Reusing it
+        // would file the turn under the wrong conversation, which is worse than
+        // running it with stale options.
+        const drifted = servesADifferentConversation(session, sdkOptions);
 
-        if (changed.length > 0 && session.liveTaskIds.size === 0) {
+        if ((changed.length > 0 || drifted) && session.liveTaskIds.size === 0) {
           // Nothing to protect. The pre-pool behaviour closed at turn end anyway,
           // so a clean recreate costs nothing and is the only way to honour EVERY
           // option — including the ones no control request can change.
@@ -835,8 +910,17 @@ export const claudeSessionPool = {
           session.currentTurn = null;
           destroy(session);
           session = undefined;
-        } else if (changed.length > 0) {
-          const unappliable = differingFields(RECREATE_ONLY_OPTION_FIELDS, session.optionSnapshot, nextSnapshot);
+        } else if (changed.length > 0 || drifted) {
+          // Reached only when background work forbids the recreate. A drifted
+          // conversation cannot be fixed by any control request, so this reports
+          // it and runs on — the same warn-and-skip contract as an unappliable
+          // option field. `queryClaudeSDK` refuses the turn before it ever gets
+          // here; a caller that does not is choosing the lesser of two evils and
+          // is told so.
+          const unappliable = [
+            ...differingFields(RECREATE_ONLY_OPTION_FIELDS, session.optionSnapshot, nextSnapshot),
+            ...(drifted ? [CONVERSATION_DRIFT_REASON] : []),
+          ];
           if (unappliable.length > 0) {
             console.warn('[ClaudeSessionPool] keeping the live process for its background work, so these option changes cannot take effect until it closes', {
               appSessionId,
@@ -895,24 +979,30 @@ export const claudeSessionPool = {
   },
 
   /**
-   * Which `RECREATE_ONLY_OPTION_FIELDS` this turn would need a FRESH process to
-   * honour, given the process currently live for `appSessionId`. Empty when
-   * there is no live process (nothing to be stale against) or nothing differs.
+   * Everything about this turn that the process currently live for
+   * `appSessionId` cannot honour: the `RECREATE_ONLY_OPTION_FIELDS` that differ,
+   * plus `CONVERSATION_DRIFT_REASON` when the process is no longer on the
+   * conversation the turn continues. Empty when there is no live process
+   * (nothing to be stale against) or nothing differs.
    *
    * Read-only: it answers the question, it does not act on it. The caller
-   * decides what an unhonourable field means, because that depends on what the
-   * field is — `runTurn` recreates for it when nothing is at stake, and
+   * decides what each reason means, because that depends on the reason —
+   * `runTurn` recreates for any of them when nothing is at stake, and
    * `queryClaudeSDK` refuses the turn for the subset where running anyway would
-   * silently do something else. The comparison lives here because the snapshot
-   * semantics do (normalization, and which fields creation already consumed);
-   * duplicating them in the caller is how the two drift apart.
+   * silently do something else. The comparisons live here because the state they
+   * read does (snapshot normalization, which fields creation consumed, and the
+   * announced provider id); duplicating them in the caller is how the two drift
+   * apart.
    */
-  pendingRecreateOnlyFields(appSessionId, sdkOptions) {
+  pendingFreshProcessReasons(appSessionId, sdkOptions) {
     const session = live.get(appSessionId);
     if (!session || session.dead) {
       return [];
     }
-    return differingFields(RECREATE_ONLY_OPTION_FIELDS, session.optionSnapshot, snapshotOptions(sdkOptions));
+    return [
+      ...differingFields(RECREATE_ONLY_OPTION_FIELDS, session.optionSnapshot, snapshotOptions(sdkOptions)),
+      ...(servesADifferentConversation(session, sdkOptions) ? [CONVERSATION_DRIFT_REASON] : []),
+    ];
   },
 
   /** Ids only — `liveTaskIds` also carries each task's label, which no caller wants. */

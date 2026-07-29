@@ -260,8 +260,21 @@ test('an edit-prompt fork on a session holding a background task is refused, and
 
   const error = refusal(ws);
   assert.ok(error, `expected a protocol_error frame, got ${JSON.stringify(ws.sent)}`);
-  assert.equal(error.code, 'SESSION_BUSY_BACKGROUND_TASK');
+  // A refused fork is now the EXPECTED outcome of this combination, so it has to
+  // join the fork flow's existing error contract — restore the edited text,
+  // restore the view, one message. `code === 'FORK_FAILED'` is the frontend's
+  // only route into it (`onForkFailed`, the sole caller of
+  // `restoreEditSentPrompt`), and it also clears `pendingForkRef`, which is what
+  // stops `onCompleteWithoutBranch` adding a second, contentless error row when
+  // our terminal `complete` lands. A code the frontend does not recognise would
+  // leave the user's edited paragraphs discarded from composer AND draft.
+  assert.equal(error.code, 'FORK_FAILED');
   assert.match(String(error.error), /edit|branch|fork/i);
+  assert.match(
+    String(error.error),
+    /background/i,
+    'whichever code carries it, the user must still be told it was the background task that blocked them',
+  );
   assert.deepEqual(ws.sent.map((frame) => frame.kind), ['protocol_error', 'complete']);
   assert.equal(runTurn.mock.callCount(), 0, 'appending the edited prompt to the tip is the bug, not the fallback');
   assert.deepEqual(claudeSessionPool.getLiveTaskIds('busy-fork'), ['bg-shell-1']);
@@ -419,6 +432,70 @@ test('the refusal reaches a real client through the gateway writer, addressed by
   assert.equal(frames[0].sessionId, 'busy-gateway', 'the frontend only ever knows the app session id');
   assert.equal(frames[1].sessionId, 'busy-gateway');
   assert.equal(frames[1].exitCode, 1);
+
+  claudeSessionPool._resetForTests();
+});
+
+test('an ordinary turn on a parent whose process drifted onto an edit-prompt fork is refused', async (t) => {
+  claudeSessionPool._resetForTests();
+  resetSdkState();
+
+  // Turn 1 is the edit-prompt fork: it runs under the PARENT's app session id
+  // (that is what makes it different from explicit /fork), resumes the parent's
+  // transcript, and the SDK announces the BRANCH's own provider id — so from
+  // here the live process is on the branch's conversation while the pool key
+  // still names the parent. It also backgrounds a shell, so the process cannot
+  // be closed.
+  const forkWs = createFakeWs();
+  await queryClaudeSDK(
+    'the edited prompt',
+    {
+      appSessionId: 'busy-drift',
+      sessionId: 'parent-provider',
+      cwd,
+      images: [],
+      model: 'sonnet',
+      permissionMode: 'bypassPermissions',
+      toolsSettings: { allowedTools: ['Bash'], disallowedTools: [], skipPermissions: false },
+      forkSession: true,
+      resumeSessionAt: 'anchor-uuid',
+    },
+    forkWs,
+  );
+  assert.equal(refusal(forkWs), undefined, 'the fork itself creates the process, so it must not be refused');
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('busy-drift'), ['bg-shell-1']);
+
+  const runTurn = t.mock.method(claudeSessionPool, 'runTurn');
+
+  // The user returns to the PARENT session in the sidebar and carries on there.
+  // No option field says anything is wrong — the only thing that does is the
+  // identity of the conversation the process is on. Running anyway writes this
+  // prompt and its answer into the FORK's transcript and leaves the parent's
+  // empty, which is the same class of silent wrongness as the two cases above.
+  const ws = createFakeWs();
+  await queryClaudeSDK(
+    'let\'s keep going here',
+    {
+      appSessionId: 'busy-drift',
+      sessionId: 'parent-provider',
+      cwd,
+      images: [],
+      model: 'sonnet',
+      permissionMode: 'bypassPermissions',
+      toolsSettings: { allowedTools: ['Bash'], disallowedTools: [], skipPermissions: false },
+    },
+    ws,
+  );
+
+  const error = refusal(ws);
+  assert.ok(error, `expected a protocol_error frame, got ${JSON.stringify(ws.sent)}`);
+  // NOT `FORK_FAILED`: this turn is not a fork request, and `onForkFailed` would
+  // push an unrelated parked edit back into the composer.
+  assert.equal(error.code, 'SESSION_BUSY_BACKGROUND_TASK');
+  assert.match(String(error.error), /branch|conversation/i);
+  assert.deepEqual(ws.sent.map((frame) => frame.kind), ['protocol_error', 'complete']);
+  assert.equal(runTurn.mock.callCount(), 0);
+  assert.deepEqual(claudeSessionPool.getLiveTaskIds('busy-drift'), ['bg-shell-1']);
 
   claudeSessionPool._resetForTests();
 });

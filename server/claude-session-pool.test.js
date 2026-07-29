@@ -2005,11 +2005,31 @@ function captureConsoleWarnings(t) {
   };
 }
 
+/**
+ * The two fork flows differ in a way that decides whether a fork-created
+ * process may be reused, and the difference is NOT visible in `forkSession`:
+ *
+ * - Explicit `/fork` runs under the FORK's own new app session id, so the pool
+ *   key and the process's conversation agree from then on. Reuse is correct.
+ * - The edit-prompt fork runs under the PARENT's app session id (the registry
+ *   deliberately keeps the parent's app-id→provider-id mapping and inserts a
+ *   separate branch row), so the process drifts onto the branch's transcript
+ *   while the pool key still names the parent. Reuse writes the parent's next
+ *   prompt into the fork's conversation.
+ *
+ * Both tests below therefore announce a provider session id and say which
+ * conversation their next turn asks to continue — that identity, not the
+ * `forkSession` flag, is what separates them.
+ */
 test('a fork-created session stops reporting its own consumed fork options as a pending change', async (t) => {
   claudeSessionPool._resetForTests();
   const warnings = captureConsoleWarnings(t);
   const { factory, state } = createFakeQuery([
-    [{ type: 'system', subtype: 'task_started', task_id: 'survivor' }, { type: 'result', subtype: 'success' }],
+    [
+      { type: 'system', subtype: 'init', session_id: 'fork-provider' },
+      { type: 'system', subtype: 'task_started', task_id: 'survivor' },
+      { type: 'result', subtype: 'success' },
+    ],
     [{ type: 'result', subtype: 'success' }],
   ]);
 
@@ -2020,6 +2040,7 @@ test('a fork-created session stops reporting its own consumed fork options as a 
     appSessionId: 'fork-consumed',
     userMessage: userMessage('branch here'),
     sdkOptions: {
+      resume: 'parent-provider',
       forkSession: true,
       resumeSessionAt: 'anchor-uuid',
       allowedTools: [],
@@ -2033,7 +2054,8 @@ test('a fork-created session stops reporting its own consumed fork options as a 
 
   assert.deepEqual(claudeSessionPool.getLiveTaskIds('fork-consumed'), ['survivor']);
 
-  // Turn 2 is an ORDINARY turn on the fork: it does not ask to fork again. The
+  // Turn 2 is an ORDINARY turn on the fork's OWN session — it continues the
+  // conversation the process is actually on, and does not ask to fork again. The
   // fork already happened, so there is nothing left to apply and nothing to
   // report — the snapshot used to keep `forkSession: true` forever and compare
   // every later turn as changed, warning on each one for the session's whole life.
@@ -2041,6 +2063,7 @@ test('a fork-created session stops reporting its own consumed fork options as a 
     appSessionId: 'fork-consumed',
     userMessage: userMessage('carry on'),
     sdkOptions: {
+      resume: 'fork-provider',
       allowedTools: [],
       disallowedTools: [],
       permissionMode: 'bypassPermissions',
@@ -2061,36 +2084,40 @@ test('a fork-created session stops reporting its own consumed fork options as a 
   claudeSessionPool.closeSession('fork-consumed');
 });
 
-test('a fork-created session with nothing to protect is not needlessly recreated on its next turn', async () => {
+test('an explicit /fork session with nothing to protect is not needlessly recreated on its next turn', async () => {
   claudeSessionPool._resetForTests();
   const { factory, invocations } = createCountingFakeQuery([
     [
-      // Turn 0 emits no `result` — what an interrupted turn looks like.
-      // Settling it by hand leaves the session live with no background work,
-      // which is the only way a task-free session survives a turn boundary.
-      [{ type: 'assistant', text: 'working' }],
+      // Turn 0 announces the fork's own provider id and emits no `result` — what
+      // an interrupted turn looks like. Settling it by hand leaves the session
+      // live with no background work, which is the only way a task-free session
+      // survives a turn boundary.
+      [{ type: 'system', subtype: 'init', session_id: 'fork-provider' }, { type: 'assistant', text: 'working' }],
       [{ type: 'result', subtype: 'success' }],
     ],
   ]);
 
   const turnOneStarted = createDeferred();
   const pending = claudeSessionPool.runTurn({
-    appSessionId: 'fork-consumed-idle',
+    // The fork's OWN app session id, which is what the /fork flow passes.
+    appSessionId: 'fork-own-key',
     userMessage: userMessage('branch here'),
-    sdkOptions: { forkSession: true, resumeSessionAt: 'anchor-uuid' },
+    sdkOptions: { resume: 'parent-provider', forkSession: true, resumeSessionAt: 'anchor-uuid' },
     onMessage: () => turnOneStarted.resolve(),
     onBetweenTurnMessage: () => {},
     createQuery: factory,
   });
 
   await turnOneStarted.promise;
-  assert.equal(claudeSessionPool.settleTurn('fork-consumed-idle', 'aborted'), true);
+  assert.equal(claudeSessionPool.settleTurn('fork-own-key', 'aborted'), true);
   await pending;
 
   await claudeSessionPool.runTurn({
-    appSessionId: 'fork-consumed-idle',
+    appSessionId: 'fork-own-key',
     userMessage: userMessage('carry on'),
-    sdkOptions: {},
+    // The fork's app row now maps to the fork's own provider id, so this turn
+    // continues exactly the conversation the live process is on.
+    sdkOptions: { resume: 'fork-provider' },
     onMessage: () => {},
     onBetweenTurnMessage: () => {},
     createQuery: factory,
@@ -2099,10 +2126,63 @@ test('a fork-created session with nothing to protect is not needlessly recreated
   assert.equal(
     invocations.length,
     1,
-    'the fork options were consumed at creation, so the next ordinary turn has nothing to recreate for',
+    'the fork options were consumed at creation and the process still serves this conversation, '
+    + 'so the next ordinary turn has nothing to recreate for',
   );
 
-  claudeSessionPool.closeSession('fork-consumed-idle');
+  claudeSessionPool.closeSession('fork-own-key');
+});
+
+test('an edit-prompt fork drifts its process onto the branch, so the PARENT\'s next turn must not reuse it', async () => {
+  claudeSessionPool._resetForTests();
+  const { factory, invocations } = createCountingFakeQuery([
+    [
+      // The edit-prompt fork resumes the parent but the SDK announces the
+      // BRANCH's own id — the one case where the provider session id changes
+      // mid-stream. From here the process is on the branch's transcript.
+      [{ type: 'system', subtype: 'init', session_id: 'branch-provider' }, { type: 'assistant', text: 'working' }],
+      [{ type: 'result', subtype: 'success' }],
+    ],
+    [[{ type: 'result', subtype: 'success' }]],
+  ]);
+
+  const turnOneStarted = createDeferred();
+  const pending = claudeSessionPool.runTurn({
+    // The PARENT's app session id: the edit-prompt fork runs under it.
+    appSessionId: 'edit-fork-parent',
+    userMessage: userMessage('the edited prompt'),
+    sdkOptions: { resume: 'parent-provider', forkSession: true, resumeSessionAt: 'anchor-uuid' },
+    onMessage: () => turnOneStarted.resolve(),
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  await turnOneStarted.promise;
+  assert.equal(claudeSessionPool.settleTurn('edit-fork-parent', 'aborted'), true);
+  await pending;
+
+  // The user goes back to the parent session in the sidebar and carries on
+  // there. `resume` still addresses the PARENT's transcript — but the live
+  // process is on the branch, and `resume` is ignored by a process that is
+  // already running, so reusing it would write this prompt and its answer into
+  // the fork's conversation and leave the parent's untouched.
+  await claudeSessionPool.runTurn({
+    appSessionId: 'edit-fork-parent',
+    userMessage: userMessage('let\'s keep going here'),
+    sdkOptions: { resume: 'parent-provider' },
+    onMessage: () => {},
+    onBetweenTurnMessage: () => {},
+    createQuery: factory,
+  });
+
+  assert.equal(
+    invocations.length,
+    2,
+    'the live process no longer serves this pool key\'s conversation, so it must be recreated',
+  );
+  assert.equal(invocations[0].closed, true, 'and the drifted process must actually be closed');
+
+  claudeSessionPool.closeSession('edit-fork-parent');
 });
 
 test('a session that is NOT forked still recreates when a fork is requested', async () => {
