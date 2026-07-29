@@ -248,6 +248,14 @@ const live = new Map();
  *   task announced by that tail be attributed correctly (see
  *   `ownerForNewlyStartedTask`). Same invariant `routeMessage`'s swallow branch
  *   already relies on, not a second guess about it.
+ *
+ *   The two readers of that one invariant fail in OPPOSITE directions, which is
+ *   what to keep in mind before relaxing it. `routeMessage`'s swallow branch is
+ *   fail-SAFE: "this frame may belong to the dead turn, so show it to nobody."
+ *   `ownerForNewlyStartedTask` is fail-ACTIVE: it asserts an owner, and that
+ *   owner is later handed the task's summary and its absolute output path. If the
+ *   invariant broke there the cost is not a missing row — it is one user's
+ *   background work, and the path to its output, described to a different user.
  */
 
 /**
@@ -328,6 +336,20 @@ function differingFields(fields, current, next) {
  * value EQUALS the id the process announced, so nothing looks changed. Both
  * sides must be known before a mismatch is claimed — a caller that asks for no
  * particular conversation is asking for the one it is already on.
+ *
+ * LOAD-BEARING ASSUMPTION: a non-fork resume run announces the id it RESUMED.
+ * That is what makes `requested !== actual` mean "drift" rather than "normal".
+ * True as of CLI 2.1.220 / SDK 0.3.165, and `sdk.d.ts` declares no message type
+ * carrying a foreign session id — but it is an assumption about someone else's
+ * process, not an invariant this code can enforce. If a future CLI ever answered
+ * `--resume <id>` with a fresh id of its own, `session.providerSessionId` would
+ * diverge from every later turn's `resume` value and this function would return
+ * true forever. The symptom is specific enough to recognise from a single bug
+ * report: EVERY turn on a session that holds a background shell refused with the
+ * drift sentence ("has moved on to a branch of the conversation…" in
+ * `describeHeldProcessRefusal`), while the same session with no background work
+ * silently recreates its process on every single turn. If that ever shows up,
+ * check this assumption before anything else.
  */
 function servesADifferentConversation(session, sdkOptions) {
   const requested = sdkOptions?.resume;
@@ -713,6 +735,23 @@ function trackTask(session, message) {
  * CLI serialises turns, so everything up to and including the owed terminator
  * belongs to the turn that owes it. That is the same invariant `routeMessage`'s
  * swallow branch is built on. Oldest debt first, for the same reason.
+ *
+ * But read in the FAIL-ACTIVE direction, unlike that swallow branch. Swallowing
+ * shows a frame to nobody; this ASSERTS an owner, who is then handed the task's
+ * summary and its absolute output path (`forwardBetweenTurnMessage` →
+ * `emitBackgroundTaskEvent`, addressed to `ownerUserId`). A wrong answer here is
+ * therefore not a missing notification but a misdirected one — one user's
+ * background work described to another, which is the exact exposure per-task
+ * ownership was introduced to close.
+ *
+ * The apparently safer alternative — record `null` whenever a debt stands, so an
+ * uncertain owner is nobody's — was considered and rejected: `null` means
+ * "unknown owner", which the caller broadcasts to nobody, so the ABORTED user
+ * would lose the notification for the background shell their own turn started.
+ * That is the very bug attribution exists to fix, in a milder form: silence
+ * instead of misdirection. The debt is not an uncertain owner, it is a KNOWN one
+ * (the turn that owes the terminator), so recording it is the accurate answer,
+ * not the risky one.
  */
 function ownerForNewlyStartedTask(session) {
   if (session.owedTerminators.length > 0) {

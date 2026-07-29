@@ -263,8 +263,9 @@ test command must include `--experimental-test-module-mocks`. Without it the fil
 
 ## Amendments after implementation (2026-07-28)
 
-Three claims in this spec turned out to be wrong once the code met reality. Recorded here so the
-document does not misdescribe what shipped.
+Claims in this spec that turned out to be wrong once the code met reality, plus the mechanisms that
+had to be added and are described nowhere above. Recorded here so the document does not misdescribe
+what shipped.
 
 **1. The WebSocket layer was NOT untouched.** This spec claimed the `spawnFn` contract would not
 change and the websocket layer would keep working as-is. In fact `options.sessionId` carries the
@@ -348,6 +349,36 @@ CLI decides before consulting us, as the table's first row shows) and that closi
 process is the only complete fix (`applyFlagSettings()` exists in this SDK and is verified to
 enforce). Implemented in the final-review fix round.
 
+**5. Option fields could not see an edit-prompt fork drifting the process off its own key.** The
+edit-prompt fork runs under the PARENT's `appSessionId` — the pool key — but the SDK announces the
+branch's own provider session id mid-stream, so the process ends that turn serving the BRANCH while
+the key still names the parent. `resume` is a spawn argument a running process ignores, and no option
+field records the drift, so the parent's next turn would have been filed under the branch's
+transcript. `servesADifferentConversation` (`server/claude-session-pool.js`) closes it by comparing
+the requested `resume` id against the id the process last announced: mismatch ⇒ recreate, or refuse
+the turn when background work forbids recreating.
+
+That comparison rests on one **load-bearing assumption about the CLI**: a non-fork resume run
+announces the id it RESUMED. True as of CLI 2.1.220 / SDK 0.3.165, and `sdk.d.ts` declares no message
+type carrying a foreign session id — but it is not an invariant this code can enforce. If a future
+CLI ever answered `--resume <id>` with a fresh id of its own, the recorded provider id would diverge
+from every later turn's `resume` value and the check would return true forever. The symptom would be
+severe and specific enough to recognise from a single bug report: **every turn on a session holding a
+background shell refused with the drift sentence** ("has moved on to a branch of the conversation"),
+while the same session with no background work silently recreated its process on every single turn.
+Check this assumption first if those refusals ever appear.
+
+**Attributing a background task to a user is fail-ACTIVE, deliberately.** A task is stamped with the
+owner of the turn that started it, and when the abort backstop has already vacated the turn slot the
+owner is taken from the oldest outstanding terminator debt (`ownerForNewlyStartedTask`) — the turn
+still unwinding inside the CLI, since a single-conversation CLI serialises turns. That is the same
+invariant the swallow branch in `routeMessage` uses, but read in the opposite direction: swallowing
+shows a frame to nobody, whereas this asserts an owner who is then handed the task's summary and its
+absolute output path. The safer-looking alternative — record `null` (unknown owner) whenever a debt
+stands — was rejected because `null` reaches nobody, so the aborted user would lose the notification
+for the background shell their own turn started: the bug attribution exists to fix, in the milder form
+of silence instead of misdirection.
+
 ## Accepted risks
 
 **Unbounded retention while a background task never terminates.** Decided deliberately, not
@@ -368,9 +399,32 @@ decisions*), so a genuinely memory-starved box sheds tasks and the loss is repor
 `background_task` frame rather than hidden; and the user can stop a task deliberately
 (`stopTask()` — verified working, exposed by a UI that is an explicit non-goal here).
 
-The agreed follow-up is to **warn**, not evict: surface to the user when a session has been held for
-a long time, so they can decide whether the task is still wanted. Tracked separately; the decision
-recorded here is that eviction is off the table.
+The agreed follow-up was to **warn**, not evict, and it has since shipped (`reportLongHeldTasks`,
+`server/claude-session-pool.js`). While a session is holding its process for tracked tasks, a
+periodic check (`HOLD_CHECK_INTERVAL_MS`, 60 s) re-examines the hold; once a task has held it past
+`HOLD_WARN_AFTER_MS` (10 minutes) it is reported **once** — a `console.warn` naming every held task
+and how long each has been held, for the operator, and a `background_task` advisory with
+`status: 'running'` for the user who started it. The advisory is per task, not per check or per
+session, so a long hold does not turn into a minute-by-minute stream of noise; ambient
+`skip_transcript` housekeeping is counted for the operator but gets no user-facing row.
+
+It still never evicts, closes, recreates or re-times anything: the decision recorded here is that
+eviction is off the table, and the check is a pure observer of it. A periodic check rather than a
+one-shot timer because nothing else ever reconsiders a hold — `closeIfIdle` clears the idle timer
+while tasks are tracked and only an emptied task set re-arms it, so a task that never emits a
+terminal frame (wedged, killed out of band, or a shape we mis-track) used to leave the process held
+with no mechanism scheduled to notice, for the life of the server. The gap that was closed is not
+the unbounded hold — that is accepted — it is that the hold used to be **invisible**.
+
+**An aborted turn keeps its process for the idle grace period even with no background work.**
+Deliberate, and not to be "optimised": the reason for the grace is that a `task_started` the CLI has
+already sent may still be sitting unrouted in the SDK's async iterator, invisible to any check made
+from outside the pool's drain loop (see amendment 3, and goal 5's bounded exception). So abort only
+settles the turn and arms the deferred idle check, which re-reads live-task state when it fires, from
+inside the drain loop's own ordering. The cost is one ~320 MB process held for up to 60 s after an
+abort, released automatically and never accumulating. **Document it; do not change it** — shortening
+or removing the grace reopens exactly the race this design closed, in which abort kills a background
+task that had just started.
 
 **Unmeasured interaction with the user's own `settings.json`.** ccui spawns with
 `settingSources = ['project', 'user', 'local']` (`server/claude-sdk.js:262`), so a freshly spawned
