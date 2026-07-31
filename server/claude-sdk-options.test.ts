@@ -63,6 +63,18 @@ test('enables fork-subagent and disables background tasks when forkSubagent is r
   assert.equal(sdkOptions.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT, '1');
 });
 
+test('applies default tool settings when toolsSettings is omitted', () => {
+  const sdkOptions = mapCliOptionsToSDK({
+    sessionId: null,
+    cwd: process.cwd(),
+    permissionMode: 'default',
+  });
+
+  assert.equal(sdkOptions.env.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT, '1');
+  assert.ok(sdkOptions.allowedTools.includes('Agent'));
+  assert.ok(sdkOptions.allowedTools.includes('Task'));
+});
+
 test('always allowlists the subagent dispatch tool (both names)', () => {
   const sdkOptions = mapCliOptionsToSDK({
     sessionId: null,
