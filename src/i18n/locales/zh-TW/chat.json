@@ -117,12 +117,7 @@
     "clickToChangeMode": "點擊變更權限模式（或在輸入框中按 Tab）",
     "showAllCommands": "顯示所有指令",
     "clearInput": "清空輸入",
-    "scrollToBottom": "捲動到底部",
-    "editSentPrompt": {
-      "banner": "Editing a sent prompt — the new branch only rewinds the conversation. Code changes after this point are kept (see the Git tab).",
-      "cancel": "Cancel",
-      "dismiss": "Dismiss"
-    }
+    "scrollToBottom": "捲動到底部"
   },
   "thinkingMode": {
     "selector": {
@@ -256,18 +251,5 @@
   },
   "tasks": {
     "nextTaskPrompt": "開始下一個任務"
-  },
-  "branch": {
-    "editTitle": "Edit & fork from here",
-    "editAria": "Edit this prompt and fork the conversation",
-    "previous": "Previous branch",
-    "next": "Next branch",
-    "editLabel": "Edit",
-    "groupAria": "Conversation versions",
-    "announced": "Showing version {{current}} of {{total}}",
-    "forkFailed": "Could not fork the conversation.",
-    "forkFailedRestored": "Could not fork the conversation. Your edited prompt is back in the composer.",
-    "switchFailed": "Could not switch versions. Please try again.",
-    "editBlockedWhileRunning": "Wait for the current response to finish before editing a prompt."
   }
 }

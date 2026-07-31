@@ -95,6 +95,7 @@ import zhTWTasks from './locales/zh-TW/tasks.json';
 
 // Import supported languages configuration
 import { languages } from './languages.js';
+import { registerForkNamespace } from './forkNamespace.js';
 
 // Get saved language preference from localStorage
 const getSavedLanguage = () => {
@@ -244,6 +245,7 @@ i18n
       caches: ['localStorage'],
     },
   });
+registerForkNamespace(i18n);
 
 // Save language preference when it changes
 i18n.on('languageChanged', (lng) => {

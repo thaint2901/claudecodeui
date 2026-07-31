@@ -70,7 +70,7 @@ function ChatInterface({
 }: ChatInterfaceProps) {
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
   const { subscribe } = useWebSocket();
-  const { t } = useTranslation('chat');
+  const { t } = useTranslation(['chat', 'fork']);
 
   const sessionStore = useSessionStore();
   // Keyed by session id: concurrent sessions can stream at the same time, so a
@@ -283,7 +283,7 @@ function ChatInterface({
   // every switch and a live region inserted together with its text is not
   // reliably announced), and which pager may take focus back afterwards.
   const formatBranchAnnouncement = useCallback(
-    (current: number, total: number) => t('branch.announced', { current, total }),
+    (current: number, total: number) => t('fork:branch.announced', { current, total }),
     [t],
   );
   const {
@@ -337,7 +337,7 @@ function ChatInterface({
         abortBranchSwitch(request);
         // Without this the transcript, the counter and the focus are all
         // unchanged, so the chevron reads as a dead button.
-        setForkError(t('branch.switchFailed'));
+        setForkError(t('fork:branch.switchFailed'));
         if (currentSessionId) {
           void fetchBranches(currentSessionId, () => currentSessionIdRef.current === currentSessionId);
         }
@@ -372,7 +372,7 @@ function ChatInterface({
       // A claim made just above must not outlive the refresh that threw, or it
       // waits for whatever pager mounts next and steals focus into it.
       abortBranchSwitch(request);
-      setForkError(t('branch.switchFailed'));
+      setForkError(t('fork:branch.switchFailed'));
       if (currentSessionId) {
         void fetchBranches(currentSessionId, () => currentSessionIdRef.current === currentSessionId);
       }
@@ -527,7 +527,7 @@ function ChatInterface({
     // loud in the composer, because a click that silently does nothing reads
     // as a broken button.
     if (isProcessingRef.current) {
-      setForkError(t('branch.editBlockedWhileRunning'));
+      setForkError(t('fork:branch.editBlockedWhileRunning'));
       return;
     }
     setForkError(null);
@@ -619,8 +619,8 @@ function ChatInterface({
     const restored = restoreEditSentPrompt();
     setForkError(
       restored
-        ? t('branch.forkFailedRestored', { defaultValue: 'Could not fork the conversation. Your edited prompt is back in the composer.' })
-        : t('branch.forkFailed', { defaultValue: 'Could not fork the conversation.' }),
+        ? t('fork:branch.forkFailedRestored', { defaultValue: 'Could not fork the conversation. Your edited prompt is back in the composer.' })
+        : t('fork:branch.forkFailed', { defaultValue: 'Could not fork the conversation.' }),
     );
   }, [clearForkView, restoreEditSentPrompt, t]);
 

@@ -117,12 +117,7 @@
     "clickToChangeMode": "Clicca per cambiare modalità permessi (o premi Tab nell'input)",
     "showAllCommands": "Mostra tutti i comandi",
     "clearInput": "Cancella input",
-    "scrollToBottom": "Scorri in basso",
-    "editSentPrompt": {
-      "banner": "Editing a sent prompt — the new branch only rewinds the conversation. Code changes after this point are kept (see the Git tab).",
-      "cancel": "Cancel",
-      "dismiss": "Dismiss"
-    }
+    "scrollToBottom": "Scorri in basso"
   },
   "providerSelection": {
     "title": "Scegli il tuo assistente AI",
@@ -220,18 +215,5 @@
   },
   "tasks": {
     "nextTaskPrompt": "Inizia l'attività successiva"
-  },
-  "branch": {
-    "editTitle": "Edit & fork from here",
-    "editAria": "Edit this prompt and fork the conversation",
-    "previous": "Previous branch",
-    "next": "Next branch",
-    "editLabel": "Edit",
-    "groupAria": "Conversation versions",
-    "announced": "Showing version {{current}} of {{total}}",
-    "forkFailed": "Could not fork the conversation.",
-    "forkFailedRestored": "Could not fork the conversation. Your edited prompt is back in the composer.",
-    "switchFailed": "Could not switch versions. Please try again.",
-    "editBlockedWhileRunning": "Wait for the current response to finish before editing a prompt."
   }
 }

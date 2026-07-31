@@ -59,7 +59,7 @@ type InteractiveOption = {
 const COPY_HIDDEN_TOOL_NAMES = new Set(['Bash', 'Edit', 'Write', 'ApplyPatch']);
 
 const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider, canEditPrompt, onEditPrompt, renderBranchSwitcher }: MessageComponentProps) => {
-  const { t } = useTranslation('chat');
+  const { t } = useTranslation(['chat', 'fork']);
   const isGrouped = prevMessage && prevMessage.type === message.type &&
     ((prevMessage.type === 'assistant') ||
       (prevMessage.type === 'user') ||
@@ -166,16 +166,16 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
             <span className="flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
               {canEditPrompt && message.uuid && onEditPrompt && (
                 <>
-                  <Tooltip content={t('branch.editTitle')} position="top">
+                  <Tooltip content={t('fork:branch.editTitle')} position="top">
                     <Button
                       type="button"
                       variant="ghost"
                       onClick={handleEditPromptClick}
-                      aria-label={t('branch.editAria')}
+                      aria-label={t('fork:branch.editAria')}
                       className="tap-target h-6 gap-1 rounded px-1.5 py-0 text-[11px] font-medium [&_svg]:size-3"
                     >
                       <Pencil aria-hidden />
-                      {t('branch.editLabel')}
+                      {t('fork:branch.editLabel')}
                     </Button>
                   </Tooltip>
                   <span aria-hidden className="mx-0.5 h-3 w-px shrink-0 bg-border" />

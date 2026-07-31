@@ -72,7 +72,7 @@ export function BranchSwitcher({
   nextSessionId,
   onSwitch,
 }: BranchSwitcherProps) {
-  const { t } = useTranslation('chat');
+  const { t } = useTranslation(['chat', 'fork']);
 
   const atStart = current <= 1;
   const atEnd = current >= total;
@@ -116,7 +116,7 @@ export function BranchSwitcher({
     <div
       role="group"
       {...{ [PAGER_ANCHOR_ATTRIBUTE]: anchor }}
-      aria-label={t('branch.groupAria')}
+      aria-label={t('fork:branch.groupAria')}
       className="inline-flex items-center gap-0.5 rounded-full border border-border/60 bg-muted/40 px-1 py-0.5"
     >
       <Button
@@ -125,7 +125,7 @@ export function BranchSwitcher({
         {...{ [PAGER_ARROW_ATTRIBUTE]: 'prev' }}
         onClick={handlePrev}
         aria-disabled={atStart}
-        aria-label={t('branch.previous')}
+        aria-label={t('fork:branch.previous')}
         className={`tap-target h-6 w-6 rounded-full p-0 [&_svg]:size-3.5 ${atStart ? 'cursor-default opacity-40 hover:bg-transparent' : ''}`}
       >
         <ChevronLeft aria-hidden />
@@ -147,7 +147,7 @@ export function BranchSwitcher({
         {...{ [PAGER_ARROW_ATTRIBUTE]: 'next' }}
         onClick={handleNext}
         aria-disabled={atEnd}
-        aria-label={t('branch.next')}
+        aria-label={t('fork:branch.next')}
         className={`tap-target h-6 w-6 rounded-full p-0 [&_svg]:size-3.5 ${atEnd ? 'cursor-default opacity-40 hover:bg-transparent' : ''}`}
       >
         <ChevronRight aria-hidden />
