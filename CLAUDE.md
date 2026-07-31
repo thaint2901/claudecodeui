@@ -135,9 +135,9 @@ Plugins can ship a frontend (tabs) and an optional Node.js backend. Discovery + 
 
 ## Fork Maintenance
 
-This repo is a long-lived fork (159 commits ahead of upstream as of 2026-07-31); these rules minimize the upstream conflict surface. Full rationale: `docs/adr/ADR-0001-fork-customization-strategy.md`.
+This repo is a long-lived fork (96 commits ahead of upstream as of 2026-07-31); these rules minimize the upstream conflict surface. Full rationale: `docs/adr/ADR-0001-fork-customization-strategy.md`.
 
-- **Fork-owned files.** New fork logic lives in new files the fork owns; an upstream-owned file receives at most an import plus a ≤2-line call site. Litmus: if `git log --oneline <file> | head` is mostly fork commits on an upstream file, extraction is overdue (current worst: `ChatInterface.tsx`, 24 fork edits vs 9 upstream).
+- **Fork-owned files.** New fork logic lives in new files the fork owns; an upstream-owned file receives at most an import plus a ≤2-line call site. Litmus: if `git log --oneline <file> | head` is mostly fork commits on an upstream file, extraction is overdue (current worst: `ChatInterface.tsx`, 9 fork edits since the merge-base vs 32 upstream edits within upstream's last 60 commits).
 - **i18n namespace.** New fork-feature translation keys go in a `fork.json` namespace per locale, never appended to upstream's `chat.json`/`settings.json` (the namespace lands in a later PR; the rule binds from now).
 - **Upstream sync protocol.** `git rerere` enabled; preview merges with `git merge-tree --write-tree --messages <base> <ours> <theirs>` before merging; diff the file list (`git diff --stat`) of upstream pulls, never trust commit subjects alone (upstream has removed whole features in innocuously-named PRs).
 
