@@ -1,5 +1,6 @@
 /**
- * Fork-owned i18n namespace registration (ADR-0001 Rule 2).
+ * Fork-owned i18n namespace registration (CLAUDE.md Fork Maintenance Rule 2;
+ * recorded as Decision item 3 in docs/adr/ADR-0001-fork-customization-strategy.md).
  *
  * All fork-feature translation keys live in fork.json per locale, never in
  * upstream's chat.json/settings.json. This module is the single registration
@@ -35,6 +36,7 @@ const forkResources = {
  * Registers the fork namespace on an initialized i18next instance.
  * addResourceBundle marks the namespace as loaded, so useTranslation(['chat', 'fork'])
  * resolves synchronously with the static-resources setup config.js uses.
+ * @param {import('i18next').i18n} i18nInstance - an initialized i18next instance
  */
 export function registerForkNamespace(i18nInstance) {
   for (const [lng, bundle] of Object.entries(forkResources)) {
