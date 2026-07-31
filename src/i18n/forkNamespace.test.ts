@@ -64,3 +64,13 @@ test('fork.json values are all non-empty strings', () => {
     assertNonEmptyStrings(loadLocaleFile(locale, 'fork.json'), `${locale}/fork.json`);
   }
 });
+
+test('upstream chat.json no longer contains fork-owned key groups', () => {
+  for (const locale of ALL_LOCALES) {
+    const chat = loadLocaleFile(locale, 'chat.json');
+    assert.ok(!('branch' in chat), `${locale}/chat.json still has the branch group`);
+    assert.ok(!('sessionLock' in chat), `${locale}/chat.json still has the sessionLock group`);
+    const input = (chat.input ?? {}) as Record<string, unknown>;
+    assert.ok(!('editSentPrompt' in input), `${locale}/chat.json still has input.editSentPrompt`);
+  }
+});

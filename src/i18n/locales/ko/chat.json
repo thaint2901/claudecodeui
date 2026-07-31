@@ -117,12 +117,7 @@
     "clickToChangeMode": "클릭하여 권한 모드 변경 (또는 입력창에서 Tab)",
     "showAllCommands": "모든 명령어 보기",
     "clearInput": "입력 지우기",
-    "scrollToBottom": "맨 아래로 스크롤",
-    "editSentPrompt": {
-      "banner": "Editing a sent prompt — the new branch only rewinds the conversation. Code changes after this point are kept (see the Git tab).",
-      "cancel": "Cancel",
-      "dismiss": "Dismiss"
-    }
+    "scrollToBottom": "맨 아래로 스크롤"
   },
   "providerSelection": {
     "title": "AI 어시스턴트 선택",
@@ -220,18 +215,5 @@
   },
   "tasks": {
     "nextTaskPrompt": "다음 작업 시작"
-  },
-  "branch": {
-    "editTitle": "Edit & fork from here",
-    "editAria": "Edit this prompt and fork the conversation",
-    "previous": "Previous branch",
-    "next": "Next branch",
-    "editLabel": "Edit",
-    "groupAria": "Conversation versions",
-    "announced": "Showing version {{current}} of {{total}}",
-    "forkFailed": "Could not fork the conversation.",
-    "forkFailedRestored": "Could not fork the conversation. Your edited prompt is back in the composer.",
-    "switchFailed": "Could not switch versions. Please try again.",
-    "editBlockedWhileRunning": "Wait for the current response to finish before editing a prompt."
   }
 }

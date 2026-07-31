@@ -117,12 +117,7 @@
     "clickToChangeMode": "Klicken, um den Berechtigungsmodus zu ändern (oder Tab in der Eingabe drücken)",
     "showAllCommands": "Alle Befehle anzeigen",
     "clearInput": "Eingabe leeren",
-    "scrollToBottom": "Nach unten scrollen",
-    "editSentPrompt": {
-      "banner": "Editing a sent prompt — the new branch only rewinds the conversation. Code changes after this point are kept (see the Git tab).",
-      "cancel": "Cancel",
-      "dismiss": "Dismiss"
-    }
+    "scrollToBottom": "Nach unten scrollen"
   },
   "providerSelection": {
     "title": "KI-Assistent wählen",
@@ -220,18 +215,5 @@
   },
   "tasks": {
     "nextTaskPrompt": "Nächste Aufgabe starten"
-  },
-  "branch": {
-    "editTitle": "Edit & fork from here",
-    "editAria": "Edit this prompt and fork the conversation",
-    "previous": "Previous branch",
-    "next": "Next branch",
-    "editLabel": "Edit",
-    "groupAria": "Conversation versions",
-    "announced": "Showing version {{current}} of {{total}}",
-    "forkFailed": "Could not fork the conversation.",
-    "forkFailedRestored": "Could not fork the conversation. Your edited prompt is back in the composer.",
-    "switchFailed": "Could not switch versions. Please try again.",
-    "editBlockedWhileRunning": "Wait for the current response to finish before editing a prompt."
   }
 }
