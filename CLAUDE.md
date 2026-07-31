@@ -31,7 +31,7 @@ npm start                # build then start
 npm run release
 ```
 
-Every `.test.js` / `.test.ts` file (e.g. `server/opencode-cli.test.js`, `server/modules/**/tests/`, `server/routes/tests/`, `src/components/chat/utils/*.test.ts`) uses `node:test` + `node:assert/strict`. `npm test` runs both tiers; `npm run test:server` / `npm run test:client` / `npm run test:coverage` also exist. Run a single file with `npx tsx --test --experimental-test-module-mocks --tsconfig server/tsconfig.json <path>`.
+Every `.test.js` / `.test.ts` file (e.g. `server/opencode-cli.test.js`, `server/modules/**/tests/`, `server/routes/tests/`, `src/components/chat/utils/*.test.ts`) uses `node:test` + `node:assert/strict`. `npm test` runs both tiers; `npm run test:server` / `npm run test:client` / `npm run test:coverage` also exist. Run a single file with `npx tsx --test --experimental-test-module-mocks --tsconfig server/tsconfig.json <path>` for `server/**` files (its `@/*` → `server/*`), or `npx tsx --test --tsconfig tsconfig.json <path>` for `src/**` files (its `@/*` → `src/*`; no `--experimental-test-module-mocks` needed).
 
 **Docker sandbox templates** live in `docker/{claude-code,codex}/Dockerfile` and are published as `docker.io/cloudcliai/sandbox:*`. See `docker/README.md` for the `sbx` workflow.
 
