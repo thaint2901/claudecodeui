@@ -57,7 +57,7 @@ type Announcement = { text: string; nonce: number };
 type UseBranchSwitchControllerArgs = {
   /** The session currently in view; a change to it resets everything. */
   currentSessionId: string | null;
-  /** Formats the spoken position, e.g. i18n `branch.announced`. */
+  /** Formats the spoken position, e.g. i18n `fork:branch.announced`. */
   formatAnnouncement: (current: number, total: number) => string;
 };
 

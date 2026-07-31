@@ -203,7 +203,7 @@ export default function ChatComposer({
   forkError,
   onDismissForkError,
 }: ChatComposerProps) {
-  const { t } = useTranslation('chat');
+  const { t } = useTranslation(['chat', 'fork']);
   const commandMenuPosition = useMemo(() => {
     if (!isCommandMenuOpen) {
       return { top: 0, left: 16, bottom: 90 };
@@ -367,7 +367,7 @@ export default function ChatComposer({
             <AlertDescription className="flex items-center justify-between gap-2">
               <span>{forkError}</span>
               <button type="button" onClick={onDismissForkError} className="underline">
-                {t('input.editSentPrompt.dismiss', { defaultValue: 'Dismiss' })}
+                {t('fork:editSentPrompt.dismiss', { defaultValue: 'Dismiss' })}
               </button>
             </AlertDescription>
           </Alert>
@@ -378,9 +378,9 @@ export default function ChatComposer({
         <div className="mx-auto mb-3 max-w-[54.25rem]">
           <Alert>
             <AlertDescription className="flex items-center justify-between gap-2">
-              <span>{t('input.editSentPrompt.banner')}</span>
+              <span>{t('fork:editSentPrompt.banner')}</span>
               <button type="button" onClick={onCancelEditSentPrompt} className="underline">
-                {t('input.editSentPrompt.cancel')}
+                {t('fork:editSentPrompt.cancel')}
               </button>
             </AlertDescription>
           </Alert>

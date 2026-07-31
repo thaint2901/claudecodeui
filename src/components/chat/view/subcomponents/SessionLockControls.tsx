@@ -17,7 +17,7 @@ import { Button } from '../../../../shared/view/ui/Button';
  * background.
  */
 export function SessionLockBanner(): React.ReactElement {
-  const { t } = useTranslation('chat');
+  const { t } = useTranslation(['chat', 'fork']);
   return (
     <Alert
       data-testid="session-lock-banner"
@@ -25,7 +25,7 @@ export function SessionLockBanner(): React.ReactElement {
     >
       <TriangleAlert aria-hidden="true" className="text-amber-600 dark:text-amber-400" />
       <AlertDescription className="text-amber-900 dark:text-amber-200">
-        {t('sessionLock.bannerText')}
+        {t('fork:sessionLock.bannerText')}
       </AlertDescription>
     </Alert>
   );
@@ -47,8 +47,8 @@ interface SessionLockStopButtonProps {
  * wrap or crowd the token/message-count controls on narrow viewports.
  */
 export function SessionLockStopButton({ onClick, isStopping }: SessionLockStopButtonProps): React.ReactElement {
-  const { t } = useTranslation('chat');
-  const label = isStopping ? t('sessionLock.stopping') : t('sessionLock.stopAndResume');
+  const { t } = useTranslation(['chat', 'fork']);
+  const label = isStopping ? t('fork:sessionLock.stopping') : t('fork:sessionLock.stopAndResume');
 
   return (
     <Button
