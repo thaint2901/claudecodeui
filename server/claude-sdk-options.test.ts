@@ -95,7 +95,7 @@ test('does not duplicate Agent when user already allowlisted it', () => {
     permissionMode: 'default',
   });
 
-  assert.equal(sdkOptions.allowedTools.filter((tool: string) => tool === 'Agent').length, 1);
+  assert.equal(sdkOptions.allowedTools.filter((tool) => tool === 'Agent').length, 1);
   assert.ok(sdkOptions.allowedTools.includes('Bash'));
 });
 
