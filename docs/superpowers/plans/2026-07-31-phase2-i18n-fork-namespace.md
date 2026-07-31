@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Move all fork-added translation keys out of upstream's `chat.json` into a fork-owned `fork.json` namespace per locale, eliminating the i18n add/add conflict surface with upstream (ADR-0001 Rule 2).
+**Goal:** Move all fork-added translation keys out of upstream's `chat.json` into a fork-owned `fork.json` namespace per locale, eliminating the i18n add/add conflict surface with upstream (CLAUDE.md Fork Maintenance Rule 2; ADR-0001 Decision item 3).
 
 **Architecture:** A new `fork` i18next namespace backed by `src/i18n/locales/<locale>/fork.json` files. A fork-owned module `src/i18n/forkNamespace.js` registers the namespace via `i18n.addResourceBundle()` after init, so upstream-owned `src/i18n/config.js` changes by exactly 2 lines (import + call — Fork Maintenance Rule 1). Consumer components switch migrated keys to the explicit `fork:` prefix for grep-ability. A leaf `node:test` guard enforces structure and purity forever.
 
@@ -150,7 +150,7 @@ Create `src/i18n/forkNamespace.js` (plain JSON imports — same idiom as config.
 
 ```js
 /**
- * Fork-owned i18n namespace registration (ADR-0001 Rule 2).
+ * Fork-owned i18n namespace registration (CLAUDE.md Fork Maintenance Rule 2).
  *
  * All fork-feature translation keys live in fork.json per locale, never in
  * upstream's chat.json/settings.json. This module is the single registration

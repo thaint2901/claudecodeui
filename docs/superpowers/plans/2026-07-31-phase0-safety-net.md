@@ -1,5 +1,7 @@
 # Phase 0+1: Test safety net + fork-maintenance standards
 
+> **Correction (2026-07-31, post-review):** the divergence figures quoted below in Tasks 4-5 (159 commits ahead, 73 overlap files, ChatInterface 24-vs-9) were measured on local `main`'s merge-inflated DAG and are wrong. The shipped CLAUDE.md/ADR-0001 carry the corrected numbers (96 / 37 / 9-vs-32) plus the exact measurement commands — `docs/adr/ADR-0001-fork-customization-strategy.md` is authoritative. This plan is kept unedited below as the historical execution record.
+
 Goal: make the existing test suite runnable and green via `npm test`, correct two false claims in CLAUDE.md, and codify the fork-customization strategy (ADR-0001 + CLAUDE.md section). This is the enabler PR for the refactor sequence — no product runtime code changes.
 
 Baseline (measured 2026-07-31 on b9a6f50): server suite 228 pass / 3 fail in 44 files; client suite 69 pass / 1 crashing file (9 files). All 53 test files use `node:test` + `node:assert/strict`. There is no `npm test` script. Failures are stale tests, not product bugs.
