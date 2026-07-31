@@ -34,7 +34,7 @@ test('renameSessionById updates the DB and writes back a custom-title event for 
 
       const result = await sessionsService.renameSessionById('app-rename-1', 'New name from webui');
 
-      assert.deepEqual(result, { sessionId: 'app-rename-1', summary: 'New name from webui' });
+      assert.deepEqual(result, { sessionId: 'app-rename-1', summary: 'New name from webui', writeBack: true });
       assert.equal(sessionsDb.getSessionById('app-rename-1')?.custom_name, 'New name from webui');
 
       const contents = await readFile(transcriptPath, 'utf8');
@@ -64,7 +64,7 @@ test('renameSessionById still succeeds when the session has no transcript on dis
 
       const result = await sessionsService.renameSessionById('app-rename-2', 'Still renamed');
 
-      assert.deepEqual(result, { sessionId: 'app-rename-2', summary: 'Still renamed' });
+      assert.deepEqual(result, { sessionId: 'app-rename-2', summary: 'Still renamed', writeBack: false });
       assert.equal(sessionsDb.getSessionById('app-rename-2')?.custom_name, 'Still renamed');
     });
   } finally {
