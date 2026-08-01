@@ -310,7 +310,7 @@ export function useSlashDispatch({
       // Read the per-provider tools settings so slash commands honor the
       // user's allow/deny lists and the skip-permissions toggle — same
       // logic as the normal handleSubmit path. The key shape mirrors
-      // getToolsSettings() defined inside handleSubmit below.
+      // getToolsSettings() inside computeSendOptions in useSubmitPipeline.ts.
       const settingsKey =
         provider === 'cursor'
           ? 'cursor-tools-settings'

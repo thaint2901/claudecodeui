@@ -4,7 +4,7 @@
 
 **Goal:** Split the 1,041-line `useChatComposerState` hook (CodeScene 4.15, one cc=207 Brain Method) into 7 single-concern hooks under `src/components/chat/hooks/composer/`, keeping the orchestrator's external contract byte-identical.
 
-**Architecture:** `useChatComposerState.ts` stays as the composition root — same signature, same return object — and each extraction commit only replaces *where definitions live*, never what the hook returns. Cross-hook wiring flows exclusively through orchestrator-owned refs (`handleSubmitRef`, `lastEditSubmissionRef`) and injected parameters. Extracted hooks never import each other.
+**Architecture:** `useChatComposerState.ts` stays as the composition root — same signature, same return object — and each extraction commit only replaces *where definitions live*, never what the hook returns. Cross-hook wiring flows exclusively through seam refs — `handleSubmitRef` (orchestrator-created) and `lastEditSubmissionRef` (created inside `useEditSentPromptFork`, forwarded by the orchestrator) — and injected parameters. Extracted hooks never import each other (runtime imports; type-only imports of a sibling's exported types are the sanctioned exception — see useSubmitPipeline).
 
 **Tech Stack:** React 18 hooks, TypeScript strict, `node:test` + `node:assert/strict` via `tsx --test` (frontend tsconfig `tsconfig.json`, alias `@/*` → `src/*`).
 
@@ -16,7 +16,7 @@
 - **`src/components/chat/view/ChatInterface.tsx` must not change** (0-line diff across the whole phase).
 - **The `return {...}` block of `useChatComposerState` must not change** in any extraction commit (Tasks 2–8). Only where the returned bindings are *defined* moves. `git diff` on the file must show the return block untouched.
 - **No new dependencies.** `package.json` `dependencies`/`devDependencies` unchanged. No vitest, no jsdom, no @testing-library.
-- **Extracted hooks must not import each other.** Each new hook imports only React, shared utils/types, and receives everything else via its single `params` object. Cross-concern calls go through orchestrator-injected callbacks/refs.
+- **Extracted hooks must not import each other** (runtime imports; type-only imports of a sibling's exported types are the sanctioned exception — see useSubmitPipeline). Each new hook imports only React, shared utils/types, and receives everything else via its single `params` object. Cross-concern calls go through orchestrator-injected callbacks/refs.
 - **Referential stability:** every function the orchestrator returns must remain `useCallback`-wrapped with correct minimal deps after extraction. New hooks return memoized callbacks, never fresh closures. (`react-hooks/exhaustive-deps` warnings must not increase; the repo baseline is 249 warnings total, 0 errors.)
 - **TDZ hazard:** inside each new hook, keep declaration order such that every closed-over binding is declared above its first use. `exhaustive-deps` does NOT catch declared-too-late references (CLAUDE.md gotcha).
 - Every commit: `npm test` green (server 232+/0, client 74+/0 plus new tests), `npm run typecheck` green, `npm run lint` 0 errors, warnings ≤ baseline.

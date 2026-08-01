@@ -51,8 +51,8 @@ D stays a passthrough in the orchestrator (its owners `useSlashCommands`/`useFil
 
 ### Seam contract
 
-- The orchestrator owns `handleSubmitRef` and `lastEditSubmissionRef` and passes them down as parameters — the existing, proven ref-indirection pattern; no new mechanism invented.
-- Each extracted hook receives a narrow parameter object (only what it reads/calls) and returns a narrow API. Extracted hooks MUST NOT import each other; all cross-concern wiring flows through the orchestrator.
+- `handleSubmitRef` is orchestrator-created; `lastEditSubmissionRef` is created inside `useEditSentPromptFork` and forwarded by the orchestrator. Both are passed down as parameters and both serve the same F/G→E TDZ/cycle-dodging purpose — the existing, proven ref-indirection pattern; no new mechanism invented.
+- Each extracted hook receives a narrow parameter object (only what it reads/calls) and returns a narrow API. Extracted hooks MUST NOT import each other at runtime (type-only imports of a sibling's exported types are the sanctioned exception — see useSubmitPipeline); all cross-concern wiring flows through the orchestrator.
 - Cross-group writes stay explicit: e.g. `useMessageQueue`'s flush needs `restoreDraft(text, images)` + `submitViaRef()` — both injected by the orchestrator, not imported.
 
 ### Execution order (one hook per commit, least-coupled first)
