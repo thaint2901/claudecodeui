@@ -199,9 +199,9 @@ export function computeSendOptions({
 }
 
 /**
- * Pure characterization of handleSubmit's image-upload step: uploads any
- * attached images and reports a failure through `addMessage` exactly as the
- * old inline try/catch did (same log line, same error-message payload). No
+ * Extracted step: handleSubmit's image-upload step. Uploads any attached
+ * images and reports a failure through `addMessage` exactly as the old
+ * inline try/catch did (same log line, same error-message payload). No
  * attachments is a no-op success with an empty image list.
  */
 async function uploadAttachedImages(
@@ -253,7 +253,7 @@ interface ResolveTargetSessionIdArgs {
 }
 
 /**
- * Pure characterization of handleSubmit's session-id resolution step: the
+ * Extracted step: handleSubmit's session-id resolution step. The
  * conversation always has a stable backend-allocated session id BEFORE the
  * first websocket send — brand-new chats allocate one here via the session
  * gateway. There is no client-visible session-id handoff later — this id

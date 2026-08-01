@@ -371,10 +371,11 @@ export function useSlashDispatch({
 
     // Always clear the composer + transient state after dispatch, mirroring
     // what `handleSubmit` does for a normal send. `resetCommandMenuState` is
-    // omitted intentionally: it is destructured from useSlashCommands further
-    // down the file (after this hook's definition), and referencing it here
-    // would hit a temporal dead zone at render time. The command menu closes
-    // naturally once the input is empty.
+    // omitted intentionally: the orchestrator (useChatComposerState) calls
+    // useSlashDispatch before it calls useSlashCommands, so
+    // resetCommandMenuState doesn't exist yet at this hook's call site and
+    // can't be passed in as a param. The command menu closes naturally once
+    // the input is empty.
     setInputValue('');
     setAttachedImages([]);
     setUploadingImages(new Map());
