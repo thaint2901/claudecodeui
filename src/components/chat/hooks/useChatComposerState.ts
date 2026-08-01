@@ -11,7 +11,6 @@ import type {
 
 import { authenticatedFetch } from '../../../utils/api';
 import type { MarkSessionProcessing } from '../../../hooks/useSessionProtection';
-import { grantClaudeToolPermission } from '../utils/chatPermissions';
 import { safeLocalStorage, type QueuedSendOptions } from '../utils/chatStorage';
 import type {
   ChatMessage,
@@ -23,6 +22,7 @@ import type { Project, ProjectSession, LLMProvider } from '../../../types/app';
 
 import { useFileMentions } from './useFileMentions';
 import { type SlashCommand, useSlashCommands } from './useSlashCommands';
+import { useComposerActions } from './composer/useComposerActions';
 import { useComposerAttachments } from './composer/useComposerAttachments';
 import { useEditSentPromptFork } from './composer/useEditSentPromptFork';
 import { useMessageQueue, type QueuedDraft } from './composer/useMessageQueue';
@@ -748,73 +748,21 @@ export function useChatComposerState({
     setIsTextareaExpanded(false);
   }, [resetCommandMenuState]);
 
-  const handleAbortSession = useCallback(() => {
-    if (!canAbortSession) {
-      return;
-    }
-
-    const targetSessionId = selectedSession?.id || currentSessionId || null;
-    if (!targetSessionId) {
-      console.warn('Abort requested but no session ID is available.');
-      return;
-    }
-
-    // The backend resolves the provider from the session row, so no provider
-    // field is needed here.
-    sendMessage({
-      type: 'chat.abort',
-      sessionId: targetSessionId,
-    });
-  }, [canAbortSession, currentSessionId, selectedSession?.id, sendMessage]);
-
-  const handleGrantToolPermission = useCallback(
-    (suggestion: { entry: string; toolName: string }) => {
-      if (!suggestion || provider !== 'claude') {
-        return { success: false };
-      }
-      return grantClaudeToolPermission(suggestion.entry);
-    },
-    [provider],
-  );
-
-  const handlePermissionDecision = useCallback(
-    (
-      requestIds: string | string[],
-      decision: { allow?: boolean; message?: string; rememberEntry?: string | null; updatedInput?: unknown },
-    ) => {
-      const ids = Array.isArray(requestIds) ? requestIds : [requestIds];
-      const validIds = ids.filter(Boolean);
-      if (validIds.length === 0) {
-        return;
-      }
-
-      validIds.forEach((requestId) => {
-        sendMessage({
-          type: 'chat.permission-response',
-          requestId,
-          allow: Boolean(decision?.allow),
-          updatedInput: decision?.updatedInput,
-          message: decision?.message,
-          rememberEntry: decision?.rememberEntry,
-        });
-      });
-
-      setPendingPermissionRequests((previous) =>
-        previous.filter((request) => !validIds.includes(request.requestId)),
-      );
-    },
-    [sendMessage, setPendingPermissionRequests],
-  );
-
-  const [isInputFocused, setIsInputFocused] = useState(false);
-
-  const handleInputFocusChange = useCallback(
-    (focused: boolean) => {
-      setIsInputFocused(focused);
-      onInputFocusChange?.(focused);
-    },
-    [onInputFocusChange],
-  );
+  const {
+    handleAbortSession,
+    handleGrantToolPermission,
+    handlePermissionDecision,
+    isInputFocused,
+    handleInputFocusChange,
+  } = useComposerActions({
+    canAbortSession,
+    selectedSession,
+    currentSessionId,
+    provider,
+    sendMessage,
+    setPendingPermissionRequests,
+    onInputFocusChange,
+  });
 
   return {
     input,
