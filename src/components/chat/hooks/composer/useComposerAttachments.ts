@@ -9,7 +9,6 @@ export interface ComposerAttachmentsApi {
   setUploadingImages: Dispatch<SetStateAction<Map<string, number>>>;
   imageErrors: Map<string, string>;
   setImageErrors: Dispatch<SetStateAction<Map<string, string>>>;
-  handleImageFiles: (files: File[]) => void;
   handlePaste: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
   getRootProps: ReturnType<typeof useDropzone>['getRootProps'];
   getInputProps: ReturnType<typeof useDropzone>['getInputProps'];
@@ -99,7 +98,6 @@ export function useComposerAttachments(): ComposerAttachmentsApi {
     setUploadingImages,
     imageErrors,
     setImageErrors,
-    handleImageFiles,
     handlePaste,
     getRootProps,
     getInputProps,

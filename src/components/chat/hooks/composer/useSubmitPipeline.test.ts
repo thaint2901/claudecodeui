@@ -87,6 +87,46 @@ test('computeSendOptions: honors saved per-provider tools settings from localSto
   assert.equal(result.skipPermissions, true);
 });
 
+test('computeSendOptions: picks the codex model when the active provider is codex', () => {
+  store.clear();
+  const result = computeSendOptions({ ...baseArgs, provider: 'codex' } as any);
+  assert.equal(result.model, 'codex-model');
+});
+
+test('computeSendOptions: picks the opencode model when the active provider is opencode', () => {
+  store.clear();
+  const result = computeSendOptions({ ...baseArgs, provider: 'opencode' } as any);
+  assert.equal(result.model, 'opencode-model');
+});
+
+test('computeSendOptions: honors saved cursor tools settings under the cursor-tools-settings key', () => {
+  store.clear();
+  store.set(
+    'cursor-tools-settings',
+    JSON.stringify({ allowedTools: ['Read'], disallowedTools: ['Bash'], skipPermissions: false }),
+  );
+  const result = computeSendOptions({ ...baseArgs, provider: 'cursor' } as any);
+  assert.deepEqual(result.toolsSettings, { allowedTools: ['Read'], disallowedTools: ['Bash'], skipPermissions: false });
+});
+
+test('computeSendOptions: sessionSummary prefers summary over name and title when all three are set', () => {
+  store.clear();
+  const result = computeSendOptions({
+    ...baseArgs,
+    selectedSession: { summary: 'summary-value', name: 'name-value', title: 'title-value' },
+  } as any);
+  assert.equal(result.sessionSummary, 'summary-value');
+});
+
+test('computeSendOptions: sessionSummary falls back to name over title when summary is absent', () => {
+  store.clear();
+  const result = computeSendOptions({
+    ...baseArgs,
+    selectedSession: { name: 'name-value', title: 'title-value' },
+  } as any);
+  assert.equal(result.sessionSummary, 'name-value');
+});
+
 // --- classifySlashCommand --------------------------------------------------
 // Characterizes handleSubmit's slash-command classification block (the
 // "is this input a slash command" decision the Task 3 ledger noted lives in

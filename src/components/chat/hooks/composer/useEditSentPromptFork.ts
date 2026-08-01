@@ -23,7 +23,6 @@ interface UseEditSentPromptForkParams {
 export interface EditSentPromptForkApi {
   editingSentPrompt: EditingSentPrompt | null;
   setEditingSentPrompt: Dispatch<SetStateAction<EditingSentPrompt | null>>;
-  editingSentPromptRef: RefObject<EditingSentPrompt | null>;
   lastEditSubmissionRef: MutableRefObject<LastEditSubmission | null>;
   startEditSentPrompt: (uuid: string, content: string) => void;
   cancelEditSentPrompt: () => void;
@@ -105,7 +104,6 @@ export function useEditSentPromptFork({
   return {
     editingSentPrompt,
     setEditingSentPrompt,
-    editingSentPromptRef,
     lastEditSubmissionRef,
     startEditSentPrompt,
     cancelEditSentPrompt,
