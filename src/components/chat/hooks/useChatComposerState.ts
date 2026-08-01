@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChangeEvent,
-  ClipboardEvent,
   Dispatch,
   FormEvent,
   KeyboardEvent,
@@ -9,7 +8,6 @@ import type {
   SetStateAction,
   TouchEvent,
 } from 'react';
-import { useDropzone } from 'react-dropzone';
 
 import { authenticatedFetch } from '../../../utils/api';
 import type { MarkSessionProcessing } from '../../../hooks/useSessionProtection';
@@ -31,6 +29,7 @@ import type { Project, ProjectSession, LLMProvider } from '../../../types/app';
 
 import { useFileMentions } from './useFileMentions';
 import { type SlashCommand, useSlashCommands } from './useSlashCommands';
+import { useComposerAttachments } from './composer/useComposerAttachments';
 import { useEditSentPromptFork } from './composer/useEditSentPromptFork';
 import { useSlashDispatch } from './composer/useSlashDispatch';
 
@@ -153,9 +152,6 @@ export function useChatComposerState({
     }
     return '';
   });
-  const [attachedImages, setAttachedImages] = useState<File[]>([]);
-  const [uploadingImages, setUploadingImages] = useState<Map<string, number>>(new Map());
-  const [imageErrors, setImageErrors] = useState<Map<string, string>>(new Map());
   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -201,6 +197,20 @@ export function useChatComposerState({
   // while `queuedDraft` still holds the old session's draft; the persistence
   // effect must not write across that gap.
   const queuedDraftSessionRef = useRef<string | null>(sessionKey);
+
+  const {
+    attachedImages,
+    setAttachedImages,
+    uploadingImages,
+    setUploadingImages,
+    imageErrors,
+    setImageErrors,
+    handlePaste,
+    getRootProps,
+    getInputProps,
+    isDragActive,
+    open,
+  } = useComposerAttachments();
 
   const {
     commandModalPayload,
@@ -297,76 +307,6 @@ export function useChatComposerState({
     setIsTextareaExpanded((previous) => previous === expanded ? previous : expanded);
     lastAutosizedInputRef.current = target.value;
   }, []);
-
-  const handleImageFiles = useCallback((files: File[]) => {
-    const validFiles = files.filter((file) => {
-      try {
-        if (!file || typeof file !== 'object') {
-          console.warn('Invalid file object:', file);
-          return false;
-        }
-
-        if (!file.type || !file.type.startsWith('image/')) {
-          return false;
-        }
-
-        if (!file.size || file.size > 5 * 1024 * 1024) {
-          const fileName = file.name || 'Unknown file';
-          setImageErrors((previous) => {
-            const next = new Map(previous);
-            next.set(fileName, 'File too large (max 5MB)');
-            return next;
-          });
-          return false;
-        }
-
-        return true;
-      } catch (error) {
-        console.error('Error validating file:', error, file);
-        return false;
-      }
-    });
-
-    if (validFiles.length > 0) {
-      setAttachedImages((previous) => [...previous, ...validFiles].slice(0, 5));
-    }
-  }, []);
-
-  const handlePaste = useCallback(
-    (event: ClipboardEvent<HTMLTextAreaElement>) => {
-      const items = Array.from(event.clipboardData.items);
-
-      items.forEach((item) => {
-        if (!item.type.startsWith('image/')) {
-          return;
-        }
-        const file = item.getAsFile();
-        if (file) {
-          handleImageFiles([file]);
-        }
-      });
-
-      if (items.length === 0 && event.clipboardData.files.length > 0) {
-        const files = Array.from(event.clipboardData.files);
-        const imageFiles = files.filter((file) => file.type.startsWith('image/'));
-        if (imageFiles.length > 0) {
-          handleImageFiles(imageFiles);
-        }
-      }
-    },
-    [handleImageFiles],
-  );
-
-  const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
-    accept: {
-      'image/*': ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'],
-    },
-    maxSize: 5 * 1024 * 1024,
-    maxFiles: 5,
-    onDrop: handleImageFiles,
-    noClick: true,
-    noKeyboard: true,
-  });
 
   // Snapshot of everything `chat.send` needs beyond the text itself. Built at
   // send time for immediate sends and at queue time for queued ones, so a
@@ -664,6 +604,9 @@ export function useChatComposerState({
       lastEditSubmissionRef,
       setEditingSentPrompt,
       onForkSubmitted,
+      setAttachedImages,
+      setUploadingImages,
+      setImageErrors,
     ],
   );
 
@@ -714,7 +657,7 @@ export function useChatComposerState({
       }, 0);
     }, delay);
     return () => clearTimeout(timer);
-  }, [isLoading, queuedDraft, sessionKey, setInput]);
+  }, [isLoading, queuedDraft, sessionKey, setInput, setAttachedImages]);
 
   const editQueuedDraft = useCallback(() => {
     if (!queuedDraft) {
@@ -725,7 +668,7 @@ export function useChatComposerState({
     inputValueRef.current = queuedDraft.content;
     setAttachedImages(queuedDraft.images);
     textareaRef.current?.focus();
-  }, [queuedDraft]);
+  }, [queuedDraft, setAttachedImages]);
 
   const deleteQueuedDraft = useCallback(() => {
     setQueuedDraft(null);
