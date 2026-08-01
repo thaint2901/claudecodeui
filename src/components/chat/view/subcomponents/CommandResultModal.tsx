@@ -24,7 +24,7 @@ import type {
   HelpCommandData,
   ModelCommandData,
   StatusCommandData,
-} from '../../hooks/useChatComposerState';
+} from '../../hooks/composer/useSlashDispatch';
 
 type CommandResultModalProps = {
   payload: CommandModalPayload | null;

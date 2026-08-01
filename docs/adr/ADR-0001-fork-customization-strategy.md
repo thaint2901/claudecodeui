@@ -1,7 +1,7 @@
 # ADR-0001: Extension-point strategy for fork customizations
 
 **Date:** 2026-07-31
-**Status:** accepted
+**Status:** superseded by ADR-0002 (strategic rationale; hygiene rules live on in CLAUDE.md)
 **Deciders:** thaint2901 + Claude architecture-review session
 
 ## Context
