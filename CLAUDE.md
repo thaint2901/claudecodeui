@@ -133,13 +133,14 @@ Plugins can ship a frontend (tabs) and an optional Node.js backend. Discovery + 
 - **Never hardcode the string `'claude'`** when spawning the CLI from the backend. Always resolve via `resolveClaudeCodeExecutablePath(process.env.CLAUDE_CLI_PATH)` from `server/shared/claude-cli-path.ts` — it's the only path that honors `CLAUDE_CLI_PATH` and finds `claude.cmd`/`claude.exe` on Windows.
 - **Reuse `src/shared/view/ui/{Alert,Button,Confirmation}.tsx`** for banners/inline confirmations instead of one-off styled divs — they carry theme-aware semantic tokens and the same hover/focus/disabled treatment as every other action in the app. See `PermissionRequestsBanner.tsx` for the reference usage.
 
-## Fork Maintenance
+## Development Model
 
-This repo is a long-lived fork of upstream; these rules minimize the upstream conflict surface. Divergence figures and the exact measurement commands live in `docs/adr/ADR-0001-fork-customization-strategy.md` (authoritative — update numbers there, not here).
+This repo is a fork of `siteboon/claudecodeui`, but per `docs/adr/ADR-0002-independent-development.md` it now develops independently — upstream is no longer merged; it's a read-only reference at most, cherry-picked case by case. The `upstream` git remote stays configured as a re-fork escape hatch. See ADR-0002 for the decision and its rationale, and `docs/adr/ADR-0001-fork-customization-strategy.md` for the superseded merge-conflict figures the decision retired.
 
-- **Fork-owned files.** New fork logic lives in new files the fork owns; an upstream-owned file receives at most an import plus a ≤2-line call site. Litmus: if `git log --oneline <file> | head` is mostly fork commits on an upstream file, extraction is overdue (current worst: `ChatInterface.tsx` — the measured churn lives in ADR-0001's Context section).
-- **i18n namespace.** New fork-feature translation keys go in a `fork.json` namespace per locale, never appended to upstream's `chat.json`/`settings.json` (landed 2026-07-31: fork.json per locale, registered via src/i18n/forkNamespace.js, enforced by src/i18n/forkNamespace.test.ts).
-- **Upstream sync protocol.** `git rerere` enabled; preview merges with `git merge-tree --write-tree --messages <base> <ours> <theirs>` before merging; diff the file list (`git diff --stat`) of upstream pulls, never trust commit subjects alone (upstream has removed whole features in innocuously-named PRs).
+The following hygiene rules survive from ADR-0001 on their own technical merit, independent of upstream compatibility:
+
+- **New logic in new, focused files.** Prefer adding new files over weaving changes into existing ones, so responsibilities stay easy to locate and reason about.
+- **i18n namespace.** Fork-feature translation keys go in a `fork.json` namespace per locale, never appended to `chat.json`/`settings.json` (landed 2026-07-31: fork.json per locale, registered via src/i18n/forkNamespace.js, enforced by src/i18n/forkNamespace.test.ts).
 
 ## Editing Checklist (when working in this repo)
 
