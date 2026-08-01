@@ -26,11 +26,11 @@ Future work is planned and reviewed purely against this fork's own technical and
 
 **(a) Keep periodic upstream syncs.**
 Pros: continues absorbing upstream fixes and features (e.g. the v1.36.x adoptions ADR-0001 cites); keeps the door open to community contributions flowing through upstream.
-Cons: the conflict cost is already measured and real (ADR-0001's 37-file overlap, 9-vs-32 hotspot, 30-conflict i18n merge); and the fork's own roadmap is now diverging at the product level, so future syncs would fight against intentional, not incidental, divergence.
+Cons: the conflict cost is already measured and real (see Context above); and the fork's own roadmap is now diverging at the product level, so future syncs would fight against intentional, not incidental, divergence.
 Rejected: the cost is measured and rising, and the value it buys (upstream parity) is no longer a project goal.
 
 **(b) Re-fork later if needed.**
-Noted as the escape hatch, not adopted now: the `upstream` git remote stays configured, so a future re-fork or selective cherry-pick from `siteboon/claudecodeui` remains possible without re-adding it as a merge source. This preserves optionality without carrying the ongoing sync tax.
+Not structured as a rejected alternative — unlike (a), it isn't mutually exclusive with the Decision, so there is nothing here to accept or reject. It's a standing note: the `upstream` git remote stays configured, so a future re-fork or selective cherry-pick from `siteboon/claudecodeui` remains possible without re-adding it as a merge source. This preserves optionality without carrying the ongoing sync tax, and requires no action now.
 
 ## Consequences
 
