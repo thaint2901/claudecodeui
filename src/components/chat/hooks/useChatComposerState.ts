@@ -8,9 +8,8 @@ import type {
   TouchEvent,
 } from 'react';
 
-import { authenticatedFetch } from '../../../utils/api';
 import type { MarkSessionProcessing } from '../../../hooks/useSessionProtection';
-import { safeLocalStorage, type QueuedSendOptions } from '../utils/chatStorage';
+import { safeLocalStorage } from '../utils/chatStorage';
 import type {
   ChatMessage,
   PendingPermissionRequest,
@@ -20,13 +19,14 @@ import type {
 import type { Project, ProjectSession, LLMProvider } from '../../../types/app';
 
 import { useFileMentions } from './useFileMentions';
-import { type SlashCommand, useSlashCommands } from './useSlashCommands';
+import { useSlashCommands } from './useSlashCommands';
 import { useComposerActions } from './composer/useComposerActions';
 import { useComposerAttachments } from './composer/useComposerAttachments';
 import { useComposerDraft } from './composer/useComposerDraft';
 import { useEditSentPromptFork } from './composer/useEditSentPromptFork';
 import { useMessageQueue, type QueuedDraft } from './composer/useMessageQueue';
 import { useSlashDispatch } from './composer/useSlashDispatch';
+import { useSubmitPipeline } from './composer/useSubmitPipeline';
 
 export type { QueuedDraft };
 
@@ -75,24 +75,6 @@ interface MentionableFile {
 
 const createFakeSubmitEvent = () => {
   return { preventDefault: () => undefined } as unknown as FormEvent<HTMLFormElement>;
-};
-
-const getNotificationSessionSummary = (
-  selectedSession: ProjectSession | null,
-  fallbackInput: string,
-): string | null => {
-  const sessionSummary = selectedSession?.summary || selectedSession?.name || selectedSession?.title;
-  if (typeof sessionSummary === 'string' && sessionSummary.trim()) {
-    const normalized = sessionSummary.replace(/\s+/g, ' ').trim();
-    return normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized;
-  }
-
-  const normalizedFallback = fallbackInput.replace(/\s+/g, ' ').trim();
-  if (!normalizedFallback) {
-    return null;
-  }
-
-  return normalizedFallback.length > 80 ? `${normalizedFallback.slice(0, 77)}...` : normalizedFallback;
 };
 
 export function useChatComposerState({
@@ -293,309 +275,42 @@ export function useChatComposerState({
     setCursorPosition,
   });
 
-  // Snapshot of everything `chat.send` needs beyond the text itself. Built at
-  // send time for immediate sends and at queue time for queued ones, so a
-  // queued message keeps the provider settings it was composed under even if
-  // it is later dispatched outside this composer (app-level auto-send).
-  const buildSendOptions = useCallback((currentInput: string): QueuedSendOptions => {
-    const getToolsSettings = () => {
-      try {
-        const settingsKey =
-          provider === 'cursor'
-            ? 'cursor-tools-settings'
-            : provider === 'codex'
-              ? 'codex-settings'
-              : provider === 'opencode'
-                  ? 'opencode-settings'
-                : 'claude-settings';
-        const savedSettings = safeLocalStorage.getItem(settingsKey);
-        if (savedSettings) {
-          return JSON.parse(savedSettings);
-        }
-      } catch (error) {
-        console.error('Error loading tools settings:', error);
-      }
-
-      return {
-        allowedTools: [],
-        disallowedTools: [],
-        skipPermissions: false,
-      };
-    };
-
-    const toolsSettings = getToolsSettings();
-    const model =
-      provider === 'cursor'
-        ? cursorModel
-        : provider === 'codex'
-          ? codexModel
-          : provider === 'opencode'
-            ? opencodeModel
-            : claudeModel;
-
-    return {
-      model,
-      effort: currentProviderEffort,
-      permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
-      toolsSettings,
-      skipPermissions: toolsSettings?.skipPermissions || false,
-      sessionSummary: getNotificationSessionSummary(selectedSession, currentInput),
-    };
-  }, [
-    claudeModel,
-    codexModel,
-    currentProviderEffort,
-    cursorModel,
-    opencodeModel,
-    permissionMode,
-    provider,
-    resolvePermissionModeForProvider,
-    selectedSession,
-  ]);
-
-  const handleSubmit = useCallback(
-    async (
-      event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>,
-    ) => {
-      event.preventDefault();
-      const currentInput = inputValueRef.current;
-      if (!currentInput.trim() || !selectedProject) {
-        return;
-      }
-
-      // A turn is already in flight: stash this message instead of sending it.
-      // It's auto-flushed (re-running this same function) once the turn ends,
-      // so it still goes through slash-command interception, image upload, etc.
-      if (isLoading) {
-        queuedDraftSessionRef.current = sessionKey;
-        setQueuedDraft({
-          content: currentInput,
-          images: attachedImages,
-          options: buildSendOptions(currentInput),
-        });
-        setInput('');
-        inputValueRef.current = '';
-        setAttachedImages([]);
-        setUploadingImages(new Map());
-        setImageErrors(new Map());
-        resetCommandMenuState();
-        setIsTextareaExpanded(false);
-        if (textareaRef.current) {
-          textareaRef.current.style.height = 'auto';
-        }
-        // selectedProject is guaranteed by the guard at the top of handleSubmit.
-        safeLocalStorage.removeItem(`draft_input_${selectedProject.projectId}`);
-        // A queued draft must never carry the fork intent of the message it displaced.
-        setEditingSentPrompt(null);
-        return;
-      }
-
-      // Intercept slash commands only when "/" is the first input character.
-      // Also accept exact "help" as a convenience alias for users who expect CLI-style help.
-      const commandInput = currentInput.trimEnd();
-      const isHelpAlias = commandInput.trim().toLowerCase() === 'help';
-      if (commandInput.startsWith('/') || isHelpAlias) {
-        const firstSpace = commandInput.indexOf(' ');
-        const commandName = isHelpAlias
-          ? '/help'
-          : firstSpace > 0 ? commandInput.slice(0, firstSpace) : commandInput;
-        const matchedCommand =
-          slashCommands.find((cmd: SlashCommand) => cmd.name === commandName) ||
-          (commandName === '/help'
-            ? ({
-                name: '/help',
-                description: 'Show help documentation for Claude Code',
-                namespace: 'ccui',
-                metadata: { type: 'ccui' },
-              } as SlashCommand)
-            : undefined);
-        if (matchedCommand && matchedCommand.type !== 'skill' && matchedCommand.type !== 'claude-builtin') {
-          executeCommand(matchedCommand, isHelpAlias ? '/help' : commandInput);
-          setInput('');
-          inputValueRef.current = '';
-          setAttachedImages([]);
-          setUploadingImages(new Map());
-          setImageErrors(new Map());
-          resetCommandMenuState();
-          setIsTextareaExpanded(false);
-          if (textareaRef.current) {
-            textareaRef.current.style.height = 'auto';
-          }
-          // A slash command is not a reply to the edited prompt — clear the fork intent.
-          setEditingSentPrompt(null);
-          return;
-        }
-      }
-
-      const messageContent = currentInput;
-
-      let uploadedImages: unknown[] = [];
-      if (attachedImages.length > 0) {
-        const formData = new FormData();
-        attachedImages.forEach((file) => {
-          formData.append('images', file);
-        });
-
-        try {
-          const response = await authenticatedFetch('/api/assets/images', {
-            method: 'POST',
-            headers: {},
-            body: formData,
-          });
-
-          if (!response.ok) {
-            throw new Error('Failed to upload images');
-          }
-
-          const result = await response.json();
-          uploadedImages = result.images;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
-          console.error('Image upload failed:', error);
-          addMessage({
-            type: 'error',
-            content: `Failed to upload images: ${message}`,
-            timestamp: new Date(),
-          });
-          return;
-        }
-      }
-
-      const resolvedProjectPath = selectedProject.fullPath || selectedProject.path || '';
-      const sessionSummary = getNotificationSessionSummary(selectedSession, currentInput);
-
-      // The conversation always has a stable backend-allocated session id
-      // BEFORE the first websocket send: brand-new chats allocate one here
-      // via the session gateway. There is no client-visible session-id
-      // handoff later — this id stays valid for the conversation's lifetime.
-      let targetSessionId = selectedSession?.id || currentSessionId || null;
-      if (!targetSessionId) {
-        try {
-          const response = await authenticatedFetch('/api/providers/sessions', {
-            method: 'POST',
-            body: JSON.stringify({
-              provider,
-              projectPath: resolvedProjectPath,
-            }),
-          });
-          if (!response.ok) {
-            throw new Error(`Failed to create session (${response.status})`);
-          }
-          const body = await response.json();
-          targetSessionId = body?.data?.sessionId || null;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
-          console.error('Session creation failed:', error);
-          addMessage({
-            type: 'error',
-            content: `Failed to start a new session: ${message}`,
-            timestamp: new Date(),
-          });
-          return;
-        }
-
-        if (!targetSessionId) {
-          addMessage({
-            type: 'error',
-            content: 'Failed to start a new session: no session id returned.',
-            timestamp: new Date(),
-          });
-          return;
-        }
-
-        onSessionEstablished?.(targetSessionId, {
-          provider,
-          project: selectedProject,
-          summary: sessionSummary,
-        });
-      }
-
-      const userMessage: ChatMessage = {
-        type: 'user',
-        content: currentInput,
-        images: uploadedImages as any,
-        timestamp: new Date(),
-      };
-
-      addMessage(userMessage);
-      // Mark this request as processing in the per-session activity map (the
-      // single source of truth the indicator derives from). The id is always
-      // concrete at this point — no pending placeholder exists anymore.
-      onSessionProcessing?.(targetSessionId, {
-        statusText: null,
-        canInterrupt: true,
-      });
-
-      setIsUserScrolledUp(false);
-      setTimeout(() => scrollToBottom(), 100);
-
-      // One message shape for every provider. The backend resolves the
-      // provider, project path, and provider-native resume id from the
-      // session row; `options` only carries composer-level preferences.
-      sendMessage({
-        type: 'chat.send',
-        sessionId: targetSessionId,
-        content: messageContent,
-        options: {
-          ...buildSendOptions(messageContent),
-          images: uploadedImages,
-          ...(editingSentPrompt ? { editAtMessageUuid: editingSentPrompt.uuid } : {}),
-        },
-      });
-
-      if (editingSentPrompt) {
-        // Hold the text until the fork is known to have taken. The composer is
-        // cleared unconditionally below, and a FORK_FAILED afterwards used to
-        // leave the user with nothing — their edit gone from the composer and
-        // from the per-project draft, with only a console line to say why.
-        lastEditSubmissionRef.current = { uuid: editingSentPrompt.uuid, content: messageContent };
-        onForkSubmitted?.(editingSentPrompt.uuid);
-        setEditingSentPrompt(null);
-      }
-
-      setInput('');
-      inputValueRef.current = '';
-      resetCommandMenuState();
-      setAttachedImages([]);
-      setUploadingImages(new Map());
-      setImageErrors(new Map());
-      setIsTextareaExpanded(false);
-
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-      }
-
-      safeLocalStorage.removeItem(`draft_input_${selectedProject.projectId}`);
+  const { handleSubmit, handleKeyDown } = useSubmitPipeline({
+    session: { selectedProject, selectedSession, currentSessionId, sessionKey },
+    providerSettings: {
+      provider,
+      cursorModel,
+      claudeModel,
+      codexModel,
+      opencodeModel,
+      currentProviderEffort,
+      permissionMode,
+      resolvePermissionModeForProvider,
     },
-    [
-      selectedSession,
-      attachedImages,
-      buildSendOptions,
-      currentSessionId,
-      executeCommand,
+    lifecycle: {
       isLoading,
+      sendMessage,
       onSessionProcessing,
       onSessionEstablished,
-      provider,
-      resetCommandMenuState,
-      scrollToBottom,
-      selectedProject,
-      sendMessage,
-      sessionKey,
-      addMessage,
-      setIsUserScrolledUp,
-      slashCommands,
-      editingSentPrompt,
-      lastEditSubmissionRef,
-      setEditingSentPrompt,
       onForkSubmitted,
-      setAttachedImages,
-      setUploadingImages,
-      setImageErrors,
-      queuedDraftSessionRef,
-      setQueuedDraft,
-    ],
-  );
+      addMessage,
+      scrollToBottom,
+      setIsUserScrolledUp,
+    },
+    composer: { textareaRef, inputValueRef, setInput, setIsTextareaExpanded, resetCommandMenuState },
+    attachments: { attachedImages, setAttachedImages, setUploadingImages, setImageErrors },
+    queue: { queuedDraftSessionRef, setQueuedDraft },
+    editFork: { editingSentPrompt, setEditingSentPrompt, lastEditSubmissionRef },
+    slash: { slashCommands, executeCommand },
+    keyNav: {
+      handleCommandMenuKeyDown,
+      handleFileMentionsKeyDown,
+      showFileDropdown,
+      showCommandMenu,
+      cyclePermissionMode,
+      sendByCtrlEnter,
+    },
+  });
 
   useEffect(() => {
     handleSubmitRef.current = handleSubmit;
@@ -611,47 +326,6 @@ export function useChatComposerState({
     inputValueRef.current = next;
     if (send) handleSubmitRef.current?.(createFakeSubmitEvent());
   }, [setInput]);
-
-  const handleKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (handleCommandMenuKeyDown(event)) {
-        return;
-      }
-
-      if (handleFileMentionsKeyDown(event)) {
-        return;
-      }
-
-      if (event.key === 'Tab' && !showFileDropdown && !showCommandMenu) {
-        event.preventDefault();
-        cyclePermissionMode();
-        return;
-      }
-
-      if (event.key === 'Enter') {
-        if (event.nativeEvent.isComposing) {
-          return;
-        }
-
-        if ((event.ctrlKey || event.metaKey) && !event.shiftKey) {
-          event.preventDefault();
-          handleSubmit(event);
-        } else if (!event.shiftKey && !event.ctrlKey && !event.metaKey && !sendByCtrlEnter) {
-          event.preventDefault();
-          handleSubmit(event);
-        }
-      }
-    },
-    [
-      cyclePermissionMode,
-      handleCommandMenuKeyDown,
-      handleFileMentionsKeyDown,
-      handleSubmit,
-      sendByCtrlEnter,
-      showCommandMenu,
-      showFileDropdown,
-    ],
-  );
 
   const {
     handleAbortSession,
