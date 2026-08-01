@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
-  ChangeEvent,
   Dispatch,
   FormEvent,
   KeyboardEvent,
@@ -24,6 +23,7 @@ import { useFileMentions } from './useFileMentions';
 import { type SlashCommand, useSlashCommands } from './useSlashCommands';
 import { useComposerActions } from './composer/useComposerActions';
 import { useComposerAttachments } from './composer/useComposerAttachments';
+import { useComposerDraft } from './composer/useComposerDraft';
 import { useEditSentPromptFork } from './composer/useEditSentPromptFork';
 import { useMessageQueue, type QueuedDraft } from './composer/useMessageQueue';
 import { useSlashDispatch } from './composer/useSlashDispatch';
@@ -135,9 +135,6 @@ export function useChatComposerState({
   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const inputHighlightRef = useRef<HTMLDivElement>(null);
-  const textareaLineHeightRef = useRef<number | null>(null);
-  const lastAutosizedInputRef = useRef<string | null>(null);
   const handleSubmitRef = useRef<
     ((event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>) => Promise<void>) | null
   >(null);
@@ -268,29 +265,33 @@ export function useChatComposerState({
     textareaRef,
   });
 
-  const syncInputOverlayScroll = useCallback((target: HTMLTextAreaElement) => {
-    if (!inputHighlightRef.current || !target) {
-      return;
-    }
-    inputHighlightRef.current.scrollTop = target.scrollTop;
-    inputHighlightRef.current.scrollLeft = target.scrollLeft;
-  }, []);
+  // Kept immediately before useComposerDraft's call: pre-extraction, this
+  // effect and the draft-restore effect it now precedes were declared back
+  // to back (inputValueRef sync, then the project-switch restore) — same
+  // relative order, preserved here rather than left at handleVoiceTranscript's
+  // original position further down.
+  useEffect(() => {
+    inputValueRef.current = input;
+  }, [input]);
 
-  const resizeTextarea = useCallback((target: HTMLTextAreaElement) => {
-    target.style.height = 'auto';
-    const nextHeight = Math.max(22, target.scrollHeight);
-    target.style.height = `${nextHeight}px`;
-
-    let lineHeight = textareaLineHeightRef.current;
-    if (!lineHeight) {
-      lineHeight = parseInt(window.getComputedStyle(target).lineHeight);
-      textareaLineHeightRef.current = Number.isFinite(lineHeight) ? lineHeight : 24;
-    }
-
-    const expanded = nextHeight > (textareaLineHeightRef.current || 24) * 2;
-    setIsTextareaExpanded((previous) => previous === expanded ? previous : expanded);
-    lastAutosizedInputRef.current = target.value;
-  }, []);
+  const {
+    inputHighlightRef,
+    handleInputChange,
+    handleTextareaClick,
+    handleTextareaInput,
+    syncInputOverlayScroll,
+    handleClearInput,
+  } = useComposerDraft({
+    input,
+    setInput,
+    inputValueRef,
+    selectedProjectId,
+    textareaRef,
+    setIsTextareaExpanded,
+    resetCommandMenuState,
+    handleCommandInputChange,
+    setCursorPosition,
+  });
 
   // Snapshot of everything `chat.send` needs beyond the text itself. Built at
   // send time for immediate sends and at queue time for queued ones, so a
@@ -611,74 +612,6 @@ export function useChatComposerState({
     if (send) handleSubmitRef.current?.(createFakeSubmitEvent());
   }, [setInput]);
 
-  useEffect(() => {
-    inputValueRef.current = input;
-  }, [input]);
-
-  useEffect(() => {
-    if (!selectedProjectId) {
-      return;
-    }
-    const savedInput = safeLocalStorage.getItem(`draft_input_${selectedProjectId}`) || '';
-    setInput((previous) => {
-      const next = previous === savedInput ? previous : savedInput;
-      inputValueRef.current = next;
-      return next;
-    });
-  }, [selectedProjectId]);
-
-  useEffect(() => {
-    if (!selectedProjectId) {
-      return;
-    }
-    if (input !== '') {
-      safeLocalStorage.setItem(`draft_input_${selectedProjectId}`, input);
-    } else {
-      safeLocalStorage.removeItem(`draft_input_${selectedProjectId}`);
-    }
-  }, [input, selectedProjectId]);
-
-  useEffect(() => {
-    if (!textareaRef.current) {
-      return;
-    }
-    if (lastAutosizedInputRef.current === input) {
-      return;
-    }
-    // Re-run for restored drafts and programmatic input changes. User typing is
-    // already resized in onInput, so this avoids doing the same forced layout twice.
-    resizeTextarea(textareaRef.current);
-  }, [input, resizeTextarea]);
-
-  useEffect(() => {
-    if (!textareaRef.current || input.trim()) {
-      return;
-    }
-    textareaRef.current.style.height = 'auto';
-    setIsTextareaExpanded(false);
-  }, [input]);
-
-  const handleInputChange = useCallback(
-    (event: ChangeEvent<HTMLTextAreaElement>) => {
-      const newValue = event.target.value;
-      const cursorPos = event.target.selectionStart;
-
-      setInput(newValue);
-      inputValueRef.current = newValue;
-      setCursorPosition(cursorPos);
-
-      if (!newValue.trim()) {
-        event.target.style.height = 'auto';
-        setIsTextareaExpanded(false);
-        resetCommandMenuState();
-        return;
-      }
-
-      handleCommandInputChange(newValue, cursorPos);
-    },
-    [handleCommandInputChange, resetCommandMenuState, setCursorPosition],
-  );
-
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
       if (handleCommandMenuKeyDown(event)) {
@@ -719,34 +652,6 @@ export function useChatComposerState({
       showFileDropdown,
     ],
   );
-
-  const handleTextareaClick = useCallback(
-    (event: MouseEvent<HTMLTextAreaElement>) => {
-      setCursorPosition(event.currentTarget.selectionStart);
-    },
-    [setCursorPosition],
-  );
-
-  const handleTextareaInput = useCallback(
-    (event: FormEvent<HTMLTextAreaElement>) => {
-      const target = event.currentTarget;
-      resizeTextarea(target);
-      setCursorPosition(target.selectionStart);
-      syncInputOverlayScroll(target);
-    },
-    [resizeTextarea, setCursorPosition, syncInputOverlayScroll],
-  );
-
-  const handleClearInput = useCallback(() => {
-    setInput('');
-    inputValueRef.current = '';
-    resetCommandMenuState();
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.focus();
-    }
-    setIsTextareaExpanded(false);
-  }, [resetCommandMenuState]);
 
   const {
     handleAbortSession,
