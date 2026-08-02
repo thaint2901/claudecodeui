@@ -124,20 +124,18 @@ test('/fork writes the fork name back as soon as the fork announces its own prov
   });
 
   handleChatConnection(ws, { user: { id: 'user-1' } } as any, {
-    spawnFns: {
-      claude: async (_command: unknown, _options: unknown, writer: { setSessionId: (id: string) => void }) => {
+    resolveRuntime: () => ({
+      run: async (_command: unknown, _options: unknown, writer: { setSessionId: (id: string) => void }) => {
         // Simulate the SDK announcing the fork's own (distinct) provider
         // session id mid-run, the way `claude-sdk.js`'s recapture branch does
         // via `ws.setSessionId(...)`. The rename must fire from this
-        // announcement, not from the spawnFn's eventual resolution below.
+        // announcement, not from run()'s eventual resolution below.
         writer.setSessionId(FORKED_PROVIDER_SESSION_ID);
-        assert.equal(renameCalls.length, 1, 'rename must happen synchronously with the announcement, before spawnFn resolves');
+        assert.equal(renameCalls.length, 1, 'rename must happen synchronously with the announcement, before run() resolves');
         resolveSpawn();
       },
-    } as any,
-    abortFns: {} as any,
-    resolveToolApproval: () => {},
-    getPendingApprovalsForSession: () => [],
+      abort: () => false,
+    }) as any,
   });
 
   (ws as unknown as EventEmitter).emit(
@@ -173,16 +171,14 @@ test('/fork retries the write-back after spawn resolves when the announcement ne
   });
 
   handleChatConnection(ws, { user: { id: 'user-1' } } as any, {
-    spawnFns: {
+    resolveRuntime: () => ({
       // Never calls writer.setSessionId — the run completes without ever
       // announcing a distinct provider session id.
-      claude: async () => {
+      run: async () => {
         resolveSpawn();
       },
-    } as any,
-    abortFns: {} as any,
-    resolveToolApproval: () => {},
-    getPendingApprovalsForSession: () => [],
+      abort: () => false,
+    }) as any,
   });
 
   (ws as unknown as EventEmitter).emit(
@@ -210,15 +206,13 @@ test('/fork surfaces a task_notification when both the announcement-time and ret
   });
 
   handleChatConnection(ws, { user: { id: 'user-1' } } as any, {
-    spawnFns: {
-      claude: async (_command: unknown, _options: unknown, writer: { setSessionId: (id: string) => void }) => {
+    resolveRuntime: () => ({
+      run: async (_command: unknown, _options: unknown, writer: { setSessionId: (id: string) => void }) => {
         writer.setSessionId(FORKED_PROVIDER_SESSION_ID);
         resolveSpawn();
       },
-    } as any,
-    abortFns: {} as any,
-    resolveToolApproval: () => {},
-    getPendingApprovalsForSession: () => [],
+      abort: () => false,
+    }) as any,
   });
 
   (ws as unknown as EventEmitter).emit(

@@ -5,9 +5,11 @@ import { CursorMcpProvider } from '@/modules/providers/list/cursor/cursor-mcp.pr
 import { CursorSessionSynchronizer } from '@/modules/providers/list/cursor/cursor-session-synchronizer.provider.js';
 import { CursorSessionsProvider } from '@/modules/providers/list/cursor/cursor-sessions.provider.js';
 import { CursorSkillsProvider } from '@/modules/providers/list/cursor/cursor-skills.provider.js';
+import { CursorRuntimeProvider } from '@/modules/providers/list/cursor/cursor-runtime.provider.js';
 import type {
   IProviderAuth,
   IProviderModels,
+  IProviderRuntime,
   IProviderSessionSynchronizer,
   IProviderSkills,
   IProviderSessions,
@@ -20,6 +22,7 @@ export class CursorProvider extends AbstractProvider {
   readonly skills: IProviderSkills = new CursorSkillsProvider();
   readonly sessions: IProviderSessions = new CursorSessionsProvider();
   readonly sessionSynchronizer: IProviderSessionSynchronizer = new CursorSessionSynchronizer();
+  readonly runtime: IProviderRuntime = new CursorRuntimeProvider();
 
   constructor() {
     super('cursor');

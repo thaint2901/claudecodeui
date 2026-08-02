@@ -19,20 +19,21 @@ import path from 'path';
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
-import { buildClaudeUserContent, normalizeImageDescriptors } from './shared/image-attachments.js';
-import { CLAUDE_FALLBACK_MODELS } from './modules/providers/list/claude/claude-models.provider.js';
-import { providerModelsService } from './modules/providers/services/provider-models.service.js';
-import { resolveClaudeCodeExecutablePath } from './shared/claude-cli-path.js';
+import { buildClaudeUserContent, normalizeImageDescriptors } from '@/shared/image-attachments.js';
+import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
+import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 import {
   createNotificationEvent,
   notifyRunFailed,
   notifyRunStopped,
   notifyUserIfEnabled
-} from './services/notification-orchestrator.js';
-import { sessionsService } from './modules/providers/services/sessions.service.js';
-import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
-import { createCompleteMessage, createNormalizedMessage } from './shared/utils.js';
-import { setClaudeBuiltinCommands } from './utils/claude-builtin-commands.js';
+} from '@/modules/notifications/index.js';
+import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
+import { createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
+
+import { CLAUDE_FALLBACK_MODELS } from './claude-models.provider.js';
+import { setClaudeBuiltinCommands } from './claude-builtin-commands.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
@@ -912,24 +913,6 @@ async function abortClaudeSDKSession(sessionId) {
 }
 
 /**
- * Checks if an SDK session is currently active
- * @param {string} sessionId - Session identifier
- * @returns {boolean} True if session is active
- */
-function isClaudeSDKSessionActive(sessionId) {
-  const session = getSession(sessionId);
-  return session && session.status === 'active';
-}
-
-/**
- * Gets all active SDK session IDs
- * @returns {Array<string>} Array of active session IDs
- */
-function getActiveClaudeSDKSessions() {
-  return getAllSessions();
-}
-
-/**
  * Get pending tool approvals for a specific session.
  * @param {string} sessionId - The session ID
  * @returns {Array} Array of pending permission request objects
@@ -951,30 +934,12 @@ function getPendingApprovalsForSession(sessionId) {
   return pending;
 }
 
-/**
- * Reconnect a session's WebSocketWriter to a new raw WebSocket.
- * Called when client reconnects (e.g. page refresh) while SDK is still running.
- * @param {string} sessionId - The session ID
- * @param {Object} newRawWs - The new raw WebSocket connection
- * @returns {boolean} True if writer was successfully reconnected
- */
-function reconnectSessionWriter(sessionId, newRawWs) {
-  const session = getSession(sessionId);
-  if (!session?.writer?.updateWebSocket) return false;
-  session.writer.updateWebSocket(newRawWs);
-  console.log(`[RECONNECT] Writer swapped for session ${sessionId}`);
-  return true;
-}
-
 // Export public API
 export {
   queryClaudeSDK,
   abortClaudeSDKSession,
-  isClaudeSDKSessionActive,
-  getActiveClaudeSDKSessions,
   resolveToolApproval,
   getPendingApprovalsForSession,
-  reconnectSessionWriter,
   mapCliOptionsToSDK,
   shouldRecaptureSessionId,
   recaptureForkSession

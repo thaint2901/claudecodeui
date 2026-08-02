@@ -135,7 +135,14 @@ const writeProviderModelsCacheFile = async (
  * place.
  */
 export const createProviderModelsService = (dependencies: ProviderModelsServiceDependencies = {}) => {
-  const resolveProvider = dependencies.resolveProvider ?? providerRegistry.resolveProvider;
+  // Deferred lookup (not captured at creation time): providerModelsService is a
+  // module-level singleton created eagerly below, and the runtime adapters
+  // (Task 4) now pull this module in from inside the provider.registry.ts
+  // import graph. Capturing `providerRegistry.resolveProvider` eagerly here
+  // would read it mid-circular-import, before its `const providerRegistry`
+  // binding is initialized.
+  const resolveProvider = (provider: LLMProvider) =>
+    (dependencies.resolveProvider ?? providerRegistry.resolveProvider)(provider);
   const cachePath = dependencies.cachePath ?? getProviderModelsCachePath();
   const activeModelChangesPath = dependencies.activeModelChangesPath;
   const now = dependencies.now ?? (() => Date.now());

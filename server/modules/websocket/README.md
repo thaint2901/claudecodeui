@@ -129,10 +129,10 @@ flowchart TD
   B -->|invalid| C[send kind:protocol_error]
   B -->|ok| D{data.type}
 
-  D -->|chat.send| E[resolve session row -> startRun -> spawnFns provider]
-  D -->|chat.abort| F[abortFns provider + synthetic complete]
+  D -->|chat.send| E[resolve session row -> startRun -> resolveRuntime provider .run]
+  D -->|chat.abort| F[resolveRuntime provider .abort + synthetic complete]
   D -->|chat.subscribe| G[chat_subscribed ack + attach socket + replay events seq > lastSeq]
-  D -->|chat.permission-response| H[resolveToolApproval]
+  D -->|chat.permission-response| H[resolveRuntime claude .approvals.resolve]
   D -->|other| I[send kind:protocol_error]
 ```
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { mapCliOptionsToSDK, shouldRecaptureSessionId, recaptureForkSession } from '@/claude-sdk.js';
+import { mapCliOptionsToSDK, shouldRecaptureSessionId, recaptureForkSession } from '@/modules/providers/list/claude/claude-sdk.js';
 
 test('mapCliOptionsToSDK enables includePartialMessages so the SDK streams partial assistant text', () => {
   const sdkOptions = mapCliOptionsToSDK({

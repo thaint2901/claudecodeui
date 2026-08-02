@@ -9,18 +9,16 @@
  *
  * - queryCodex(command, options, ws) - Execute a prompt with streaming via WebSocket
  * - abortCodexSession(sessionId) - Cancel an active session
- * - isCodexSessionActive(sessionId) - Check if a session is running
- * - getActiveCodexSessions() - List all active sessions
  */
 
 import { Codex } from '@openai/codex-sdk';
 
-import { buildCodexInputItems, normalizeImageDescriptors } from './shared/image-attachments.js';
-import { notifyRunFailed, notifyRunStopped } from './services/notification-orchestrator.js';
-import { sessionsService } from './modules/providers/services/sessions.service.js';
-import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
-import { providerModelsService } from './modules/providers/services/provider-models.service.js';
-import { createCompleteMessage, createNormalizedMessage } from './shared/utils.js';
+import { buildCodexInputItems, normalizeImageDescriptors } from '@/shared/image-attachments.js';
+import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
+import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
+import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
+import { createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
 
 const activeCodexSessions = new Map();
 
@@ -451,36 +449,6 @@ export function abortCodexSession(sessionId) {
 }
 
 /**
- * Check if a session is active
- * @param {string} sessionId - Session ID to check
- * @returns {boolean} - Whether session is active
- */
-export function isCodexSessionActive(sessionId) {
-  const session = activeCodexSessions.get(sessionId);
-  return session?.status === 'running';
-}
-
-/**
- * Get all active sessions
- * @returns {Array} - Array of active session info
- */
-export function getActiveCodexSessions() {
-  const sessions = [];
-
-  for (const [id, session] of activeCodexSessions.entries()) {
-    if (session.status === 'running') {
-      sessions.push({
-        id,
-        status: session.status,
-        startedAt: session.startedAt
-      });
-    }
-  }
-
-  return sessions;
-}
-
-/**
  * Helper to send message via WebSocket or writer
  * @param {WebSocket|object} ws - WebSocket or response writer
  * @param {object} data - Data to send
@@ -500,6 +468,8 @@ function sendMessage(ws, data) {
 }
 
 // Clean up old completed sessions periodically
+// .unref() so this module-level interval doesn't keep short-lived processes
+// (e.g. test runners) alive; the server's own cleanup cadence is unaffected.
 setInterval(() => {
   const now = Date.now();
   const maxAge = 30 * 60 * 1000; // 30 minutes
@@ -512,4 +482,4 @@ setInterval(() => {
       }
     }
   }
-}, 5 * 60 * 1000); // Every 5 minutes
+}, 5 * 60 * 1000).unref(); // Every 5 minutes

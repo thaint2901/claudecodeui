@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+
 import {
   setClaudeBuiltinCommands,
   getClaudeBuiltinCommandEntries,
-} from './claude-builtin-commands.js';
+} from '../claude-builtin-commands.js';
 
 test('returns empty array before any capture', () => {
   setClaudeBuiltinCommands(null); // reset/ignore invalid

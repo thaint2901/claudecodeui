@@ -20,6 +20,7 @@ import {
     closeSessionLockWatcher,
     closeSessionsWatcher,
     initializeSessionsWatcher,
+    providerRegistry,
     sessionLockWatcherService,
 } from '@/modules/providers/index.js';
 import { createWebSocketServer } from '@/modules/websocket/index.js';
@@ -27,24 +28,6 @@ import { createWebSocketServer } from '@/modules/websocket/index.js';
 import { getConnectableHost } from '../shared/networkHosts.js';
 
 import { findAppRoot, getModuleDir } from './utils/runtime-paths.js';
-import {
-    queryClaudeSDK,
-    abortClaudeSDKSession,
-    resolveToolApproval,
-    getPendingApprovalsForSession,
-} from './claude-sdk.js';
-import {
-    spawnCursor,
-    abortCursorSession,
-} from './cursor-cli.js';
-import {
-    queryCodex,
-    abortCodexSession,
-} from './openai-codex.js';
-import {
-    spawnOpenCode,
-    abortOpenCodeSession,
-} from './opencode-cli.js';
 import {
     stripAnsiSequences,
     normalizeDetectedUrl,
@@ -116,20 +99,7 @@ const wss = createWebSocketServer(server, {
         authenticateWebSocket,
     },
     chat: {
-        spawnFns: {
-            claude: queryClaudeSDK,
-            cursor: spawnCursor,
-            codex: queryCodex,
-            opencode: spawnOpenCode,
-        },
-        abortFns: {
-            claude: abortClaudeSDKSession,
-            cursor: abortCursorSession,
-            codex: abortCodexSession,
-            opencode: abortOpenCodeSession,
-        },
-        resolveToolApproval,
-        getPendingApprovalsForSession,
+        resolveRuntime: (provider) => providerRegistry.resolveProvider(provider).runtime,
     },
     shell: {
         resolveProviderSessionId: (sessionId, provider) => {

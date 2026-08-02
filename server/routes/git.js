@@ -4,8 +4,7 @@ import spawn from 'cross-spawn';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { projectsDb } from '../modules/database/index.js';
-import { queryClaudeSDK } from '../claude-sdk.js';
-import { spawnCursor } from '../cursor-cli.js';
+import { providerRegistry } from '../modules/providers/index.js';
 
 const router = express.Router();
 const COMMIT_DIFF_CHARACTER_LIMIT = 500_000;
@@ -1126,13 +1125,13 @@ Generate the commit message:`;
 
     // Call the appropriate agent
     if (provider === 'claude') {
-      await queryClaudeSDK(prompt, {
+      await providerRegistry.resolveProvider('claude').runtime.run(prompt, {
         cwd: projectPath,
         permissionMode: 'bypassPermissions',
         model: 'sonnet'
       }, writer);
     } else if (provider === 'cursor') {
-      await spawnCursor(prompt, {
+      await providerRegistry.resolveProvider('cursor').runtime.run(prompt, {
         cwd: projectPath,
         skipPermissions: true
       }, writer);
