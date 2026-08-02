@@ -234,8 +234,11 @@ export interface ProviderRunOptions {
 }
 
 export interface IProviderRuntimeApprovals {
-  /** Resolve a pending canUseTool request. Returns false for unknown ids. */
-  resolve(requestId: string, decision: Record<string, unknown>): boolean;
+  /**
+   * Resolve a pending canUseTool request. Returns a falsy value (`undefined`)
+   * for unknown request ids — callers must coalesce (the hub does).
+   */
+  resolve(requestId: string, decision: Record<string, unknown>): boolean | undefined;
   getPendingForSession(providerSessionId: string): unknown[];
 }
 

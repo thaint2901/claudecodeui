@@ -28,7 +28,7 @@ export class ClaudeRuntimeProvider implements IProviderRuntime {
   }
 
   readonly approvals: IProviderRuntimeApprovals = {
-    // @ts-expect-error -- resolveToolApproval has no return statement (inferred `void`); the hub's `?? false` coalescing treats that as false downstream.
+    // @ts-expect-error -- resolveToolApproval has no return statement, so tsc infers `void`; `void` is not structurally assignable to the contract's `boolean | undefined`, even though the actual runtime values (`undefined`/no-op) already satisfy it.
     resolve: resolveToolApproval,
     getPendingForSession: getPendingApprovalsForSession,
   };

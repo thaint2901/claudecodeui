@@ -26,9 +26,9 @@ test('only claude exposes the approvals capability', () => {
 test('claude approvals.resolve returns false for an unknown request id', () => {
   // resolveToolApproval (claude-sdk.js) has no return statement for the
   // "unknown id" branch, so it actually yields `undefined`, not `false`.
-  // The websocket hub coalesces the result with `?? false`, so callers still
-  // see `false` downstream — this pins the real (pre-existing) behavior at
-  // this boundary rather than the contract's stricter `boolean` claim.
+  // The contract's `resolve` return type is `boolean | undefined` precisely
+  // to match this — this pins the real (pre-existing) behavior at this
+  // boundary rather than a stricter `boolean` claim.
   const claude = providerRegistry.resolveProvider('claude').runtime;
   assert.equal(claude.approvals?.resolve('nonexistent-request-id', {}), undefined);
 });

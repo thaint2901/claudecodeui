@@ -9,8 +9,6 @@
  *
  * - queryCodex(command, options, ws) - Execute a prompt with streaming via WebSocket
  * - abortCodexSession(sessionId) - Cancel an active session
- * - isCodexSessionActive(sessionId) - Check if a session is running
- * - getActiveCodexSessions() - List all active sessions
  */
 
 import { Codex } from '@openai/codex-sdk';
