@@ -10,7 +10,7 @@ import {
   stripFrontMatter,
 } from "../utils/command-paths.js";
 import { findAppRoot, getModuleDir } from "../utils/runtime-paths.js";
-import { getClaudeBuiltinCommandEntries } from "../utils/claude-builtin-commands.js";
+import { getClaudeBuiltinCommandEntries } from "../modules/providers/list/claude/claude-builtin-commands.js";
 
 const __dirname = getModuleDir(import.meta.url);
 // This route reads the top-level package.json for the status command, so it needs the real
