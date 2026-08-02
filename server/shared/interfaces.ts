@@ -191,3 +191,67 @@ export interface IProviderSessionSynchronizer {
    */
   writeBackCustomName?(providerSessionId: ProviderSessionId, customName: string, projectPath?: string): Promise<boolean>;
 }
+
+// ---------------------------
+//----------------- PROVIDER RUNTIME INTERFACE ------------
+/**
+ * Writer handed to a run. ChatSessionWriter, SSEStreamWriter and the
+ * inline writers in routes/git.js all satisfy it today.
+ */
+export interface ProviderRunWriter {
+  send(message: unknown): void;
+  /**
+   * Optional: how app-level tracking learns the provider-native session id.
+   * Claude MAY call this more than once (fork recapture).
+   */
+  setSessionId?(providerSessionId: string): void;
+  userId?: number | string | null;
+  isWebSocketWriter?: boolean;
+  isSSEStreamWriter?: boolean;
+}
+
+/**
+ * Options bag for one run. Known keys typed; providers tolerate extras
+ * (the hub spreads client options), hence the index signature.
+ */
+export interface ProviderRunOptions {
+  sessionId?: string | null;
+  sessionSummary?: string | null;
+  cwd?: string;
+  projectPath?: string;
+  model?: string;
+  effort?: string;
+  images?: unknown[];
+  permissionMode?: string;
+  toolsSettings?: Record<string, unknown>;
+  skipPermissions?: boolean;
+  resume?: boolean;
+  forkSession?: boolean;
+  forkSubagent?: boolean;
+  resumeSessionAt?: string;
+  [key: string]: unknown;
+}
+
+export interface IProviderRuntimeApprovals {
+  /** Resolve a pending canUseTool request. Returns false for unknown ids. */
+  resolve(requestId: string, decision: Record<string, unknown>): boolean;
+  getPendingForSession(providerSessionId: string): unknown[];
+}
+
+/**
+ * Execution contract for one provider.
+ *
+ * run(): resolves when the run ends. MAY reject on spawn/exit failure
+ * (Cursor, OpenCode today) but MUST have already emitted `error` +
+ * `complete` events via the writer before rejecting — callers treat
+ * rejection as already-reported. Claude/Codex never reject.
+ *
+ * abort(): keyed by the provider-native session id; returns whether a
+ * live run was found and signalled. Sync or async per provider.
+ */
+export interface IProviderRuntime {
+  run(command: string, options: ProviderRunOptions, writer: ProviderRunWriter): Promise<void>;
+  abort(providerSessionId: string): boolean | Promise<boolean>;
+  /** Claude-only tool-approval channel; absent for providers without one. */
+  readonly approvals?: IProviderRuntimeApprovals;
+}
