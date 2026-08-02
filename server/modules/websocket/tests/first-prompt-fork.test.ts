@@ -67,14 +67,12 @@ async function withFirstPromptFixture(
       ws as never,
       { user: { id: 1 } } as unknown as AuthenticatedWebSocketRequest,
       {
-        spawnFns: {
-          claude: async (...args: unknown[]) => {
+        resolveRuntime: () => ({
+          run: async (...args: unknown[]) => {
             spawnCalls.push(args);
           },
-        } as never,
-        abortFns: { claude: () => true } as never,
-        resolveToolApproval: () => undefined,
-        getPendingApprovalsForSession: () => [],
+          abort: () => true,
+        }),
       } as never
     );
 

@@ -7,6 +7,7 @@ import { findForkResumePoint, sessionsService } from '@/modules/providers/index.
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import { getGlobalImageAssetsDir, normalizeImageDescriptors } from '@/shared/image-attachments.js';
+import type { IProviderRuntime } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
   AuthenticatedWebSocketRequest,
@@ -45,37 +46,9 @@ export function filterImagesToUploadStore(images: unknown, assetsRootOverride?: 
   });
 }
 
-/**
- * One provider runtime entry point. All five runtimes share this signature,
- * which lets the chat handler dispatch through a provider-keyed map instead
- * of provider-specific branches.
- */
-type ProviderSpawnFn = (
-  command: string,
-  options: AnyRecord,
-  writer: unknown
-) => Promise<unknown>;
-
 type ChatWebSocketDependencies = {
-  /** Provider runtimes keyed by provider id. */
-  spawnFns: Record<LLMProvider, ProviderSpawnFn>;
-  /**
-   * Abort functions keyed by provider id. They are addressed with the
-   * provider-native session id (that is how runtimes key their process maps).
-   * The Claude abort is async; the rest are sync — both shapes are accepted.
-   */
-  abortFns: Record<LLMProvider, (providerSessionId: string) => boolean | Promise<boolean>>;
-  resolveToolApproval: (
-    requestId: string,
-    payload: {
-      allow: boolean;
-      updatedInput?: unknown;
-      message?: string;
-      rememberEntry?: unknown;
-    }
-  ) => void;
-  /** Claude-only today: pending tool approvals included in `chat_subscribed`. */
-  getPendingApprovalsForSession: (providerSessionId: string) => unknown[];
+  /** Resolves the executable runtime for a provider id via the provider registry. */
+  resolveRuntime: (provider: LLMProvider) => IProviderRuntime;
 };
 
 /**
@@ -228,8 +201,10 @@ async function handleChatSend(
   }
 
   const provider = session.provider as LLMProvider;
-  const spawnFn = dependencies.spawnFns[provider];
-  if (!spawnFn) {
+  let runtime: IProviderRuntime;
+  try {
+    runtime = dependencies.resolveRuntime(provider);
+  } catch {
     sendProtocolError(ws, 'UNSUPPORTED_PROVIDER', `Provider "${provider}" is not available.`, sessionId);
     return;
   }
@@ -384,7 +359,7 @@ async function handleChatSend(
     };
 
     try {
-      await spawnFn(
+      await runtime.run(
         forkCommand.prompt || 'Continue from where the conversation left off. Wait for further instructions and summarize the current state briefly.',
         forkOptions,
         forkRun.writer,
@@ -500,7 +475,7 @@ async function handleChatSend(
   delete runtimeOptions.editAtMessageUuid;
 
   try {
-    await spawnFn(command, runtimeOptions, run.writer);
+    await runtime.run(command, runtimeOptions, run.writer);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: message });
@@ -536,10 +511,9 @@ async function handleChatAbort(
     return;
   }
 
-  const abortFn = dependencies.abortFns[run.provider];
   let success = false;
-  if (abortFn && run.providerSessionId) {
-    success = Boolean(await abortFn(run.providerSessionId));
+  if (run.providerSessionId) {
+    success = Boolean(await dependencies.resolveRuntime(run.provider).abort(run.providerSessionId));
   }
 
   chatRunRegistry.completeRun(sessionId, {
@@ -592,7 +566,7 @@ function handleChatSubscribe(
     // Pending approvals are tracked under the provider-native id inside the
     // Claude runtime; remap their sessionId so the client only sees app ids.
     const pendingPermissions = (run?.providerSessionId
-      ? dependencies.getPendingApprovalsForSession(run.providerSessionId)
+      ? dependencies.resolveRuntime(run.provider).approvals?.getPendingForSession(run.providerSessionId) ?? []
       : []
     ).map((approval) =>
       approval && typeof approval === 'object'
@@ -631,12 +605,18 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
     return;
   }
 
-  dependencies.resolveToolApproval(data.requestId, {
+  // Approvals are Claude-only today (see IProviderRuntime.approvals), and the
+  // chat.permission-response payload carries no provider/session — it never
+  // has, since requestId is already globally unique within the Claude
+  // runtime's pending-approvals map. Hardcoding 'claude' here reproduces
+  // exactly what dependencies.resolveToolApproval was bound to before this
+  // refactor (only Claude's function was ever wired in server/index.js).
+  dependencies.resolveRuntime('claude').approvals?.resolve(data.requestId, {
     allow: Boolean(data.allow),
     updatedInput: data.updatedInput,
     message: typeof data.message === 'string' ? data.message : undefined,
     rememberEntry: data.rememberEntry,
-  });
+  }) ?? false;
 }
 
 /**
