@@ -9,7 +9,7 @@ import crypto from 'crypto';
 import { Octokit } from '@octokit/rest';
 
 import { userDb, apiKeysDb, githubTokensDb, projectsDb, sessionsDb } from '../modules/database/index.js';
-import { queryClaudeSDK } from '../claude-sdk.js';
+import { queryClaudeSDK } from '../modules/providers/list/claude/claude-sdk.js';
 import { spawnCursor } from '../cursor-cli.js';
 import { queryCodex } from '../openai-codex.js';
 import { spawnOpenCode } from '../opencode-cli.js';

@@ -4,7 +4,7 @@ import spawn from 'cross-spawn';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { projectsDb } from '../modules/database/index.js';
-import { queryClaudeSDK } from '../claude-sdk.js';
+import { queryClaudeSDK } from '../modules/providers/list/claude/claude-sdk.js';
 import { spawnCursor } from '../cursor-cli.js';
 
 const router = express.Router();

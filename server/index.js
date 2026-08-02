@@ -32,7 +32,7 @@ import {
     abortClaudeSDKSession,
     resolveToolApproval,
     getPendingApprovalsForSession,
-} from './claude-sdk.js';
+} from './modules/providers/list/claude/claude-sdk.js';
 import {
     spawnCursor,
     abortCursorSession,
