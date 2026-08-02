@@ -3,12 +3,12 @@ import fsSync from 'node:fs';
 import crossSpawn from 'cross-spawn';
 import Database from 'better-sqlite3';
 
-import { appendImagesInputTag } from './shared/image-attachments.js';
-import { sessionsService } from './modules/providers/services/sessions.service.js';
-import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
-import { providerModelsService } from './modules/providers/services/provider-models.service.js';
-import { notifyRunFailed, notifyRunStopped } from './services/notification-orchestrator.js';
-import { createCompleteMessage, createNormalizedMessage, flattenPromptForWindowsShell, getOpenCodeDatabasePath } from './shared/utils.js';
+import { appendImagesInputTag } from '@/shared/image-attachments.js';
+import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
+import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
+import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
+import { createCompleteMessage, createNormalizedMessage, flattenPromptForWindowsShell, getOpenCodeDatabasePath } from '@/shared/utils.js';
 
 // cross-spawn resolves .cmd shims/PATHEXT on Windows and delegates to
 // child_process.spawn everywhere else.
@@ -390,17 +390,7 @@ function abortOpenCodeSession(sessionId) {
   return true;
 }
 
-function isOpenCodeSessionActive(sessionId) {
-  return activeOpenCodeProcesses.has(sessionId);
-}
-
-function getActiveOpenCodeSessions() {
-  return Array.from(activeOpenCodeProcesses.keys());
-}
-
 export {
   spawnOpenCode,
   abortOpenCodeSession,
-  isOpenCodeSessionActive,
-  getActiveOpenCodeSessions,
 };

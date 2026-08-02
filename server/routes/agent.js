@@ -10,9 +10,9 @@ import { Octokit } from '@octokit/rest';
 
 import { userDb, apiKeysDb, githubTokensDb, projectsDb, sessionsDb } from '../modules/database/index.js';
 import { queryClaudeSDK } from '../modules/providers/list/claude/claude-sdk.js';
-import { spawnCursor } from '../cursor-cli.js';
-import { queryCodex } from '../openai-codex.js';
-import { spawnOpenCode } from '../opencode-cli.js';
+import { spawnCursor } from '../modules/providers/list/cursor/cursor-cli.js';
+import { queryCodex } from '../modules/providers/list/codex/openai-codex.js';
+import { spawnOpenCode } from '../modules/providers/list/opencode/opencode-cli.js';
 import { providerModelsService } from '../modules/providers/services/provider-models.service.js';
 import { IS_PLATFORM } from '../constants/config.js';
 import { normalizeProjectPath } from '../shared/utils.js';

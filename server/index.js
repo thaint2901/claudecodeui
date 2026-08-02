@@ -36,15 +36,15 @@ import {
 import {
     spawnCursor,
     abortCursorSession,
-} from './cursor-cli.js';
+} from './modules/providers/list/cursor/cursor-cli.js';
 import {
     queryCodex,
     abortCodexSession,
-} from './openai-codex.js';
+} from './modules/providers/list/codex/openai-codex.js';
 import {
     spawnOpenCode,
     abortOpenCodeSession,
-} from './opencode-cli.js';
+} from './modules/providers/list/opencode/opencode-cli.js';
 import {
     stripAnsiSequences,
     normalizeDetectedUrl,

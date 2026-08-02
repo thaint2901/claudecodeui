@@ -5,7 +5,7 @@ import path from 'path';
 import { promises as fs } from 'fs';
 import { projectsDb } from '../modules/database/index.js';
 import { queryClaudeSDK } from '../modules/providers/list/claude/claude-sdk.js';
-import { spawnCursor } from '../cursor-cli.js';
+import { spawnCursor } from '../modules/providers/list/cursor/cursor-cli.js';
 
 const router = express.Router();
 const COMMIT_DIFF_CHARACTER_LIMIT = 500_000;
