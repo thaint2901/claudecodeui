@@ -4,10 +4,12 @@ import { OpenCodeMcpProvider } from '@/modules/providers/list/opencode/opencode-
 import { OpenCodeSessionSynchronizer } from '@/modules/providers/list/opencode/opencode-session-synchronizer.provider.js';
 import { OpenCodeSessionsProvider } from '@/modules/providers/list/opencode/opencode-sessions.provider.js';
 import { OpenCodeSkillsProvider } from '@/modules/providers/list/opencode/opencode-skills.provider.js';
+import { OpenCodeRuntimeProvider } from '@/modules/providers/list/opencode/opencode-runtime.provider.js';
 import { AbstractProvider } from '@/modules/providers/shared/base/abstract.provider.js';
 import type {
   IProviderAuth,
   IProviderModels,
+  IProviderRuntime,
   IProviderSessionSynchronizer,
   IProviderSkills,
   IProviderSessions,
@@ -20,6 +22,7 @@ export class OpenCodeProvider extends AbstractProvider {
   readonly skills: IProviderSkills = new OpenCodeSkillsProvider();
   readonly sessions: IProviderSessions = new OpenCodeSessionsProvider();
   readonly sessionSynchronizer: IProviderSessionSynchronizer = new OpenCodeSessionSynchronizer();
+  readonly runtime: IProviderRuntime = new OpenCodeRuntimeProvider();
 
   constructor() {
     super('opencode');

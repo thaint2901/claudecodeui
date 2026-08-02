@@ -33,6 +33,7 @@ export interface IProvider {
   readonly skills: IProviderSkills;
   readonly sessions: IProviderSessions;
   readonly sessionSynchronizer: IProviderSessionSynchronizer;
+  readonly runtime: IProviderRuntime;
 }
 
 // ---------------------------
