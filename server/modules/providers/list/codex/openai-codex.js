@@ -470,6 +470,8 @@ function sendMessage(ws, data) {
 }
 
 // Clean up old completed sessions periodically
+// .unref() so this module-level interval doesn't keep short-lived processes
+// (e.g. test runners) alive; the server's own cleanup cadence is unaffected.
 setInterval(() => {
   const now = Date.now();
   const maxAge = 30 * 60 * 1000; // 30 minutes
@@ -482,4 +484,4 @@ setInterval(() => {
       }
     }
   }
-}, 5 * 60 * 1000); // Every 5 minutes
+}, 5 * 60 * 1000).unref(); // Every 5 minutes
