@@ -9,10 +9,7 @@ import crypto from 'crypto';
 import { Octokit } from '@octokit/rest';
 
 import { userDb, apiKeysDb, githubTokensDb, projectsDb, sessionsDb } from '../modules/database/index.js';
-import { queryClaudeSDK } from '../modules/providers/list/claude/claude-sdk.js';
-import { spawnCursor } from '../modules/providers/list/cursor/cursor-cli.js';
-import { queryCodex } from '../modules/providers/list/codex/openai-codex.js';
-import { spawnOpenCode } from '../modules/providers/list/opencode/opencode-cli.js';
+import { providerRegistry } from '../modules/providers/index.js';
 import { providerModelsService } from '../modules/providers/services/provider-models.service.js';
 import { IS_PLATFORM } from '../constants/config.js';
 import { normalizeProjectPath } from '../shared/utils.js';
@@ -959,7 +956,7 @@ router.post('/', validateExternalApiKey, async (req, res) => {
     if (provider === 'claude') {
       console.log('🤖 Starting Claude SDK session');
 
-      await queryClaudeSDK(message.trim(), {
+      await providerRegistry.resolveProvider('claude').runtime.run(message.trim(), {
         projectPath: finalProjectPath,
         cwd: finalProjectPath,
         sessionId: sessionId || null,
@@ -971,7 +968,7 @@ router.post('/', validateExternalApiKey, async (req, res) => {
     } else if (provider === 'cursor') {
       console.log('🖱️ Starting Cursor CLI session');
 
-      await spawnCursor(message.trim(), {
+      await providerRegistry.resolveProvider('cursor').runtime.run(message.trim(), {
         projectPath: finalProjectPath,
         cwd: finalProjectPath,
         sessionId: sessionId || null,
@@ -981,7 +978,7 @@ router.post('/', validateExternalApiKey, async (req, res) => {
     } else if (provider === 'codex') {
       console.log('🤖 Starting Codex SDK session');
 
-      await queryCodex(message.trim(), {
+      await providerRegistry.resolveProvider('codex').runtime.run(message.trim(), {
         projectPath: finalProjectPath,
         cwd: finalProjectPath,
         sessionId: sessionId || null,
@@ -992,7 +989,7 @@ router.post('/', validateExternalApiKey, async (req, res) => {
     } else if (provider === 'opencode') {
       console.log('Starting OpenCode CLI session');
 
-      await spawnOpenCode(message.trim(), {
+      await providerRegistry.resolveProvider('opencode').runtime.run(message.trim(), {
         projectPath: finalProjectPath,
         cwd: finalProjectPath,
         sessionId: sessionId || null,
