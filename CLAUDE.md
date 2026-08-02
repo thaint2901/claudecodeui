@@ -51,10 +51,6 @@ src/                  # React + Vite frontend (TS/TSX + JS/JSX mix)
 
 server/                # Express + ws backend (mostly ESM JS, migrating to TS)
   index.js              # bootstrap: env, DB, sessions watcher, single ws server, routes
-  claude-sdk.js         # @anthropic-ai/claude-agent-sdk query wrapper (queryClaudeSDK, abort, approvals)
-  cursor-cli.js         # Cursor CLI spawn/abort
-  openai-codex.js       # Codex SDK query wrapper
-  opencode-cli.js       # OpenCode spawn/abort
   voice-proxy.js        # TTS proxy routes
   browser-use-mcp.ts    # Browser-use MCP integration
   routes/               # auth, agent, commands, cursor, git, mcp-utils,
@@ -65,6 +61,7 @@ server/                # Express + ws backend (mostly ESM JS, migrating to TS)
     database/             # better-sqlite3 connection, init-db, migrations, schema, repositories
     projects/             # project CRUD REST routes
     providers/            # CLI provider registry (claude/cursor/codex/opencode) — see provider.registry.ts
+                          # runtimes (execution) live per-provider in modules/providers/list/<provider>/
     websocket/            # central ws hub: chat, shell, plugin proxy, session broadcasts
   services/             # notification-orchestrator, vapid-keys
   utils/                # url-detection, commandParser, gitConfig, plugin-loader,
@@ -86,16 +83,15 @@ scripts/fix-node-pty.js # postinstall: chmod node-pty spawn-helper on macOS
 
 1. React `ChatView` (in `src/components/chat/view/`) sends a message through `WebSocketContext`.
 2. The frontend opens a WS to one of the paths proxied in `vite.config.js`: `/ws` (chat), `/shell` (terminal), `/plugin-ws` (plugin RPC). All three resolve to the same server-side `WebSocket` instance created by `server/modules/websocket/index.ts`.
-3. The websocket hub dispatches chat messages to the matching provider spawn function — `queryClaudeSDK` (Claude Agent SDK), `spawnCursor`, `queryCodex`, or `spawnOpenCode`. Each streams structured events back to the client.
-4. Claude tool approvals are coordinated via `getPendingApprovalsForSession` / `resolveToolApproval` (see `server/claude-sdk.js`) and a permissions UI driven by `src/contexts/PermissionContext.tsx`.
+3. The websocket hub dispatches chat messages to the provider's `runtime` resolved via `providerRegistry` (an `IProviderRuntime`, see `server/shared/interfaces.ts`). Each streams structured events back to the client.
+4. Claude tool approvals are coordinated via `getPendingApprovalsForSession` / `resolveToolApproval` (see `server/modules/providers/list/claude/claude-sdk.js`) and a permissions UI driven by `src/contexts/PermissionContext.tsx`.
 
 ### CLI provider model
 
 `server/modules/providers/provider.registry.ts` is the single source of truth for which CLIs the app supports. To add a new provider:
-1. Add a spawn/abort pair in `server/<your-cli>.js`.
-2. Register it in `server/modules/providers/provider.registry.ts` and in the `spawnFns` map inside the WS hub config (`server/index.js`).
-3. Surface it in the UI under `src/components/llm-logo-provider/`.
-4. The `GET /api/providers/:provider/models` endpoint reports the runtime model list (Claude, GPT families per `README.md`).
+1. Implement `<your-cli>-runtime.provider.ts` (an `IProviderRuntime`) plus the sub-providers in `server/modules/providers/list/<your-cli>/`, and register the provider class in `provider.registry.ts`.
+2. Surface it in the UI under `src/components/llm-logo-provider/`.
+3. The `GET /api/providers/:provider/models` endpoint reports the runtime model list (Claude, GPT families per `README.md`).
 
 ### Plugin system
 
@@ -161,7 +157,7 @@ This repo is a long-lived fork of upstream; these rules minimize the upstream co
 - **Browser auth token lives in `localStorage['auth-token']`.** Use it as `Authorization: Bearer <token>` for `curl` against the local dev server. `node:test` against pure helpers (no `@/` imports) is the only test path that runs without alias resolution — everything else needs `tsx` to resolve the `@/` alias (vitest is NOT a dependency in this checkout, so it is never the runner). **Use `npx tsx --test --tsconfig server/tsconfig.json <path>` instead** — `tsx` resolves the `@/` alias and this runs server `.test.ts` files correctly. Tests that use `mock.module` additionally need `--experimental-test-module-mocks` (Node 24) or they crash with `TypeError: mock.module is not a function`.
 - **Port 3001 can serve a stale prebuilt `dist/`.** `npm run dev` runs Vite (5173, live source) and the backend (3001) concurrently; hitting 3001 directly falls back to whatever `dist/` was last built via `npm run build`, which can be weeks stale and silently fake bugs that don't exist in current source. Always browse `localhost:5173` in dev.
 - **`npm run dev`'s backend doesn't hot-reload.** `server:dev` (what `npm run dev` uses) is plain `tsx`, not `tsx watch` — after syncing edits under `server/**`, run `systemctl --user restart cloudcli-dev` (logs: `journalctl --user -u cloudcli-dev -f`). `server:dev-watch` is the watch variant, not the default.
-- **cloudcli under ANY service manager (systemd local, pm2 on a30) must set `CLAUDE_CLI_PATH`** (e.g. `/home/<user>/.local/bin/claude`) — service PATH ≠ login shell, so the SDK's `claude` lookup fails with "native binary not found"; same applies to other provider CLIs if enabled. Wired via `claude-sdk.js:192` → `resolveClaudeCodeExecutablePath`.
+- **cloudcli under ANY service manager (systemd local, pm2 on a30) must set `CLAUDE_CLI_PATH`** (e.g. `/home/<user>/.local/bin/claude`) — service PATH ≠ login shell, so the SDK's `claude` lookup fails with "native binary not found"; same applies to other provider CLIs if enabled. Wired via `server/modules/providers/list/claude/claude-sdk.js:192` → `resolveClaudeCodeExecutablePath`.
 - **Mint a local JWT for curl/Playwright testing** without a password: read `jwt_secret` from the `app_config` table in `~/.cloudcli/auth.db` (the actual runtime DB — NOT the repo's `./database/auth.db`, which is an unrelated/empty dev artifact) and sign `{userId, username}` with `jsonwebtoken`, matching `generateToken` in `server/middleware/auth.js`.
 - **Every new WebSocket `kind` needs an explicit `case` in `useChatRealtimeHandlers.ts`'s switch.** Unhandled kinds fall through to `default`, which force-casts the raw event into `NormalizedMessage` and calls `sessionStore.appendRealtime()` — a non-chat event with no `.id` field corrupts that session's message store and crashes every later merge (`.id.startsWith` on `undefined`).
 - **Files replaced via atomic rename (e.g. `~/.claude/daemon/roster.json`) break a direct `chokidar.watch(filePath)`** — the watch silently stops firing after the first rename. Watch the containing directory and filter by filename instead.
