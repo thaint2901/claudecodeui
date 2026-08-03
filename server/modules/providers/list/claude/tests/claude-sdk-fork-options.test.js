@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { mapCliOptionsToSDK } from '../modules/providers/list/claude/claude-sdk.js';
+import { mapCliOptionsToSDK } from '../claude-sdk.js';
 
 test('fork options map to resumeSessionAt + forkSession', () => {
   const sdk = mapCliOptionsToSDK({

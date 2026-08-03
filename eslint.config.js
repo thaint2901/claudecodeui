@@ -187,6 +187,19 @@ export default tseslint.config(
           mode: "folder", // classify dependencies at folder-module level (not per individual file)
           capture: ["moduleName"], // capture the module folder name for messages/debugging/template use
         },
+        {
+          type: "backend-legacy",
+          pattern: [
+            "server/routes/**/*.{js,ts}",
+            "server/middleware/**/*.{js,ts}",
+            "server/services/**/*.{js,ts}",
+            "server/utils/**/*.{js,ts}",
+            "server/constants/**/*.{js,ts}",
+            "server/tests/**/*.{js,ts}",
+            "server/*.{js,ts}",
+          ],
+          mode: "file",
+        },
       ],
     },
     rules: {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { executeModelsCommand } from '../commands.js';
-import { providerModelsService } from '../../modules/providers/services/provider-models.service.js';
+import { providerModelsService } from '../../modules/providers/index.js';
 
 test('models command returns available models only for the active provider', async () => {
   const originalGetProviderModels = providerModelsService.getProviderModels;

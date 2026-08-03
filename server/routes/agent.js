@@ -1282,9 +1282,7 @@ sessionLockRouter.get('/:id/lock-status', async (req, res) => {
   }
 
   try {
-    const { getLockedBgSessionIds } = await import(
-      '../modules/providers/services/session-lock-watcher.service.js'
-    );
+    const { getLockedBgSessionIds } = await import('../modules/providers/index.js');
     const lockedIds = await getLockedBgSessionIds();
     const isLocked = lockedIds.has(id);
     res.json({ sessionId: id, isLocked, checkedAt: new Date().toISOString() });
