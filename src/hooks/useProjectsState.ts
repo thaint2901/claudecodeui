@@ -676,7 +676,6 @@ export function useProjectsState({
         eventSessionId
         && eventSessionId !== viewedSessionId
         && event.kind !== 'chat_subscribed'
-        && event.kind !== 'loading_progress'
         && event.kind !== 'session_upserted'
         && event.kind !== 'status'
         && event.kind !== 'stream_end'
