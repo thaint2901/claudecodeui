@@ -5,7 +5,7 @@ import path from 'path';
 import type { RequestHandler } from 'express';
 
 import { projectsDb } from '@/modules/database/index.js';
-import { WORKSPACES_ROOT } from '@/shared/utils.js';
+import { WORKSPACES_ROOT } from '@/shared/workspace-paths.js';
 
 const MAX_FILE_UPLOAD_SIZE_MB = 200;
 const MAX_FILE_UPLOAD_SIZE_BYTES = MAX_FILE_UPLOAD_SIZE_MB * 1024 * 1024;

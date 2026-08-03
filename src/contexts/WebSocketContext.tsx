@@ -1,6 +1,16 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+
 import { useAuth } from '../components/auth/context/AuthContext';
 import { IS_PLATFORM } from '../constants/config';
+import type { ServerEventKind } from '../../shared/wire-types.js';
+
+/**
+ * Complete set of `kind` values a chat websocket client can receive: every
+ * `ServerEventKind` the backend emits, plus the synthetic
+ * `websocket_reconnected` kind injected client-side when the socket re-opens
+ * after a drop.
+ */
+export type ClientEventKind = ServerEventKind | 'websocket_reconnected';
 
 /**
  * One frame received from the chat websocket. The server guarantees every
@@ -10,7 +20,7 @@ import { IS_PLATFORM } from '../constants/config';
  * client-side when the socket re-opens after a drop.
  */
 export type ServerEvent = {
-  kind?: string;
+  kind?: ClientEventKind;
   type?: string;
   sessionId?: string;
   seq?: number;

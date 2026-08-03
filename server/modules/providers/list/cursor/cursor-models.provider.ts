@@ -14,9 +14,10 @@ import type {
 } from '@/shared/types.js';
 import {
   buildDefaultProviderCurrentActiveModel,
-  sanitizeLeafDirectoryName,
   writeProviderSessionActiveModelChange,
-} from '@/shared/utils.js';
+} from '@/modules/providers/shared/active-model-store.js';
+
+import { sanitizeLeafDirectoryName } from './cursor-paths.js';
 
 export const CURSOR_FALLBACK_MODELS: ProviderModelsDefinition = {
   OPTIONS: [

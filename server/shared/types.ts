@@ -1,5 +1,7 @@
 import type { IncomingMessage } from 'node:http';
 
+import type { MessageKind, GatewayEventKind, ServerEventKind, NormalizedMessage } from '../../shared/wire-types.js';
+
 //----------------- HTTP RESPONSE SHAPES ------------
 /**
  * Canonical success envelope used by backend APIs that return a structured payload.
@@ -173,114 +175,13 @@ export type ProviderSessionActiveModelChange = {
 };
 
 /**
- * Message/event variants emitted by provider adapters and normalized transports.
- *
- * Keep this union in sync with event kinds produced by provider session adapters.
+ * Wire-level message/event types (`MessageKind`, `GatewayEventKind`,
+ * `ServerEventKind`, `NormalizedMessage`) now single-sourced at repo-root
+ * `shared/wire-types.ts` — the frontend re-exports the same types from
+ * `src/stores/useSessionStore.ts`. Import relatively (not via `@/`, which
+ * points at `server/shared/` in this tsconfig).
  */
-export type MessageKind =
-  | 'text'
-  | 'tool_use'
-  | 'tool_result'
-  | 'thinking'
-  | 'stream_delta'
-  | 'stream_end'
-  | 'error'
-  | 'complete'
-  | 'status'
-  | 'permission_request'
-  | 'permission_cancelled'
-  | 'session_created'
-  | 'interactive_prompt'
-  | 'task_notification';
-
-/**
- * Event kinds added by the chat gateway layer on top of provider message kinds.
- *
- * These are app-level realtime events (subscription acks, sidebar deltas,
- * project loading progress, protocol failures) that are not produced by any
- * provider adapter. Together with `MessageKind` they form the complete set of
- * `kind` values a websocket client can receive, so the frontend only ever
- * needs one kind-based switch.
- */
-export type GatewayEventKind =
-  | 'chat_subscribed'
-  | 'session_upserted'
-  | 'branch_created'
-  | 'loading_progress'
-  | 'protocol_error';
-
-/**
- * Complete set of `kind` values emitted to websocket clients.
- *
- * Every server-to-client websocket frame carries a `kind` from this union.
- * Provider runtimes emit `MessageKind` values; gateway services emit
- * `GatewayEventKind` values.
- */
-export type ServerEventKind = MessageKind | GatewayEventKind;
-
-/**
- * Provider-neutral message envelope used in REST responses and realtime channels.
- *
- * Every provider-specific message must be converted into this shape before being
- * emitted outside provider-specific modules.
- */
-export type NormalizedMessage = {
-  id: string;
-  sessionId: string;
-  timestamp: string;
-  provider: LLMProvider;
-  kind: MessageKind;
-  /**
-   * Monotonic per-run sequence number assigned by the chat run registry when a
-   * live event is forwarded to the websocket. History messages loaded over
-   * REST do not carry it. Clients use it with `chat.subscribe` to replay only
-   * the live events they missed across websocket reconnects.
-   */
-  seq?: number;
-  role?: 'user' | 'assistant';
-  content?: string;
-  /**
-   * Optional display-oriented metadata used by providers that need to expose
-   * richer transcript artifacts without introducing a brand-new message kind.
-   *
-   * Current Claude usage:
-   * - local slash commands expose parsed command fields
-   * - compact summaries are flagged so the UI can treat them differently later
-   */
-  displayText?: string;
-  commandName?: string;
-  commandMessage?: string;
-  commandArgs?: string;
-  isLocalCommand?: boolean;
-  isLocalCommandStdout?: boolean;
-  isCompactSummary?: boolean;
-  images?: unknown;
-  toolName?: string;
-  toolInput?: unknown;
-  toolId?: string;
-  toolResult?: {
-    content?: string;
-    isError?: boolean;
-    toolUseResult?: unknown;
-  };
-  isError?: boolean;
-  text?: string;
-  tokens?: number;
-  canInterrupt?: boolean;
-  requestId?: string;
-  input?: unknown;
-  context?: unknown;
-  reason?: string;
-  newSessionId?: string;
-  status?: string;
-  summary?: string;
-  tokenBudget?: unknown;
-  parentToolUseId?: string;
-  toolUseResult?: unknown;
-  sequence?: number;
-  rowid?: number;
-  [key: string]: unknown;
-};
+export type { MessageKind, GatewayEventKind, ServerEventKind, NormalizedMessage };
 
 /**
  * Shared options used to fetch historical provider messages.

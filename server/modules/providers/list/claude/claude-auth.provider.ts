@@ -7,7 +7,10 @@ import spawn from 'cross-spawn';
 import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 import type { IProviderAuth } from '@/shared/interfaces.js';
 import type { ProviderAuthStatus } from '@/shared/types.js';
-import { readObjectRecord, readOptionalString } from '@/shared/utils.js';
+import {
+  readObjectRecord,
+  readOptionalString,
+} from '@/shared/json.js';
 
 type ClaudeCredentialsStatus = {
   authenticated: boolean;

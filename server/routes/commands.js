@@ -3,14 +3,13 @@ import path from "path";
 
 import express from "express";
 
-import { providerModelsService } from "../modules/providers/services/provider-models.service.js";
+import { providerModelsService, getClaudeBuiltinCommandEntries } from "../modules/providers/index.js";
 import { parseFrontMatter } from "../shared/frontmatter.js";
 import {
   providerCommandDirs,
   stripFrontMatter,
 } from "../utils/command-paths.js";
 import { findAppRoot, getModuleDir } from "../utils/runtime-paths.js";
-import { getClaudeBuiltinCommandEntries } from "../modules/providers/list/claude/claude-builtin-commands.js";
 
 const __dirname = getModuleDir(import.meta.url);
 // This route reads the top-level package.json for the status command, so it needs the real

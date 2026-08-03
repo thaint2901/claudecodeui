@@ -3,15 +3,15 @@ import path from 'node:path';
 
 import { McpProvider } from '@/modules/providers/shared/mcp/mcp.provider.js';
 import type { McpScope, ProviderMcpServer, UpsertProviderMcpServerInput } from '@/shared/types.js';
+import { AppError } from '@/shared/http.js';
 import {
-  AppError,
   readJsonConfig,
   readObjectRecord,
   readOptionalString,
   readStringArray,
   readStringRecord,
   writeJsonConfig,
-} from '@/shared/utils.js';
+} from '@/shared/json.js';
 
 export class CursorMcpProvider extends McpProvider {
   constructor() {

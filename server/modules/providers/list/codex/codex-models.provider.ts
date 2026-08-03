@@ -14,10 +14,12 @@ import type {
 } from '@/shared/types.js';
 import {
   buildDefaultProviderCurrentActiveModel,
+  writeProviderSessionActiveModelChange,
+} from '@/modules/providers/shared/active-model-store.js';
+import {
   readObjectRecord,
   readOptionalString,
-  writeProviderSessionActiveModelChange,
-} from '@/shared/utils.js';
+} from '@/shared/json.js';
 
 export const CODEX_FALLBACK_MODELS: ProviderModelsDefinition = {
   OPTIONS: [

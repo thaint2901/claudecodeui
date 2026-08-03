@@ -12,11 +12,11 @@ import type {
 } from '@/shared/types.js';
 import {
   findProviderSkillMarkdownFiles,
-  readOptionalString,
-  readProviderSkillMarkdownDefinitionFromContent,
   readProviderSkillMarkdownDefinition,
-  AppError,
-} from '@/shared/utils.js';
+  readProviderSkillMarkdownDefinitionFromContent,
+} from '@/modules/providers/shared/skill-files.js';
+import { AppError } from '@/shared/http.js';
+import { readOptionalString } from '@/shared/json.js';
 
 const resolveWorkspacePath = (workspacePath?: string): string =>
   path.resolve(workspacePath ?? process.cwd());

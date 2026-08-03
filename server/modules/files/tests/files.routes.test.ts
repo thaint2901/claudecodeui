@@ -5,7 +5,7 @@ import test from 'node:test';
 
 import express, { type NextFunction, type Request, type Response } from 'express';
 
-// `WORKSPACES_ROOT` (server/shared/utils.ts) is a top-level const evaluated the
+// `WORKSPACES_ROOT` (server/shared/workspace-paths.ts) is a top-level const evaluated the
 // first time that module loads: `process.env.WORKSPACES_ROOT || os.homedir()`.
 // It must be set before the first (dynamic) import below. `browse-filesystem`
 // and `create-folder` additionally hard-reject any path under a fixed

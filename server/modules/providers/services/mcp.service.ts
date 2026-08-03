@@ -1,6 +1,6 @@
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import type { LLMProvider, McpScope, ProviderMcpServer, UpsertProviderMcpServerInput } from '@/shared/types.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 
 
 export const providerMcpService = {

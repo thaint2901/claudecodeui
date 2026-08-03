@@ -1,6 +1,6 @@
 import { getConnection } from '@/modules/database/connection.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
-import { normalizeProjectPath } from '@/shared/utils.js';
+import { normalizeProjectPath } from '@/shared/workspace-paths.js';
 
 type SessionRow = {
   session_id: string;

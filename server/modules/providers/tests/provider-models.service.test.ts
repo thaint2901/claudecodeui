@@ -15,7 +15,7 @@ import type {
   ProviderModelsDefinition,
   ProviderSessionActiveModelChange,
 } from '@/shared/types.js';
-import { writeProviderSessionActiveModelChange } from '@/shared/utils.js';
+import { writeProviderSessionActiveModelChange } from '@/modules/providers/shared/active-model-store.js';
 
 const createModels = (value: string): ProviderModelsDefinition => ({
   OPTIONS: [{ value, label: value }],

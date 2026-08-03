@@ -7,7 +7,7 @@ import test from 'node:test';
 import TOML from '@iarna/toml';
 
 import { providerMcpService } from '@/modules/providers/services/mcp.service.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 
 const patchHomeDir = (nextHomeDir: string) => {
   const original = os.homedir;

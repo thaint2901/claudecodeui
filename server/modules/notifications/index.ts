@@ -11,3 +11,4 @@ export {
   unregisterDesktopNotificationClient,
 } from '@/modules/notifications/services/desktop-notification-clients.service.js';
 export { handleDesktopNotificationsConnection } from '@/modules/notifications/websocket/desktop-notifications-websocket.service.js';
+export { default as notificationRoutes } from '@/modules/notifications/notifications.routes.js';

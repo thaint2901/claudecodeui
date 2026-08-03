@@ -13,7 +13,7 @@ import type {
   ProviderModelsResult,
   ProviderSessionActiveModelChange,
 } from '@/shared/types.js';
-import { readProviderSessionActiveModelChange } from '@/shared/utils.js';
+import { readProviderSessionActiveModelChange } from '@/modules/providers/shared/active-model-store.js';
 
 export const PROVIDER_MODELS_CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 const PROVIDER_MODELS_CACHE_VERSION = 2;
@@ -135,14 +135,11 @@ const writeProviderModelsCacheFile = async (
  * place.
  */
 export const createProviderModelsService = (dependencies: ProviderModelsServiceDependencies = {}) => {
-  // Deferred lookup (not captured at creation time): providerModelsService is a
-  // module-level singleton created eagerly below, and the runtime adapters
-  // (Task 4) now pull this module in from inside the provider.registry.ts
-  // import graph. Capturing `providerRegistry.resolveProvider` eagerly here
-  // would read it mid-circular-import, before its `const providerRegistry`
-  // binding is initialized.
-  const resolveProvider = (provider: LLMProvider) =>
-    (dependencies.resolveProvider ?? providerRegistry.resolveProvider)(provider);
+  // Plain top-level capture: no file under providers/list/** imports this
+  // service anymore (Phase 6 Task 1), so providerRegistry's binding is fully
+  // initialized by the time this module evaluates and resolveProvider can be
+  // captured directly instead of deferred to call time.
+  const resolveProvider = dependencies.resolveProvider ?? providerRegistry.resolveProvider;
   const cachePath = dependencies.cachePath ?? getProviderModelsCachePath();
   const activeModelChangesPath = dependencies.activeModelChangesPath;
   const now = dependencies.now ?? (() => Date.now());

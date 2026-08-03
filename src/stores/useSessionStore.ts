@@ -11,79 +11,11 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 
 import { authenticatedFetch } from '../utils/api';
 import type { LLMProvider } from '../types/app';
+import type { MessageKind, NormalizedMessage } from '../../shared/wire-types.js';
 
-// ─── NormalizedMessage (mirrors server/adapters/types.js) ────────────────────
+// ─── NormalizedMessage (single-sourced at repo-root shared/wire-types.ts) ────
 
-export type MessageKind =
-  | 'text'
-  | 'tool_use'
-  | 'tool_result'
-  | 'thinking'
-  | 'stream_delta'
-  | 'stream_end'
-  | 'error'
-  | 'complete'
-  | 'status'
-  | 'permission_request'
-  | 'permission_cancelled'
-  | 'session_created'
-  | 'interactive_prompt'
-  | 'task_notification';
-
-export interface NormalizedMessage {
-  id: string;
-  sessionId: string;
-  timestamp: string;
-  provider: LLMProvider;
-  kind: MessageKind;
-  /**
-   * Per-run monotonic sequence number assigned by the backend to live
-   * websocket events. Used to compute `lastSeq` for `chat.subscribe` replay;
-   * REST history messages do not carry it.
-   */
-  seq?: number;
-
-  // kind-specific fields (flat for simplicity)
-  role?: 'user' | 'assistant';
-  content?: string;
-  /**
-   * Mirrors optional transcript metadata from the server.
-   *
-   * These fields are currently used by Claude history normalization so local
-   * slash commands, local stdout, and compact summaries do not disappear when
-   * the session store hydrates from REST history.
-   */
-  displayText?: string;
-  commandName?: string;
-  commandMessage?: string;
-  commandArgs?: string;
-  isLocalCommand?: boolean;
-  isLocalCommandStdout?: boolean;
-  isCompactSummary?: boolean;
-  images?: Array<{ path?: string; data?: string; name?: string }>;
-  toolName?: string;
-  toolInput?: unknown;
-  toolId?: string;
-  toolResult?: { content: string; isError: boolean; toolUseResult?: unknown } | null;
-  isError?: boolean;
-  text?: string;
-  tokens?: number;
-  canInterrupt?: boolean;
-  tokenBudget?: unknown;
-  requestId?: string;
-  input?: unknown;
-  context?: unknown;
-  newSessionId?: string;
-  status?: string;
-  summary?: string;
-  exitCode?: number;
-  actualSessionId?: string;
-  parentToolUseId?: string;
-  isFinal?: boolean;
-  // Cursor-specific ordering
-  sequence?: number;
-  rowid?: number;
-}
+export type { MessageKind, NormalizedMessage };
 
 // ─── Per-session slot ────────────────────────────────────────────────────────
 

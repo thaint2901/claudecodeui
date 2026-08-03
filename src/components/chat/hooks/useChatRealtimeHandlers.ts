@@ -8,6 +8,7 @@ import type { MarkSessionIdle, MarkSessionProcessing } from '../../../hooks/useS
 import type { PendingPermissionRequest } from '../types/types';
 import type { ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
+import { isGatewayEventKind, assertNever } from '../../../../shared/wire-types.js';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -120,84 +121,86 @@ export function useChatRealtimeHandlers({
         }
       }
 
-      switch (msg.kind) {
-        case 'websocket_reconnected':
-          onWebSocketReconnect?.();
-          return;
+      if (isGatewayEventKind(msg.kind) || msg.kind === 'websocket_reconnected') {
+        switch (msg.kind) {
+          case 'websocket_reconnected':
+            onWebSocketReconnect?.();
+            return;
 
-        case 'chat_subscribed': {
-          // Ack for chat.subscribe: authoritative processing state plus any
-          // pending tool-permission prompts for the run.
-          if (!sid) return;
+          case 'chat_subscribed': {
+            // Ack for chat.subscribe: authoritative processing state plus any
+            // pending tool-permission prompts for the run.
+            if (!sid) return;
 
-          if (msg.isProcessing) {
-            onSessionProcessing?.(sid);
-          } else {
-            // Idle ack: ignore it if a newer request started after the
-            // subscribe was sent — the ack describes the older state.
-            onSessionIdle?.(sid, {
-              ifStartedBefore: statusCheckSentAtRef.current.get(sid),
-            });
-          }
-
-          const isViewedSession = sid === activeViewSessionId;
-          if (isViewedSession && Array.isArray(msg.pendingPermissions)) {
-            const nextPendingPermissionRequests = msg.pendingPermissions as PendingPermissionRequest[];
-            const hadActionablePermissionRequests = hasActionablePermissionRequests(pendingPermissionRequestsRef.current);
-            const hasPendingActionablePermissionRequests = hasActionablePermissionRequests(nextPendingPermissionRequests);
-
-            pendingPermissionRequestsRef.current = nextPendingPermissionRequests;
-            setPendingPermissionRequests(nextPendingPermissionRequests);
-
-            if (hasPendingActionablePermissionRequests && !hadActionablePermissionRequests) {
-              void playNotificationSound();
+            if (msg.isProcessing) {
+              onSessionProcessing?.(sid);
+            } else {
+              // Idle ack: ignore it if a newer request started after the
+              // subscribe was sent — the ack describes the older state.
+              onSessionIdle?.(sid, {
+                ifStartedBefore: statusCheckSentAtRef.current.get(sid),
+              });
             }
+
+            const isViewedSession = sid === activeViewSessionId;
+            if (isViewedSession && Array.isArray(msg.pendingPermissions)) {
+              const nextPendingPermissionRequests = msg.pendingPermissions as PendingPermissionRequest[];
+              const hadActionablePermissionRequests = hasActionablePermissionRequests(pendingPermissionRequestsRef.current);
+              const hasPendingActionablePermissionRequests = hasActionablePermissionRequests(nextPendingPermissionRequests);
+
+              pendingPermissionRequestsRef.current = nextPendingPermissionRequests;
+              setPendingPermissionRequests(nextPendingPermissionRequests);
+
+              if (hasPendingActionablePermissionRequests && !hadActionablePermissionRequests) {
+                void playNotificationSound();
+              }
+            }
+            return;
           }
-          return;
+
+          case 'branch_created': {
+            // Gateway-only event: never enters the message store.
+            const branchId = (msg as unknown as { branchSessionId?: string }).branchSessionId;
+            if (sid && branchId) {
+              pendingBranchRef.current.set(sid, branchId);
+            }
+            return;
+          }
+
+          case 'protocol_error': {
+            console.error('[Chat] Protocol error:', msg.code, msg.error);
+            if (msg.code === 'FORK_FAILED') {
+              onForkFailed?.(sid ?? '', typeof msg.error === 'string' ? msg.error : 'Fork failed');
+            }
+            if (sid) {
+              // Surface the failure in the conversation and stop the spinner —
+              // the run never started (or was rejected), so no `complete` follows.
+              onSessionIdle?.(sid);
+              sessionStore.appendRealtime(sid, {
+                id: `protocol_error_${Date.now()}`,
+                sessionId: sid,
+                timestamp: new Date().toISOString(),
+                provider,
+                kind: 'error',
+                content: String(msg.error || 'Request failed'),
+              } as NormalizedMessage);
+            }
+            return;
+          }
+
+          // Sidebar/global events — owned by useProjectsState.
+          case 'session_upserted':
+          case 'loading_progress':
+            return;
+
+          // Owned by SessionLockContext — not a chat message, must not fall
+          // through to the generic appendRealtime path below.
+          case 'session_lock_state_changed':
+            return;
+
+          default:
+            return assertNever(msg.kind);
         }
-
-        case 'branch_created': {
-          // Gateway-only event: never enters the message store.
-          const branchId = (msg as unknown as { branchSessionId?: string }).branchSessionId;
-          if (sid && branchId) {
-            pendingBranchRef.current.set(sid, branchId);
-          }
-          return;
-        }
-
-        case 'protocol_error': {
-          console.error('[Chat] Protocol error:', msg.code, msg.error);
-          if (msg.code === 'FORK_FAILED') {
-            onForkFailed?.(sid ?? '', typeof msg.error === 'string' ? msg.error : 'Fork failed');
-          }
-          if (sid) {
-            // Surface the failure in the conversation and stop the spinner —
-            // the run never started (or was rejected), so no `complete` follows.
-            onSessionIdle?.(sid);
-            sessionStore.appendRealtime(sid, {
-              id: `protocol_error_${Date.now()}`,
-              sessionId: sid,
-              timestamp: new Date().toISOString(),
-              provider,
-              kind: 'error',
-              content: String(msg.error || 'Request failed'),
-            } as NormalizedMessage);
-          }
-          return;
-        }
-
-        // Sidebar/global events — owned by useProjectsState.
-        case 'session_upserted':
-        case 'loading_progress':
-          return;
-
-        // Owned by SessionLockContext — not a chat message, must not fall
-        // through to the generic appendRealtime path below.
-        case 'session_lock_state_changed':
-          return;
-
-        default:
-          break;
       }
 
       /* -------------------------------------------------------------- */
@@ -249,6 +252,10 @@ export function useChatRealtimeHandlers({
       }
 
       // --- UI side effects for specific kinds ---
+      // `stream_delta`/`stream_end` already returned above, so TS narrows
+      // `msg.kind` here to the other 12 MessageKind members — the switch is
+      // exhaustive over that narrowed type, with `assertNever` in `default`
+      // catching any future MessageKind addition left unhandled.
       switch (msg.kind) {
         case 'complete': {
           // Flush any remaining streaming state for this session
@@ -375,10 +382,19 @@ export function useChatRealtimeHandlers({
           break;
         }
 
-        // text, tool_use, tool_result, thinking, interactive_prompt, task_notification
-        // → already routed to store above, no UI side effects needed
-        default:
+        // already routed via merge; no UI side effect
+        case 'text':
+        case 'tool_use':
+        case 'tool_result':
+        case 'thinking':
+        case 'error':
+        case 'session_created':
+        case 'interactive_prompt':
+        case 'task_notification':
           break;
+
+        default:
+          assertNever(msg.kind);
       }
     };
 

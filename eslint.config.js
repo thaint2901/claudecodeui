@@ -158,11 +158,19 @@ export default tseslint.config(
         {
           type: "backend-shared-utils", // shared backend runtime helpers that modules may import directly
           pattern: [
-            "server/shared/utils.{js,ts}",
+            "server/shared/http.{js,ts}",
+            "server/shared/workspace-paths.{js,ts}",
+            "server/shared/messages.{js,ts}",
+            "server/shared/json.{js,ts}",
             "server/shared/frontmatter.ts",
             "server/shared/claude-cli-path.ts",
             "server/shared/image-attachments.ts",
           ], // classify shared utility files so modules can depend on them explicitly
+          mode: "file",
+        },
+        {
+          type: "cross-tier-shared", // repo-root shared/ — importable by every backend element
+          pattern: ["shared/**/*.{js,ts}"],
           mode: "file",
         },
         {
@@ -178,6 +186,19 @@ export default tseslint.config(
           pattern: "server/modules/*", // each direct folder in server/modules is treated as one module boundary
           mode: "folder", // classify dependencies at folder-module level (not per individual file)
           capture: ["moduleName"], // capture the module folder name for messages/debugging/template use
+        },
+        {
+          type: "backend-legacy",
+          pattern: [
+            "server/routes/**/*.{js,ts}",
+            "server/middleware/**/*.{js,ts}",
+            "server/services/**/*.{js,ts}",
+            "server/utils/**/*.{js,ts}",
+            "server/constants/**/*.{js,ts}",
+            "server/tests/**/*.{js,ts}",
+            "server/*.{js,ts}",
+          ],
+          mode: "file",
         },
       ],
     },

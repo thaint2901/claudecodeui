@@ -11,7 +11,7 @@ import {
   findFilesRecursivelyCreatedAfter,
   normalizeSessionName,
   readFileTimestamps,
-} from '@/shared/utils.js';
+} from '@/modules/providers/shared/session-scan.js';
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
 
 type ParsedSession = {

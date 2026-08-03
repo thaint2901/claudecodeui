@@ -4,7 +4,8 @@ import type {
   NormalizedMessage,
   RealtimeClientConnection,
 } from '@/shared/types.js';
-import { createCompleteMessage, readObjectRecord } from '@/shared/utils.js';
+import { readObjectRecord } from '@/shared/json.js';
+import { createCompleteMessage } from '@/shared/messages.js';
 
 type ChatSessionWriterOptions = {
   connection: RealtimeClientConnection;

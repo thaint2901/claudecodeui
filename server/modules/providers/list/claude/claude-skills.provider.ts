@@ -11,11 +11,13 @@ import type {
 } from '@/shared/types.js';
 import {
   findProviderSkillMarkdownFiles,
+  readProviderSkillMarkdownDefinition,
+} from '@/modules/providers/shared/skill-files.js';
+import {
   readJsonConfig,
   readObjectRecord,
   readOptionalString,
-  readProviderSkillMarkdownDefinition,
-} from '@/shared/utils.js';
+} from '@/shared/json.js';
 
 const getClaudeHomePath = (): string => path.join(os.homedir(), '.claude');
 

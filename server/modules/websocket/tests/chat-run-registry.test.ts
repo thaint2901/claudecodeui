@@ -7,6 +7,13 @@ import test from 'node:test';
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients } from '@/modules/websocket/services/websocket-state.service.js';
+// Side-effect import: registers the real send-to-all-open-clients broadcast
+// handler (see server/modules/websocket/index.ts). broadcastCanonicalSessionUpsert
+// now lives in the providers module and publishes through
+// @/modules/events/index.js#broadcast instead of touching connectedClients
+// directly, so without this the handler stays unregistered and every
+// session_upserted frame this test asserts on would silently vanish.
+import '@/modules/websocket/index.js';
 
 /**
  * Minimal stand-in for a websocket connection: collects every JSON frame the

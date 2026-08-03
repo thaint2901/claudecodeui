@@ -2,7 +2,7 @@ import express from 'express';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
-import { CURSOR_FALLBACK_MODELS } from '../modules/providers/list/cursor/cursor-models.provider.js';
+import { CURSOR_FALLBACK_MODELS } from '../modules/providers/index.js';
 
 const router = express.Router();
 

@@ -4,4 +4,4 @@ export {
   notifyUserIfEnabled,
   notifyRunStopped,
   notifyRunFailed,
-} from '../modules/notifications/services/notification-orchestrator.service.js';
+} from '../modules/notifications/index.js';

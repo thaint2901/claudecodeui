@@ -12,7 +12,7 @@ import type {
 import {
   buildDefaultProviderCurrentActiveModel,
   writeProviderSessionActiveModelChange,
-} from '@/shared/utils.js';
+} from '@/modules/providers/shared/active-model-store.js';
 
 export const CLAUDE_FALLBACK_MODELS: ProviderModelsDefinition = {
   OPTIONS: [

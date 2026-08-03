@@ -14,12 +14,14 @@ import cors from 'cors';
 import compression from 'compression';
 import Database from 'better-sqlite3';
 
-import { AppError, getOpenCodeDatabasePath } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 import {
     closeSessionLockWatcher,
     closeSessionsWatcher,
+    getOpenCodeDatabasePath,
     initializeSessionsWatcher,
     providerRegistry,
+    providerRoutes,
     sessionLockWatcherService,
 } from '@/modules/providers/index.js';
 import { createWebSocketServer } from '@/modules/websocket/index.js';
@@ -42,17 +44,14 @@ import mcpUtilsRoutes from './routes/mcp-utils.js';
 import commandsRoutes from './routes/commands.js';
 import settingsRoutes from './routes/settings.js';
 import agentRoutes, { sessionLockRouter } from './routes/agent.js';
-import projectModuleRoutes from './modules/projects/projects.routes.js';
+import { projectsRoutes as projectModuleRoutes } from './modules/projects/index.js';
 import { createFilesRouter } from './modules/files/index.js';
-import notificationRoutes from './modules/notifications/notifications.routes.js';
+import { notificationRoutes } from './modules/notifications/index.js';
 import userRoutes from './routes/user.js';
 import pluginsRoutes from './routes/plugins.js';
-import providerRoutes from './modules/providers/provider.routes.js';
 import voiceRoutes from './voice-proxy.js';
-import browserUseRoutes from './modules/browser-use/browser-use.routes.js';
+import { browserUseRoutes, browserUseMcpRoutes, browserUseService } from './modules/browser-use/index.js';
 import { assetsRoutes } from './modules/assets/index.js';
-import browserUseMcpRoutes from './modules/browser-use/browser-use-mcp.routes.js';
-import { browserUseService } from './modules/browser-use/browser-use.service.js';
 import { startEnabledPluginServers, stopAllPlugins, getPluginPort } from './utils/plugin-process-manager.js';
 import { initializeDatabase, projectsDb, sessionsDb } from './modules/database/index.js';
 import { configureWebPush } from './services/vapid-keys.js';

@@ -13,7 +13,8 @@ import type {
   AuthenticatedWebSocketRequest,
   LLMProvider,
 } from '@/shared/types.js';
-import { createNormalizedMessage, parseIncomingJsonObject } from '@/shared/utils.js';
+import { parseIncomingJsonObject } from '@/shared/json.js';
+import { createNormalizedMessage } from '@/shared/messages.js';
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come

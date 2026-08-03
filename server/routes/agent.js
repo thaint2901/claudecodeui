@@ -8,11 +8,11 @@ import crypto from 'crypto';
 
 import { Octokit } from '@octokit/rest';
 
+import { normalizeProjectPath } from '@/shared/workspace-paths.js';
+
 import { userDb, apiKeysDb, githubTokensDb, projectsDb, sessionsDb } from '../modules/database/index.js';
-import { providerRegistry } from '../modules/providers/index.js';
-import { providerModelsService } from '../modules/providers/services/provider-models.service.js';
+import { providerRegistry, providerModelsService } from '../modules/providers/index.js';
 import { IS_PLATFORM } from '../constants/config.js';
-import { normalizeProjectPath } from '../shared/utils.js';
 import { resolveClaudeCodeExecutablePath } from '../shared/claude-cli-path.js';
 
 const router = express.Router();
@@ -1282,9 +1282,7 @@ sessionLockRouter.get('/:id/lock-status', async (req, res) => {
   }
 
   try {
-    const { getLockedBgSessionIds } = await import(
-      '../modules/providers/services/session-lock-watcher.service.js'
-    );
+    const { getLockedBgSessionIds } = await import('../modules/providers/index.js');
     const lockedIds = await getLockedBgSessionIds();
     const isLocked = lockedIds.has(id);
     res.json({ sessionId: id, isLocked, checkedAt: new Date().toISOString() });

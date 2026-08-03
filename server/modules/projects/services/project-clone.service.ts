@@ -7,7 +7,8 @@ import spawn from 'cross-spawn';
 import { githubTokensDb } from '@/modules/database/index.js';
 import { createProject } from '@/modules/projects/services/project-management.service.js';
 import type { WorkspacePathValidationResult } from '@/shared/types.js';
-import { AppError, validateWorkspacePath } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
+import { validateWorkspacePath } from '@/shared/workspace-paths.js';
 
 type CloneProjectInput = {
   workspacePath: string;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { sliceTailPage } from '@/shared/utils.js';
+import { sliceTailPage } from '@/shared/messages.js';
 
 const ITEMS = ['a', 'b', 'c', 'd', 'e'];
 

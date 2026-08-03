@@ -2,7 +2,7 @@ import { access, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { projectsDb } from '@/modules/database/index.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 
 type TaskMasterTask = {
   status?: string;

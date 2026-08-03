@@ -4,7 +4,7 @@ import { CursorProvider } from '@/modules/providers/list/cursor/cursor.provider.
 import { OpenCodeProvider } from '@/modules/providers/list/opencode/opencode.provider.js';
 import type { IProvider } from '@/shared/interfaces.js';
 import type { LLMProvider } from '@/shared/types.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 
 const providers: Record<LLMProvider, IProvider> = {
   claude: new ClaudeProvider(),
