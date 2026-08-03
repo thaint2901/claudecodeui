@@ -22,9 +22,9 @@ Strategy: two structural rules + one relocation, NOT 15 individual patches.
 
 **Relocation C — `generateDisplayName`** moves out of `modules/projects` into `server/shared/workspace-paths.ts`. Because that file (and its eslint classification) is created by Sub-goal B, **Relocation C executes inside Sub-goal B's task**, not A's. `modules/projects` keeps re-exporting it from its barrel (external consumers unchanged); `sessions-watcher.service.ts:11` imports the shared home directly. Kills cycle 9.
 
-**Frontend cycle**: break with a direct-file import replacing whichever barrel hop re-enters the cluster (minimal edit, implementer picks the exact edge after reading the three files).
+**Frontend cycle**: break with a direct-file import replacing whichever barrel hop re-enters the cluster (minimal edit, implementer picks the exact edge after reading the three files). **Amendment (2026-08-03, post-Task-1)**: removing the barrel hop revealed that the triad `ToolRenderer → SubagentContainer → SubagentTranscriptPanel → ToolRenderer` is a direct, intentional recursive-render composition (the transcript drawer renders nested tool calls with ToolRenderer itself), not a barrel artifact. Controller ruling: ACCEPTED as a documented exception — forcing 0 via React.lazy/render-prop adds complexity and behavior risk for no architectural gain. ADR-0005 records it.
 
-**Gate A**: `npx madge --circular --extensions ts,js --ts-config server/tsconfig.json server/` → exactly 1 remaining cycle (cycle 9, scheduled to die in Sub-goal B); `src/` with root tsconfig → 0. Suites green.
+**Gate A (amended to measured reality)**: Task 1's blanket Rule A cleanup (all 12 `list/`→`services/` import lines, not just the 6 madge-visible closing edges) killed 12 of 15 server cycles including cycle 9 — `npx madge --circular ... server/` → 3 remaining (all in the websocket/projects triangle, Rule B's targets); `src/` → the accepted recursive triad only. Suites green.
 
 ## Sub-goal B — split `server/shared/utils.ts` by ownership, then delete it
 
@@ -104,7 +104,7 @@ Tasks run **A → B → C → D** (D last locks in A–C's structure). `eslint.c
 ## Acceptance gates (whole phase)
 
 - `npm test` both tiers green, natural exit; `npm run typecheck` clean; `npm run lint` 0 errors, warnings not increased (baseline 247).
-- madge circular: server 0, src 0.
+- madge circular: server 0; src: 0 barrel-mediated — the recursive-render triad (ToolRenderer↔SubagentContainer↔SubagentTranscriptPanel) is an accepted, ADR-0005-documented exception.
 - CodeScene ≥ 7.0 for every new/heavily-edited file; no function cc > 30.
 - Wire payloads byte-identical (broadcast path refactor is transport-internal; smoke verifies).
 - Smoke on worktree instance (SERVER_PORT=3002 VITE_PORT=5174): chat send + streamed reply; abort mid-stream; sidebar realtime update on session create (exercises the events inversion end-to-end); Files tab loads (regression canary for stacked phase 5).

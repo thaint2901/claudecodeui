@@ -166,7 +166,7 @@ In each of the four files, replace the `import ... from '@/modules/websocket/ind
 
 - [ ] **Step 5: Verify cycles + full gates + commit**
 
-Run server madge → exactly **1** cycle remains (cycle 9: `projects/index > projects-with-sessions-fetch > providers/index > sessions-watcher`).
+Run server madge → **0 cycles** (amended: Task 1's blanket Rule A cleanup already killed cycle 9 and the codex-hybrid variants; the 3 cycles remaining after Task 1 all die with this task's four conversions — verify the third listed cycle, which closes through `chat-websocket.service`, actually dies; if it survives, its closing edge is a websocket-internal import of the providers barrel — report it, do not chase it beyond the four planned conversions without flagging).
 Run: `npm test`, `npm run typecheck`, `npm run lint`.
 Commit: `refactor(events): invert realtime broadcast through a leaf events module`
 
@@ -210,7 +210,7 @@ In the same commit, apply **eslint touch #1** (quote this diff in your report; t
 },
 ```
 (Adjust to the file's ACTUAL current content — read it first; keep existing elements' order, append `cross-tier-shared` after the shared-utils entry. `boundaries/include` stays `server/**` — the root-shared element classifies these files as import TARGETS only.)
-Run madge (server) → **0 cycles** (cycle 9 died with Relocation C). Gates green. Commit: `refactor(shared): split utils.ts leaf domains into http/workspace-paths/messages/json`
+Run madge (server) → **0 cycles** (stays 0 — cycle 9 already died in Task 1; Relocation C remains as ownership cleanup, not a cycle fix). Gates green. Commit: `refactor(shared): split utils.ts leaf domains into http/workspace-paths/messages/json`
 
 - [ ] **Step 2: Relocate the provider-domain slices, commit 2**
 
@@ -361,7 +361,7 @@ Title `# ADR-0005: Structural cleanup — cycle dissolution, utils split, wire-t
 
 1. Whole-branch review (most capable model) over `6533049..HEAD` with the ledger's deferred minors.
 2. ONE fix wave if findings; scoped re-review.
-3. Final gates: `npm test` natural exit both tiers; typecheck; lint 0 errors/≤247 warnings; madge server 0 + src 0; CodeScene ≥7.0 on every new/heavily-edited file.
+3. Final gates: `npm test` natural exit both tiers; typecheck; lint 0 errors/≤247 warnings; madge server 0 + src showing ONLY the accepted recursive triad (ToolRenderer↔SubagentContainer↔SubagentTranscriptPanel — ADR-0005 exception); CodeScene ≥7.0 on every new/heavily-edited file.
 4. Smoke on worktree instance (`SERVER_PORT=3002 VITE_PORT=5174 npm run dev`; kill child pids individually afterwards; never touch the systemd 5173 instance): chat send + streamed reply; abort mid-stream; **sidebar realtime update on session create** (end-to-end proof of the events inversion); Files tab loads (phase-5 canary).
 5. Push, draft PR #15 (base = `worktree-refactor-phase5-files-module`), body via `--body-file`, ends with the standard generated-with line; verify gh account `thaint2901` first.
 6. Memory + scorecard final numbers; delete SDD workspace.
