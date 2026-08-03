@@ -19,3 +19,8 @@ export { findForkResumePoint, ForkResumePointError } from './list/claude/claude-
 export { providerRegistry } from './provider.registry.js';
 
 export { getOpenCodeDatabasePath } from './list/opencode/opencode-paths.js';
+
+export { providerModelsService } from './services/provider-models.service.js';
+export { getClaudeBuiltinCommandEntries } from './list/claude/claude-builtin-commands.js';
+export { CURSOR_FALLBACK_MODELS } from './list/cursor/cursor-models.provider.js';
+export { default as providerRoutes } from './provider.routes.js';
