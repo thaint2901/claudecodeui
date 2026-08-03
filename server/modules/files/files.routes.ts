@@ -128,8 +128,9 @@ export function createFilesRouter(authenticateToken: RequestHandler): Router {
             try {
                 await fs.promises.mkdir(targetPath, { recursive: false });
                 res.json({ success: true, path: targetPath });
-            } catch (mkdirError) {
-                if ((mkdirError as NodeJS.ErrnoException).code === 'EEXIST') {
+            } catch (error) {
+                const mkdirError = error as NodeJS.ErrnoException;
+                if (mkdirError.code === 'EEXIST') {
                     return res.status(409).json({ error: 'Folder already exists' });
                 }
                 throw mkdirError;

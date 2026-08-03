@@ -92,6 +92,7 @@ jspm_packages/
 tmp/
 temp/
 .tmp/
+.files-module-test-*/
 
 # Vite
 .vite/

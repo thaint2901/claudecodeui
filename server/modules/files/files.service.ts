@@ -52,9 +52,9 @@ function validatePathInProject(projectRoot: string, targetPath: string): PathVal
         : path.resolve(projectRoot, targetPath);
     const normalizedRoot = path.resolve(projectRoot) + path.sep;
     if (!resolved.startsWith(normalizedRoot)) {
-        return { valid: false, error: 'Path must be under project root' } satisfies PathValidationResult;
+        return { valid: false, error: 'Path must be under project root' };
     }
-    return { valid: true, resolved } satisfies PathValidationResult;
+    return { valid: true, resolved };
 }
 
 /**
