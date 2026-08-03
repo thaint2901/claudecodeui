@@ -25,7 +25,7 @@ Route handlers (paths stay byte-identical; current lines at `b9c7467`):
 | `DELETE /api/projects/:projectId/files` | 825 |
 | `POST /api/projects/:projectId/files/upload` | 1058 (handler `uploadFilesHandler` at 891) |
 
-Helper cluster that moves with them: `expandWorkspacePath` (313), `validatePathInProject` (633), `validateFilename` (649), `uploadFilesHandler` (891), `permToRwx` (1387), the upload mutex `acquire`/`release` (1419/1430), `getFileTree` (1440), plus the imports only they use (e.g. multer/mime).
+Helper cluster that moves with them: `expandWorkspacePath` (313), `validatePathInProject` (633), `validateFilename` (649), `uploadFilesHandler` (891), and the contiguous block 1386–1533 — `permToRwx`, `EXCLUDED_DIRS`, the `FS_CONCURRENCY` semaphore (`acquire`/`release`, used only by `getFileTree`), and `getFileTree` itself — plus the imports only they use (`mime-types`; multer is dynamically imported inside the upload handler, so no top-level multer import exists).
 
 **Stays in `index.js`**: `/health`, `POST /api/system/update`, `GET .../token-usage` (sessions domain), `app.get('*')` static fallback, `readUsageNumber`, server-marker helpers, all bootstrap. Target: `index.js` ≈ 750 LOC.
 
