@@ -15,10 +15,16 @@ import { Codex } from '@openai/codex-sdk';
 
 import { buildCodexInputItems, normalizeImageDescriptors } from '@/shared/image-attachments.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
-import { sessionsService } from '@/modules/providers/services/sessions.service.js';
-import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
-import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
+import { CodexProviderAuth } from '@/modules/providers/list/codex/codex-auth.provider.js';
+import { CodexProviderModels } from '@/modules/providers/list/codex/codex-models.provider.js';
+import { CodexSessionsProvider } from '@/modules/providers/list/codex/codex-sessions.provider.js';
+import { isProviderInstalled } from '@/modules/providers/shared/is-provider-installed.js';
+import { resolveResumeModel } from '@/modules/providers/shared/resolve-resume-model.js';
 import { createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
+
+const codexAuthProvider = new CodexProviderAuth();
+const codexModelsProvider = new CodexProviderModels();
+const codexSessionsProvider = new CodexSessionsProvider();
 
 const activeCodexSessions = new Map();
 
@@ -232,7 +238,7 @@ export async function queryCodex(command, options = {}, ws) {
     permissionMode = 'default'
   } = options;
 
-  const resolvedModel = await providerModelsService.resolveResumeModel(
+  const resolvedModel = await resolveResumeModel(
     'codex',
     sessionId,
     model,
@@ -240,7 +246,7 @@ export async function queryCodex(command, options = {}, ws) {
 
   const workingDirectory = cwd || projectPath || process.cwd();
   const { sandboxMode, approvalPolicy } = mapPermissionModeToCodexOptions(permissionMode);
-  const catalog = (await providerModelsService.getProviderModels('codex')).models;
+  const catalog = await codexModelsProvider.getSupportedModels();
   const selectedModel = catalog.OPTIONS.find((option) => option.value === resolvedModel) || null;
   const allowedEfforts = selectedModel?.effort?.values?.map((value) => value.value) || [];
   const resolvedEffort = typeof effort === 'string' && effort !== 'default' && allowedEfforts.includes(effort)
@@ -335,7 +341,7 @@ export async function queryCodex(command, options = {}, ws) {
       const transformed = transformCodexEvent(event);
 
       // Normalize the transformed event into NormalizedMessage(s) via adapter
-      const normalizedMsgs = sessionsService.normalizeMessage('codex', transformed, capturedSessionId || sessionId || null);
+      const normalizedMsgs = codexSessionsProvider.normalizeMessage(transformed, capturedSessionId || sessionId || null);
       for (const msg of normalizedMsgs) {
         sendMessage(ws, msg);
       }
@@ -393,7 +399,7 @@ export async function queryCodex(command, options = {}, ws) {
       console.error('[Codex] Error:', error);
 
       // Check if Codex SDK is available for a clearer error message
-      const installed = await providerAuthService.isProviderInstalled('codex');
+      const installed = await isProviderInstalled(codexAuthProvider);
       const errorContent = !installed
         ? 'Codex CLI is not configured. Please set up authentication first.'
         : error.message;

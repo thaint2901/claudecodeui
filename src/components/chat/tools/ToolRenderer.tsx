@@ -5,7 +5,17 @@ import type { SubagentState } from '../types/types';
 import { isSubagentToolName } from '../utils/subagentToolNames';
 
 import { getToolConfig } from './configs/toolConfigs';
-import { OneLineDisplay, BashCommandDisplay, CollapsibleDisplay, ToolDiffViewer, MarkdownContent, FileListContent, TodoListContent, TaskListContent, TextContent, QuestionAnswerContent, SubagentContainer } from './components';
+import { OneLineDisplay } from './components/OneLineDisplay';
+import { BashCommandDisplay } from './components/BashCommandDisplay';
+import { CollapsibleDisplay } from './components/CollapsibleDisplay';
+import { ToolDiffViewer } from './components/ToolDiffViewer';
+import { MarkdownContent } from './components/ContentRenderers/MarkdownContent';
+import { FileListContent } from './components/ContentRenderers/FileListContent';
+import { TodoListContent } from './components/ContentRenderers/TodoListContent';
+import { TaskListContent } from './components/ContentRenderers/TaskListContent';
+import { TextContent } from './components/ContentRenderers/TextContent';
+import { QuestionAnswerContent } from './components/ContentRenderers/QuestionAnswerContent';
+import { SubagentContainer } from './components/SubagentContainer';
 import { PlanDisplay } from './components/PlanDisplay';
 import { ToolStatusBadge } from './components/ToolStatusBadge';
 import type { ToolStatus } from './components/ToolStatusBadge';

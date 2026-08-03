@@ -4,11 +4,17 @@ import crossSpawn from 'cross-spawn';
 import Database from 'better-sqlite3';
 
 import { appendImagesInputTag } from '@/shared/image-attachments.js';
-import { sessionsService } from '@/modules/providers/services/sessions.service.js';
-import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
-import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
+import { OpenCodeProviderAuth } from '@/modules/providers/list/opencode/opencode-auth.provider.js';
+import { OpenCodeProviderModels } from '@/modules/providers/list/opencode/opencode-models.provider.js';
+import { OpenCodeSessionsProvider } from '@/modules/providers/list/opencode/opencode-sessions.provider.js';
+import { isProviderInstalled } from '@/modules/providers/shared/is-provider-installed.js';
+import { resolveResumeModel } from '@/modules/providers/shared/resolve-resume-model.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
 import { createCompleteMessage, createNormalizedMessage, flattenPromptForWindowsShell, getOpenCodeDatabasePath } from '@/shared/utils.js';
+
+const opencodeAuthProvider = new OpenCodeProviderAuth();
+const opencodeModelsProvider = new OpenCodeProviderModels();
+const opencodeSessionsProvider = new OpenCodeSessionsProvider();
 
 // cross-spawn resolves .cmd shims/PATHEXT on Windows and delegates to
 // child_process.spawn everywhere else.
@@ -212,8 +218,7 @@ async function spawnOpenCode(command, options = {}, ws) {
 
       try {
         registerSession(readOpenCodeSessionId(response));
-        const normalized = sessionsService.normalizeMessage(
-          'opencode',
+        const normalized = opencodeSessionsProvider.normalizeMessage(
           response,
           capturedSessionId || sessionId || null,
         );
@@ -232,10 +237,10 @@ async function spawnOpenCode(command, options = {}, ws) {
       }
     };
 
-    void providerModelsService.resolveResumeModel('opencode', sessionId, model).then(async (resolvedModel) => {
+    void resolveResumeModel('opencode', sessionId, model).then(async (resolvedModel) => {
       let effortModels = null;
       try {
-        effortModels = (await providerModelsService.getProviderModels('opencode')).models;
+        effortModels = await opencodeModelsProvider.getSupportedModels();
       } catch (error) {
         console.warn('[OpenCode] Unable to load provider models for effort validation:', error);
       }
@@ -334,7 +339,7 @@ async function spawnOpenCode(command, options = {}, ws) {
         }
 
         if (code === 127 || code === null) {
-          const installed = await providerAuthService.isProviderInstalled('opencode');
+          const installed = await isProviderInstalled(opencodeAuthProvider);
           if (!installed) {
             ws.send(createNormalizedMessage({
               kind: 'error',
@@ -354,7 +359,7 @@ async function spawnOpenCode(command, options = {}, ws) {
         activeOpenCodeProcesses.delete(finalSessionId);
         activeOpenCodeProcesses.delete(processKey);
 
-        const installed = await providerAuthService.isProviderInstalled('opencode');
+        const installed = await isProviderInstalled(opencodeAuthProvider);
         const errorContent = !installed
           ? 'OpenCode CLI is not installed. Install it from https://opencode.ai/docs/'
           : error.message;

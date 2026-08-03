@@ -2,10 +2,14 @@ import crossSpawn from 'cross-spawn';
 
 import { appendImagesInputTag } from '@/shared/image-attachments.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
-import { sessionsService } from '@/modules/providers/services/sessions.service.js';
-import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
-import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
+import { CursorProviderAuth } from '@/modules/providers/list/cursor/cursor-auth.provider.js';
+import { CursorSessionsProvider } from '@/modules/providers/list/cursor/cursor-sessions.provider.js';
+import { isProviderInstalled } from '@/modules/providers/shared/is-provider-installed.js';
+import { resolveResumeModel } from '@/modules/providers/shared/resolve-resume-model.js';
 import { createCompleteMessage, createNormalizedMessage, flattenPromptForWindowsShell } from '@/shared/utils.js';
+
+const cursorAuthProvider = new CursorProviderAuth();
+const cursorSessionsProvider = new CursorSessionsProvider();
 
 // cross-spawn resolves .cmd shims/PATHEXT on Windows and delegates to
 // child_process.spawn everywhere else.
@@ -31,7 +35,7 @@ function isWorkspaceTrustPrompt(text = '') {
 async function spawnCursor(command, options = {}, ws) {
   return new Promise(async (resolve, reject) => {
     const { sessionId, projectPath, cwd, toolsSettings, skipPermissions, model, sessionSummary, images } = options;
-    const resolvedModel = await providerModelsService.resolveResumeModel('cursor', sessionId, model);
+    const resolvedModel = await resolveResumeModel('cursor', sessionId, model);
     let capturedSessionId = sessionId; // Track session ID throughout the process
     let sessionCreatedSent = false; // Track if we've already sent session-created event
     let hasRetriedWithTrust = false;
@@ -196,7 +200,7 @@ async function spawnCursor(command, options = {}, ws) {
             case 'assistant':
               // Accumulate assistant message chunks
               if (response.message && response.message.content && response.message.content.length > 0) {
-                const normalized = sessionsService.normalizeMessage('cursor', response, capturedSessionId || sessionId || null);
+                const normalized = cursorSessionsProvider.normalizeMessage(response, capturedSessionId || sessionId || null);
                 for (const msg of normalized) ws.send(msg);
               }
               break;
@@ -223,7 +227,7 @@ async function spawnCursor(command, options = {}, ws) {
           }
 
           // If not JSON, send as stream delta via adapter
-          const normalized = sessionsService.normalizeMessage('cursor', line, capturedSessionId || sessionId || null);
+          const normalized = cursorSessionsProvider.normalizeMessage(line, capturedSessionId || sessionId || null);
           for (const msg of normalized) ws.send(msg);
         }
       };
@@ -301,7 +305,7 @@ async function spawnCursor(command, options = {}, ws) {
         activeCursorProcesses.delete(finalSessionId);
 
         // Check if Cursor CLI is installed for a clearer error message
-        const installed = await providerAuthService.isProviderInstalled('cursor');
+        const installed = await isProviderInstalled(cursorAuthProvider);
         const errorContent = !installed
           ? 'Cursor CLI is not installed. Please install it from https://cursor.com'
           : error.message;

@@ -20,7 +20,6 @@ import path from 'path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
 import { buildClaudeUserContent, normalizeImageDescriptors } from '@/shared/image-attachments.js';
-import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
 import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 import {
   createNotificationEvent,
@@ -28,12 +27,19 @@ import {
   notifyRunStopped,
   notifyUserIfEnabled
 } from '@/modules/notifications/index.js';
-import { sessionsService } from '@/modules/providers/services/sessions.service.js';
-import { providerAuthService } from '@/modules/providers/services/provider-auth.service.js';
+import { ClaudeProviderAuth } from '@/modules/providers/list/claude/claude-auth.provider.js';
+import { ClaudeSessionsProvider } from '@/modules/providers/list/claude/claude-sessions.provider.js';
+import { isProviderInstalled } from '@/modules/providers/shared/is-provider-installed.js';
+import { resolveResumeModel } from '@/modules/providers/shared/resolve-resume-model.js';
 import { createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
 
-import { CLAUDE_FALLBACK_MODELS } from './claude-models.provider.js';
+const claudeAuthProvider = new ClaudeProviderAuth();
+const claudeSessionsProvider = new ClaudeSessionsProvider();
+
+import { CLAUDE_FALLBACK_MODELS, ClaudeProviderModels } from './claude-models.provider.js';
 import { setClaudeBuiltinCommands } from './claude-builtin-commands.js';
+
+const claudeModelsProvider = new ClaudeProviderModels();
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
@@ -590,14 +596,14 @@ async function queryClaudeSDK(command, options = {}, ws) {
   };
 
   try {
-    const resolvedModel = await providerModelsService.resolveResumeModel(
+    const resolvedModel = await resolveResumeModel(
       'claude',
       sessionId,
       options.model,
     );
     let effortModels = CLAUDE_FALLBACK_MODELS;
     try {
-      effortModels = (await providerModelsService.getProviderModels('claude')).models;
+      effortModels = await claudeModelsProvider.getSupportedModels();
     } catch (error) {
       console.warn('[Claude SDK] Unable to load provider models for effort validation:', error);
     }
@@ -804,7 +810,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
       const sid = capturedSessionId || sessionId || null;
 
       // Use adapter to normalize SDK events into NormalizedMessage[]
-      const normalized = sessionsService.normalizeMessage('claude', transformedMessage, sid);
+      const normalized = claudeSessionsProvider.normalizeMessage(transformedMessage, sid);
       for (const msg of normalized) {
         // Preserve parentToolUseId from SDK wrapper for subagent tool grouping
         if (transformedMessage.parentToolUseId && !msg.parentToolUseId) {
@@ -856,7 +862,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
     }
 
     // Check if Claude CLI is installed for a clearer error message
-    const installed = await providerAuthService.isProviderInstalled('claude');
+    const installed = await isProviderInstalled(claudeAuthProvider);
     const errorContent = !installed
       ? 'Claude Code is not installed. Please install it first: https://docs.anthropic.com/en/docs/claude-code'
       : error.message;
