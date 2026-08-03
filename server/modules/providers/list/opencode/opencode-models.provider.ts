@@ -439,21 +439,70 @@ const runOpenCodeModelsCommand = (): Promise<string> => new Promise((resolve, re
   });
 });
 
+// Mirrors PROVIDER_MODELS_CACHE_TTL_MS (3 days) in
+// server/modules/providers/services/provider-models.service.ts. Copied here
+// (not imported) so this file — under providers/list/** — never creates a
+// services/** edge; see Phase 6 Task 1 (Rule A). getSupportedModels() spawns
+// the real `opencode models --verbose` CLI, so without this cache every chat
+// turn would re-spawn it (up to OPEN_CODE_MODELS_TIMEOUT_MS each time).
+const OPEN_CODE_MODELS_CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
+
+type OpenCodeProviderModelsDependencies = {
+  /** Injectable for tests: swaps out the real `opencode models --verbose` spawn. */
+  runModelsCommand?: () => Promise<string>;
+  now?: () => number;
+};
+
 export class OpenCodeProviderModels implements IProviderModels {
+  private readonly runModelsCommand: () => Promise<string>;
+  private readonly now: () => number;
+  private cachedModelsPromise: Promise<ProviderModelsDefinition> | null = null;
+  private cachedModelsExpiresAt = 0;
+
+  constructor(dependencies: OpenCodeProviderModelsDependencies = {}) {
+    this.runModelsCommand = dependencies.runModelsCommand ?? runOpenCodeModelsCommand;
+    this.now = dependencies.now ?? (() => Date.now());
+  }
+
+  private async loadSupportedModels(): Promise<ProviderModelsDefinition> {
+    const stdout = await this.runModelsCommand();
+    const verboseModels = parseOpenCodeVerboseModelsStdout(stdout);
+    if (verboseModels.length > 0) {
+      return buildOpenCodeDefinitionFromVerboseModels(verboseModels);
+    }
+
+    const ids = parseOpenCodeModelsStdout(stdout);
+    if (ids.length === 0) {
+      return OPENCODE_FALLBACK_MODELS;
+    }
+
+    return buildOpenCodeDefinitionFromIds(ids);
+  }
+
   async getSupportedModels(): Promise<ProviderModelsDefinition> {
+    let request: Promise<ProviderModelsDefinition>;
+
+    if (this.cachedModelsPromise !== null && this.cachedModelsExpiresAt > this.now()) {
+      // Cache hit, or an in-flight spawn a concurrent caller already started —
+      // reuse it instead of spawning a second `opencode models` process.
+      request = this.cachedModelsPromise;
+    } else {
+      request = this.loadSupportedModels();
+      this.cachedModelsPromise = request;
+      this.cachedModelsExpiresAt = this.now() + OPEN_CODE_MODELS_CACHE_TTL_MS;
+
+      request.catch(() => {
+        // Clear on rejection so a failed spawn can retry on the next call
+        // instead of being stuck returning a cached failure for the full TTL.
+        if (this.cachedModelsPromise === request) {
+          this.cachedModelsPromise = null;
+          this.cachedModelsExpiresAt = 0;
+        }
+      });
+    }
+
     try {
-      const stdout = await runOpenCodeModelsCommand();
-      const verboseModels = parseOpenCodeVerboseModelsStdout(stdout);
-      if (verboseModels.length > 0) {
-        return buildOpenCodeDefinitionFromVerboseModels(verboseModels);
-      }
-
-      const ids = parseOpenCodeModelsStdout(stdout);
-      if (ids.length === 0) {
-        return OPENCODE_FALLBACK_MODELS;
-      }
-
-      return buildOpenCodeDefinitionFromIds(ids);
+      return await request;
     } catch {
       return OPENCODE_FALLBACK_MODELS;
     }

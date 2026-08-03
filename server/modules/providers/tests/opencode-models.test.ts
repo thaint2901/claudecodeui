@@ -6,6 +6,8 @@ import {
   buildOpenCodeDefinitionFromIds,
   parseOpenCodeModelsStdout,
   parseOpenCodeVerboseModelsStdout,
+  OpenCodeProviderModels,
+  OPENCODE_FALLBACK_MODELS,
 } from '@/modules/providers/list/opencode/opencode-models.provider.js';
 
 test('OpenCode models provider parses plain CLI output and removes duplicates', () => {
@@ -139,4 +141,94 @@ google/model-alpha
       },
     },
   ]);
+});
+
+const VERBOSE_STDOUT_ONE_MODEL = `
+anthropic/claude-sonnet-5
+{
+  "id": "claude-sonnet-5",
+  "providerID": "anthropic",
+  "name": "Claude Sonnet 5"
+}
+`;
+
+test('OpenCodeProviderModels caches getSupportedModels for the TTL: two calls within it invoke the command runner once', async () => {
+  let invocationCount = 0;
+  let now = 1_000;
+  const models = new OpenCodeProviderModels({
+    runModelsCommand: async () => {
+      invocationCount += 1;
+      return VERBOSE_STDOUT_ONE_MODEL;
+    },
+    now: () => now,
+  });
+
+  const first = await models.getSupportedModels();
+  now += 60_000; // well within the 3-day TTL
+  const second = await models.getSupportedModels();
+
+  assert.equal(invocationCount, 1);
+  assert.deepEqual(first, second);
+  assert.deepEqual(first.OPTIONS.map((option) => option.value), ['anthropic/claude-sonnet-5']);
+});
+
+test('OpenCodeProviderModels re-invokes the command runner once the TTL has elapsed', async () => {
+  let invocationCount = 0;
+  let now = 1_000;
+  const models = new OpenCodeProviderModels({
+    runModelsCommand: async () => {
+      invocationCount += 1;
+      return VERBOSE_STDOUT_ONE_MODEL;
+    },
+    now: () => now,
+  });
+
+  await models.getSupportedModels();
+  now += 3 * 24 * 60 * 60 * 1000 + 1; // just past the 3-day TTL
+  await models.getSupportedModels();
+
+  assert.equal(invocationCount, 2);
+});
+
+test('OpenCodeProviderModels dedupes concurrent calls during an in-flight spawn into a single command invocation', async () => {
+  let invocationCount = 0;
+  let resolveSpawn: (stdout: string) => void = () => {};
+  const models = new OpenCodeProviderModels({
+    runModelsCommand: () => {
+      invocationCount += 1;
+      return new Promise((resolve) => {
+        resolveSpawn = resolve;
+      });
+    },
+    now: () => Date.now(),
+  });
+
+  const firstCall = models.getSupportedModels();
+  const secondCall = models.getSupportedModels();
+  resolveSpawn(VERBOSE_STDOUT_ONE_MODEL);
+  const [first, second] = await Promise.all([firstCall, secondCall]);
+
+  assert.equal(invocationCount, 1);
+  assert.deepEqual(first, second);
+});
+
+test('OpenCodeProviderModels clears the cache on a failed spawn so the next call retries', async () => {
+  let invocationCount = 0;
+  const models = new OpenCodeProviderModels({
+    runModelsCommand: async () => {
+      invocationCount += 1;
+      if (invocationCount === 1) {
+        throw new Error('opencode models timed out');
+      }
+      return VERBOSE_STDOUT_ONE_MODEL;
+    },
+    now: () => Date.now(),
+  });
+
+  const failedResult = await models.getSupportedModels();
+  const retriedResult = await models.getSupportedModels();
+
+  assert.equal(invocationCount, 2);
+  assert.deepEqual(failedResult, OPENCODE_FALLBACK_MODELS);
+  assert.deepEqual(retriedResult.OPTIONS.map((option) => option.value), ['anthropic/claude-sonnet-5']);
 });
