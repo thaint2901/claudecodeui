@@ -3,6 +3,7 @@ import path from 'path';
 
 import express from 'express';
 import mime from 'mime-types';
+import type { RequestHandler, Router } from 'express';
 
 import { projectsDb } from '@/modules/database/index.js';
 import { WORKSPACES_ROOT, validateWorkspacePath } from '@/shared/utils.js';
@@ -15,19 +16,19 @@ import {
     validatePathInProject,
 } from './files.service.js';
 
-export function createFilesRouter(authenticateToken) {
+export function createFilesRouter(authenticateToken: RequestHandler): Router {
     const router = express.Router();
 
     // Browse filesystem endpoint for project suggestions - uses existing getFileTree
     router.get('/browse-filesystem', authenticateToken, async (req, res) => {
         try {
-            const { path: dirPath } = req.query;
+            const { path: dirPath } = req.query as { path?: string };
 
             console.log('[API] Browse filesystem request for path:', dirPath);
             console.log('[API] WORKSPACES_ROOT is:', WORKSPACES_ROOT);
             // Default to home directory if no path provided
             const defaultRoot = WORKSPACES_ROOT;
-            let targetPath = dirPath ? expandWorkspacePath(dirPath) : defaultRoot;
+            let targetPath = dirPath ? expandWorkspacePath(dirPath)! : defaultRoot;
 
             // Resolve and normalize the path
             targetPath = path.resolve(targetPath);
@@ -105,7 +106,7 @@ export function createFilesRouter(authenticateToken) {
             if (!folderPath) {
                 return res.status(400).json({ error: 'Path is required' });
             }
-            const expandedPath = expandWorkspacePath(folderPath);
+            const expandedPath = expandWorkspacePath(folderPath)!;
             const resolvedInput = path.resolve(expandedPath);
             const validation = await validateWorkspacePath(resolvedInput);
             if (!validation.valid) {
@@ -128,7 +129,7 @@ export function createFilesRouter(authenticateToken) {
                 await fs.promises.mkdir(targetPath, { recursive: false });
                 res.json({ success: true, path: targetPath });
             } catch (mkdirError) {
-                if (mkdirError.code === 'EEXIST') {
+                if ((mkdirError as NodeJS.ErrnoException).code === 'EEXIST') {
                     return res.status(409).json({ error: 'Folder already exists' });
                 }
                 throw mkdirError;
@@ -142,8 +143,8 @@ export function createFilesRouter(authenticateToken) {
     // Read file content endpoint
     router.get('/projects/:projectId/file', authenticateToken, async (req, res) => {
         try {
-            const { projectId } = req.params;
-            const { filePath } = req.query;
+            const { projectId } = req.params as { projectId: string };
+            const { filePath } = req.query as { filePath?: string };
 
 
             // Security: ensure the requested path is inside the project root
@@ -171,12 +172,13 @@ export function createFilesRouter(authenticateToken) {
             res.json({ content, path: resolved });
         } catch (error) {
             console.error('Error reading file:', error);
-            if (error.code === 'ENOENT') {
+            const readError = error as NodeJS.ErrnoException;
+            if (readError.code === 'ENOENT') {
                 res.status(404).json({ error: 'File not found' });
-            } else if (error.code === 'EACCES') {
+            } else if (readError.code === 'EACCES') {
                 res.status(403).json({ error: 'Permission denied' });
             } else {
-                res.status(500).json({ error: error.message });
+                res.status(500).json({ error: readError.message });
             }
         }
     });
@@ -184,8 +186,8 @@ export function createFilesRouter(authenticateToken) {
     // Serve raw file bytes for previews and downloads.
     router.get('/projects/:projectId/files/content', authenticateToken, async (req, res) => {
         try {
-            const { projectId } = req.params;
-            const { path: filePath } = req.query;
+            const { projectId } = req.params as { projectId: string };
+            const { path: filePath } = req.query as { path?: string };
 
 
             // Security: ensure the requested path is inside the project root
@@ -234,7 +236,7 @@ export function createFilesRouter(authenticateToken) {
         } catch (error) {
             console.error('Error serving binary file:', error);
             if (!res.headersSent) {
-                res.status(500).json({ error: error.message });
+                res.status(500).json({ error: (error as Error).message });
             }
         }
     });
@@ -242,7 +244,7 @@ export function createFilesRouter(authenticateToken) {
     // Save file content endpoint
     router.put('/projects/:projectId/file', authenticateToken, async (req, res) => {
         try {
-            const { projectId } = req.params;
+            const { projectId } = req.params as { projectId: string };
             const { filePath, content } = req.body;
 
 
@@ -280,12 +282,13 @@ export function createFilesRouter(authenticateToken) {
             });
         } catch (error) {
             console.error('Error saving file:', error);
-            if (error.code === 'ENOENT') {
+            const saveError = error as NodeJS.ErrnoException;
+            if (saveError.code === 'ENOENT') {
                 res.status(404).json({ error: 'File or directory not found' });
-            } else if (error.code === 'EACCES') {
+            } else if (saveError.code === 'EACCES') {
                 res.status(403).json({ error: 'Permission denied' });
             } else {
-                res.status(500).json({ error: error.message });
+                res.status(500).json({ error: saveError.message });
             }
         }
     });
@@ -297,7 +300,8 @@ export function createFilesRouter(authenticateToken) {
 
             // Resolve the project's absolute path through the DB (projectId is the
             // primary key of the `projects` table after the identifier migration).
-            const actualPath = await projectsDb.getProjectPathById(req.params.projectId);
+            const { projectId } = req.params as { projectId: string };
+            const actualPath = await projectsDb.getProjectPathById(projectId);
             if (!actualPath) {
                 return res.status(404).json({ error: 'Project not found' });
             }
@@ -312,15 +316,16 @@ export function createFilesRouter(authenticateToken) {
             const files = await getFileTree(actualPath, 10, 0, true);
             res.json(files);
         } catch (error) {
-            console.error('[ERROR] File tree error:', error.message);
-            res.status(500).json({ error: error.message });
+            const treeError = error as Error;
+            console.error('[ERROR] File tree error:', treeError.message);
+            res.status(500).json({ error: treeError.message });
         }
     });
 
     // POST /api/projects/:projectId/files/create - Create new file or directory
     router.post('/projects/:projectId/files/create', authenticateToken, async (req, res) => {
         try {
-            const { projectId } = req.params;
+            const { projectId } = req.params as { projectId: string };
             const { path: parentPath, type, name } = req.body;
 
             // Validate input
@@ -384,12 +389,13 @@ export function createFilesRouter(authenticateToken) {
             });
         } catch (error) {
             console.error('Error creating file/directory:', error);
-            if (error.code === 'EACCES') {
+            const createError = error as NodeJS.ErrnoException;
+            if (createError.code === 'EACCES') {
                 res.status(403).json({ error: 'Permission denied' });
-            } else if (error.code === 'ENOENT') {
+            } else if (createError.code === 'ENOENT') {
                 res.status(404).json({ error: 'Parent directory not found' });
             } else {
-                res.status(500).json({ error: error.message });
+                res.status(500).json({ error: createError.message });
             }
         }
     });
@@ -397,7 +403,7 @@ export function createFilesRouter(authenticateToken) {
     // PUT /api/projects/:projectId/files/rename - Rename file or directory
     router.put('/projects/:projectId/files/rename', authenticateToken, async (req, res) => {
         try {
-            const { projectId } = req.params;
+            const { projectId } = req.params as { projectId: string };
             const { oldPath, newName } = req.body;
 
             // Validate input
@@ -459,14 +465,15 @@ export function createFilesRouter(authenticateToken) {
             });
         } catch (error) {
             console.error('Error renaming file/directory:', error);
-            if (error.code === 'EACCES') {
+            const renameError = error as NodeJS.ErrnoException;
+            if (renameError.code === 'EACCES') {
                 res.status(403).json({ error: 'Permission denied' });
-            } else if (error.code === 'ENOENT') {
+            } else if (renameError.code === 'ENOENT') {
                 res.status(404).json({ error: 'File or directory not found' });
-            } else if (error.code === 'EXDEV') {
+            } else if (renameError.code === 'EXDEV') {
                 res.status(400).json({ error: 'Cannot move across different filesystems' });
             } else {
-                res.status(500).json({ error: error.message });
+                res.status(500).json({ error: renameError.message });
             }
         }
     });
@@ -474,7 +481,7 @@ export function createFilesRouter(authenticateToken) {
     // DELETE /api/projects/:projectId/files - Delete file or directory
     router.delete('/projects/:projectId/files', authenticateToken, async (req, res) => {
         try {
-            const { projectId } = req.params;
+            const { projectId } = req.params as { projectId: string };
             const { path: targetPath, type } = req.body;
 
             // Validate input
@@ -524,14 +531,15 @@ export function createFilesRouter(authenticateToken) {
             });
         } catch (error) {
             console.error('Error deleting file/directory:', error);
-            if (error.code === 'EACCES') {
+            const deleteError = error as NodeJS.ErrnoException;
+            if (deleteError.code === 'EACCES') {
                 res.status(403).json({ error: 'Permission denied' });
-            } else if (error.code === 'ENOENT') {
+            } else if (deleteError.code === 'ENOENT') {
                 res.status(404).json({ error: 'File or directory not found' });
-            } else if (error.code === 'ENOTEMPTY') {
+            } else if (deleteError.code === 'ENOTEMPTY') {
                 res.status(400).json({ error: 'Directory is not empty' });
             } else {
-                res.status(500).json({ error: error.message });
+                res.status(500).json({ error: deleteError.message });
             }
         }
     });
