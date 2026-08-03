@@ -17,8 +17,8 @@ Extract the file API into `server/modules/files/` (`index.ts`, `files.routes.ts`
 The work ran as three gated stages:
 
 - **Stage A** (`cd7350c`) — pure mechanical move to `.js`: 10 routes + helpers relocated verbatim, `/api` prefix stripped, `app.` → `router.`, zero behavior change (module-load probe + full `npm test` green before/after).
-- **Stage B** (`eb0a3bc`, fix `9b87ab5`) — 19 endpoint tests added against the moved `.js`, establishing the first-ever coverage on this code: `files.routes` 74.72% line, `files.service` 79.95% line.
-- **Stage C** (`37ab854`) — converted all three files to TypeScript, with **zero `@ts-expect-error`** anywhere in the module.
+- **Stage B** (`eb0a3bc`, fix `9b87ab5`) — 19 endpoint tests added against the moved `.js`, establishing the first-ever coverage on this code: `files.routes.js` 74.72% line, `files.service.js` 79.95% line (**pre-conversion measurement, not the shipped module's coverage** — see Stage C).
+- **Stage C** (`37ab854`) — converted all three files to TypeScript, with **zero `@ts-expect-error`** anywhere in the module. Coverage on the shipped `.ts` module (`npm run test:coverage`, re-measured 2026-08-03): `files.routes.ts` **86.00%** line, `files.service.ts` **92.57%** line — the same 19 tests, run against the converted module; both figures are higher than the Stage-B `.js` numbers above, which are reported here only as a point-in-time historical measurement, not the shipped state.
 
 TS conversion was done **in-phase** (user decision, 2026-08-03), rather than deferred to a later phase the way ADR-0003 deferred it for the provider CLI/SDK files. This is safe here specifically because Stage B built the behavior-net *first*: ADR-0003's alternative (c) rejected same-task move+convert for the provider files because they carried 0–35.8% pre-existing coverage and a rewrite-and-retype would have compounded move risk with behavior risk on uncovered code. The files module has the opposite risk profile going into Stage C — the endpoint tests from Stage B exist precisely to catch a semantic slip during the type conversion, closing the gap ADR-0003 said was missing.
 
@@ -43,7 +43,7 @@ Rejected: doesn't address the actual problem (an unclassified, untested 900-LOC 
 
 **Positive:**
 - `server/index.js`: 1,657 → 766 LOC; bootstrap responsibilities (env, DB, sessions watcher, ws server, route mounting) are no longer entangled with file-API business logic.
-- First-ever coverage on this code: `files.routes` 74.72% line, `files.service` 79.95% line (19 endpoint tests), up from 0%.
+- First-ever coverage on this code: `files.routes.ts` 86.00% line, `files.service.ts` 92.57% line (19 endpoint tests, measured on the shipped TS module), up from 0%.
 - The file API is now inside `boundaries/elements` — cross-module imports must go through `modules/files/index.ts`, same enforcement every other `server/modules/*` folder gets.
 - Stage C shipped with zero `@ts-expect-error` — no type debt inherited into the new module.
 
