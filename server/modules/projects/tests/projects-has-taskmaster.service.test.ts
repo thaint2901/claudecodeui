@@ -5,7 +5,7 @@ import {
   getProjectTaskMaster,
   getProjectTaskMasterById,
 } from '@/modules/projects/services/projects-has-taskmaster.service.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 
 test('getProjectTaskMasterById returns null when project path is missing', async () => {
   const result = await getProjectTaskMasterById('project-1', {

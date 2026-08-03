@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import { getConnection } from '@/modules/database/connection.js';
 import type { CreateProjectPathResult, ProjectRepositoryRow } from '@/shared/types.js';
-import { normalizeProjectPath } from '@/shared/utils.js';
+import { normalizeProjectPath } from '@/shared/workspace-paths.js';
 
 function normalizeProjectDisplayName(projectPath: string, customProjectName: string | null): string {
     const trimmedCustomName = typeof customProjectName === 'string' ? customProjectName.trim() : '';

@@ -6,7 +6,11 @@ import { CursorProviderAuth } from '@/modules/providers/list/cursor/cursor-auth.
 import { CursorSessionsProvider } from '@/modules/providers/list/cursor/cursor-sessions.provider.js';
 import { isProviderInstalled } from '@/modules/providers/shared/is-provider-installed.js';
 import { resolveResumeModel } from '@/modules/providers/shared/resolve-resume-model.js';
-import { createCompleteMessage, createNormalizedMessage, flattenPromptForWindowsShell } from '@/shared/utils.js';
+import { flattenPromptForWindowsShell } from '@/modules/providers/shared/windows-shell.js';
+import {
+  createCompleteMessage,
+  createNormalizedMessage,
+} from '@/shared/messages.js';
 
 const cursorAuthProvider = new CursorProviderAuth();
 const cursorSessionsProvider = new CursorSessionsProvider();

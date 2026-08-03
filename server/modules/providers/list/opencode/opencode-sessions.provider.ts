@@ -5,15 +5,17 @@ import Database from 'better-sqlite3';
 import { parseImagesInputTag } from '@/shared/image-attachments.js';
 import type { IProviderSessions } from '@/shared/interfaces.js';
 import type { AnyRecord, FetchHistoryOptions, FetchHistoryResult, NormalizedMessage } from '@/shared/types.js';
+import { normalizeProviderTimestamp } from '@/modules/providers/shared/session-scan.js';
+import {
+  readJsonRecord,
+  readObjectRecord,
+  readOptionalString,
+} from '@/shared/json.js';
 import {
   createNormalizedMessage,
   generateMessageId,
-  normalizeProviderTimestamp,
-  readObjectRecord,
-  readJsonRecord,
-  readOptionalString,
   sliceTailPage,
-} from '@/shared/utils.js';
+} from '@/shared/messages.js';
 
 import { getOpenCodeDatabasePath, unwrapJsonStringLiteral } from './opencode-paths.js';
 

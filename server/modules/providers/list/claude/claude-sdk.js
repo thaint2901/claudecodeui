@@ -31,7 +31,10 @@ import { ClaudeProviderAuth } from '@/modules/providers/list/claude/claude-auth.
 import { ClaudeSessionsProvider } from '@/modules/providers/list/claude/claude-sessions.provider.js';
 import { isProviderInstalled } from '@/modules/providers/shared/is-provider-installed.js';
 import { resolveResumeModel } from '@/modules/providers/shared/resolve-resume-model.js';
-import { createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
+import {
+  createCompleteMessage,
+  createNormalizedMessage,
+} from '@/shared/messages.js';
 
 const claudeAuthProvider = new ClaudeProviderAuth();
 const claudeSessionsProvider = new ClaudeSessionsProvider();

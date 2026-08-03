@@ -6,7 +6,10 @@ import mime from 'mime-types';
 import type { RequestHandler, Router } from 'express';
 
 import { projectsDb } from '@/modules/database/index.js';
-import { WORKSPACES_ROOT, validateWorkspacePath } from '@/shared/utils.js';
+import {
+  WORKSPACES_ROOT,
+  validateWorkspacePath,
+} from '@/shared/workspace-paths.js';
 
 import {
     expandWorkspacePath,

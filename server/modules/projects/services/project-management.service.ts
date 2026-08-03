@@ -7,7 +7,11 @@ import type {
   ProjectRepositoryRow,
   WorkspacePathValidationResult,
 } from '@/shared/types.js';
-import { AppError, normalizeProjectPath, validateWorkspacePath } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
+import {
+  normalizeProjectPath,
+  validateWorkspacePath,
+} from '@/shared/workspace-paths.js';
 
 type CreateProjectInput = {
   projectPath: string;

@@ -5,7 +5,7 @@ import path from 'node:path';
 import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
-import { parseIncomingJsonObject } from '@/shared/utils.js';
+import { parseIncomingJsonObject } from '@/shared/json.js';
 import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 
 export type ShellIncomingMessage = {

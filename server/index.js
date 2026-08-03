@@ -14,7 +14,7 @@ import cors from 'cors';
 import compression from 'compression';
 import Database from 'better-sqlite3';
 
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 import {
     closeSessionLockWatcher,
     closeSessionsWatcher,

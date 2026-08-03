@@ -13,7 +13,7 @@ import type {
   ProviderModelsResult,
   ProviderSessionActiveModelChange,
 } from '@/shared/types.js';
-import { readProviderSessionActiveModelChange } from '@/shared/utils.js';
+import { readProviderSessionActiveModelChange } from '@/modules/providers/shared/active-model-store.js';
 
 export const PROVIDER_MODELS_CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 const PROVIDER_MODELS_CACHE_VERSION = 2;

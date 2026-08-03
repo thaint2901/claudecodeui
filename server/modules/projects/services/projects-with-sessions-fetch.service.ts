@@ -3,7 +3,7 @@ import path from 'node:path';
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { broadcast } from '@/modules/events/index.js';
 import { sessionSynchronizerService } from '@/modules/providers/index.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 import { generateDisplayName } from '@/shared/workspace-paths.js';
 
 export { generateDisplayName } from '@/shared/workspace-paths.js';

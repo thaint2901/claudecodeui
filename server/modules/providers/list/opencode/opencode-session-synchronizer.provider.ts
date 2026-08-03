@@ -8,9 +8,11 @@ import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
 import {
   normalizeProviderTimestamp,
   normalizeSessionName,
+} from '@/modules/providers/shared/session-scan.js';
+import {
   readJsonRecord,
   readOptionalString,
-} from '@/shared/utils.js';
+} from '@/shared/json.js';
 
 import { getOpenCodeDatabasePath, unwrapJsonStringLiteral } from './opencode-paths.js';
 

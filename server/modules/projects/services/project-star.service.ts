@@ -1,5 +1,5 @@
 import { projectsDb } from '@/modules/database/index.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 
 type ToggleProjectStarResult = {
   isStarred: boolean;

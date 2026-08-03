@@ -12,7 +12,7 @@ import type {
   NormalizedMessage,
   ProviderSessionId,
 } from '@/shared/types.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 
 type CreateAppSessionResult = {
   sessionId: string;

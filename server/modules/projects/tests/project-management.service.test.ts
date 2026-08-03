@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createProject } from '@/modules/projects/services/project-management.service.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 
 const projectRow = {
   project_id: 'project-1',

@@ -15,7 +15,7 @@ import type {
 import {
   buildDefaultProviderCurrentActiveModel,
   writeProviderSessionActiveModelChange,
-} from '@/shared/utils.js';
+} from '@/modules/providers/shared/active-model-store.js';
 
 import { sanitizeLeafDirectoryName } from './cursor-paths.js';
 

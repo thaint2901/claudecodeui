@@ -6,7 +6,7 @@ import type { ProviderSkillSource } from '@/shared/types.js';
 import {
   addUniqueProviderSkillSource,
   findTopmostGitRoot,
-} from '@/shared/utils.js';
+} from '@/modules/providers/shared/skill-files.js';
 
 const OPENCODE_PROJECT_SKILL_DIRS = [
   ['.opencode', 'skills'],

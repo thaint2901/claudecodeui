@@ -20,7 +20,11 @@ import type {
   ProviderSkillCreateInput,
   UpsertProviderMcpServerInput,
 } from '@/shared/types.js';
-import { AppError, asyncHandler, createApiSuccessResponse } from '@/shared/utils.js';
+import {
+  AppError,
+  asyncHandler,
+  createApiSuccessResponse,
+} from '@/shared/http.js';
 
 const router = express.Router();
 

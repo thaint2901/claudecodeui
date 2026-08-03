@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import { startCloneProject } from '@/modules/projects/services/project-clone.service.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 
 type TestDependencies = Parameters<typeof startCloneProject>[2];
 

@@ -5,12 +5,12 @@ import path from 'node:path';
 import { parseImagesInputTag } from '@/shared/image-attachments.js';
 import type { IProviderSessions } from '@/shared/interfaces.js';
 import type { AnyRecord, FetchHistoryOptions, FetchHistoryResult, NormalizedMessage } from '@/shared/types.js';
+import { readObjectRecord } from '@/shared/json.js';
 import {
   createNormalizedMessage,
   generateMessageId,
-  readObjectRecord,
   sliceTailPage,
-} from '@/shared/utils.js';
+} from '@/shared/messages.js';
 
 import { sanitizeLeafDirectoryName } from './cursor-paths.js';
 

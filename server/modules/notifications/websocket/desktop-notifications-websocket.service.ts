@@ -5,7 +5,7 @@ import {
   unregisterDesktopNotificationClient,
 } from '@/modules/notifications/services/desktop-notification-clients.service.js';
 import type { AuthenticatedWebSocketRequest } from '@/shared/types.js';
-import { parseIncomingJsonObject } from '@/shared/utils.js';
+import { parseIncomingJsonObject } from '@/shared/json.js';
 
 type DesktopNotificationRegisterMessage = {
   type?: unknown;

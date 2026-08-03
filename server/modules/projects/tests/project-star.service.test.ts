@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { projectsDb } from '@/modules/database/index.js';
 import { applyLegacyStarredProjectIds, toggleProjectStar } from '@/modules/projects/services/project-star.service.js';
-import { AppError } from '@/shared/utils.js';
+import { AppError } from '@/shared/http.js';
 
 type ProjectRow = {
   project_id: string;

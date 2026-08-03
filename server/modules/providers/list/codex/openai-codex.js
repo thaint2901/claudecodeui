@@ -20,7 +20,10 @@ import { CodexProviderModels } from '@/modules/providers/list/codex/codex-models
 import { CodexSessionsProvider } from '@/modules/providers/list/codex/codex-sessions.provider.js';
 import { isProviderInstalled } from '@/modules/providers/shared/is-provider-installed.js';
 import { resolveResumeModel } from '@/modules/providers/shared/resolve-resume-model.js';
-import { createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
+import {
+  createCompleteMessage,
+  createNormalizedMessage,
+} from '@/shared/messages.js';
 
 const codexAuthProvider = new CodexProviderAuth();
 const codexModelsProvider = new CodexProviderModels();

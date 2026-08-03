@@ -8,11 +8,12 @@ import crypto from 'crypto';
 
 import { Octokit } from '@octokit/rest';
 
+import { normalizeProjectPath } from '@/shared/workspace-paths.js';
+
 import { userDb, apiKeysDb, githubTokensDb, projectsDb, sessionsDb } from '../modules/database/index.js';
 import { providerRegistry } from '../modules/providers/index.js';
 import { providerModelsService } from '../modules/providers/services/provider-models.service.js';
 import { IS_PLATFORM } from '../constants/config.js';
-import { normalizeProjectPath } from '../shared/utils.js';
 import { resolveClaudeCodeExecutablePath } from '../shared/claude-cli-path.js';
 
 const router = express.Router();
