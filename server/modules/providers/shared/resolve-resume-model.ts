@@ -1,5 +1,6 @@
 import type { LLMProvider } from '@/shared/types.js';
-import { readProviderSessionActiveModelChange } from '@/shared/utils.js';
+
+import { readProviderSessionActiveModelChange } from './active-model-store.js';
 
 /**
  * Resolves the model a resumed session should use: a session-scoped active-model

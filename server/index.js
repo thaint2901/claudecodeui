@@ -14,10 +14,11 @@ import cors from 'cors';
 import compression from 'compression';
 import Database from 'better-sqlite3';
 
-import { AppError, getOpenCodeDatabasePath } from '@/shared/utils.js';
+import { AppError } from '@/shared/utils.js';
 import {
     closeSessionLockWatcher,
     closeSessionsWatcher,
+    getOpenCodeDatabasePath,
     initializeSessionsWatcher,
     providerRegistry,
     sessionLockWatcherService,

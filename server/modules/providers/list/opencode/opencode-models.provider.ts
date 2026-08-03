@@ -11,11 +11,12 @@ import type {
 } from '@/shared/types.js';
 import {
   buildDefaultProviderCurrentActiveModel,
-  getOpenCodeDatabasePath,
   readObjectRecord,
   readOptionalString,
   writeProviderSessionActiveModelChange,
 } from '@/shared/utils.js';
+
+import { getOpenCodeDatabasePath } from './opencode-paths.js';
 
 export const OPENCODE_FALLBACK_MODELS: ProviderModelsDefinition = {
   OPTIONS: [

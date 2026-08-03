@@ -8,14 +8,14 @@ import type { AnyRecord, FetchHistoryOptions, FetchHistoryResult, NormalizedMess
 import {
   createNormalizedMessage,
   generateMessageId,
-  getOpenCodeDatabasePath,
   normalizeProviderTimestamp,
   readObjectRecord,
   readJsonRecord,
   readOptionalString,
   sliceTailPage,
-  unwrapJsonStringLiteral,
 } from '@/shared/utils.js';
+
+import { getOpenCodeDatabasePath, unwrapJsonStringLiteral } from './opencode-paths.js';
 
 const PROVIDER = 'opencode';
 

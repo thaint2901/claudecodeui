@@ -6,13 +6,13 @@ import Database from 'better-sqlite3';
 import { sessionsDb } from '@/modules/database/index.js';
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
 import {
-  getOpenCodeDatabasePath,
   normalizeProviderTimestamp,
   normalizeSessionName,
   readJsonRecord,
   readOptionalString,
-  unwrapJsonStringLiteral,
 } from '@/shared/utils.js';
+
+import { getOpenCodeDatabasePath, unwrapJsonStringLiteral } from './opencode-paths.js';
 
 type OpenCodeSessionRow = {
   id: string;

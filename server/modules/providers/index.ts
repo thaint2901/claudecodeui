@@ -17,3 +17,5 @@ export { closeSessionLockWatcher } from './services/session-lock-watcher.service
 export { findForkResumePoint, ForkResumePointError } from './list/claude/claude-fork.provider.js';
 
 export { providerRegistry } from './provider.registry.js';
+
+export { getOpenCodeDatabasePath } from './list/opencode/opencode-paths.js';

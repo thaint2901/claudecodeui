@@ -10,7 +10,9 @@ import { OpenCodeSessionsProvider } from '@/modules/providers/list/opencode/open
 import { isProviderInstalled } from '@/modules/providers/shared/is-provider-installed.js';
 import { resolveResumeModel } from '@/modules/providers/shared/resolve-resume-model.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
-import { createCompleteMessage, createNormalizedMessage, flattenPromptForWindowsShell, getOpenCodeDatabasePath } from '@/shared/utils.js';
+import { createCompleteMessage, createNormalizedMessage, flattenPromptForWindowsShell } from '@/shared/utils.js';
+
+import { getOpenCodeDatabasePath } from './opencode-paths.js';
 
 const opencodeAuthProvider = new OpenCodeProviderAuth();
 const opencodeModelsProvider = new OpenCodeProviderModels();

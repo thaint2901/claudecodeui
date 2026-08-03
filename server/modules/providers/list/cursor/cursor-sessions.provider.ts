@@ -9,9 +9,10 @@ import {
   createNormalizedMessage,
   generateMessageId,
   readObjectRecord,
-  sanitizeLeafDirectoryName,
   sliceTailPage,
 } from '@/shared/utils.js';
+
+import { sanitizeLeafDirectoryName } from './cursor-paths.js';
 
 const PROVIDER = 'cursor';
 
