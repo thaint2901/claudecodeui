@@ -20,7 +20,7 @@ import { promisify } from 'node:util';
 
 import chokidar, { type FSWatcher } from 'chokidar';
 
-import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/index.js';
+import { broadcast } from '@/modules/events/index.js';
 import { resolveClaudeCodeExecutablePath } from '@/shared/claude-cli-path.js';
 
 const execFileAsync = promisify(execFile);
@@ -117,29 +117,16 @@ function broadcastDelta(current: Set<string>): void {
     return;
   }
 
-  const payload = JSON.stringify({
+  broadcast({
     kind: 'session_lock_state_changed',
     locked: newlyLocked,
     unlocked: newlyUnlocked,
     timestamp: new Date().toISOString(),
   });
 
-  let delivered = 0;
-  for (const client of connectedClients.values()) {
-    if (client.readyState === WS_OPEN_STATE) {
-      try {
-        client.send(payload);
-        delivered += 1;
-      } catch (error) {
-        console.warn('[SessionLockWatcher] Failed to deliver lock event:', (error as Error).message);
-      }
-    }
-  }
-
   console.log('[SessionLockWatcher] Broadcast', {
     locked: newlyLocked.length,
     unlocked: newlyUnlocked.length,
-    delivered,
   });
 }
 

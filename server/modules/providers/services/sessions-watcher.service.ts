@@ -5,8 +5,8 @@ import { promises as fsPromises } from 'node:fs';
 import chokidar, { type FSWatcher } from 'chokidar';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { broadcast } from '@/modules/events/index.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
-import { WS_OPEN_STATE, connectedClients } from '@/modules/websocket/index.js';
 import type { LLMProvider } from '@/shared/types.js';
 import { generateDisplayName } from '@/modules/projects/index.js';
 
@@ -131,7 +131,7 @@ function queuePendingWatcherUpdate(
  * project-list refetch when a transcript file changes on disk. Returns `null`
  * when the id cannot be resolved to an indexed session row.
  */
-async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Promise<string | null> {
+async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Promise<Record<string, unknown> | null> {
   const row = sessionsDb.getSessionByProviderSessionId(updatedProviderSessionId)
     ?? sessionsDb.getSessionById(updatedProviderSessionId);
   if (!row || row.isArchived) {
@@ -144,7 +144,7 @@ async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Prom
     ? project.custom_project_name
     : await generateDisplayName(path.basename(projectPath ?? '') || (projectPath ?? ''), projectPath);
 
-  return JSON.stringify({
+  return {
     kind: 'session_upserted',
     sessionId: row.session_id,
     provider: row.provider,
@@ -164,7 +164,7 @@ async function buildSessionUpsertedEvent(updatedProviderSessionId: string): Prom
       }
       : null,
     timestamp: new Date().toISOString(),
-  });
+  };
 }
 
 async function flushPendingWatcherUpdate(): Promise<void> {
@@ -188,7 +188,7 @@ async function flushPendingWatcherUpdate(): Promise<void> {
     // Per-session deltas instead of full project snapshots: an upsert of one
     // session can never clobber unrelated client state, so the frontend needs
     // no "suppress updates while a run is active" protection logic.
-    const events: string[] = [];
+    const events: Array<Record<string, unknown>> = [];
     for (const updatedSessionId of queuedUpdate.updatedSessionIds) {
       const event = await buildSessionUpsertedEvent(updatedSessionId);
       if (event) {
@@ -196,14 +196,8 @@ async function flushPendingWatcherUpdate(): Promise<void> {
       }
     }
 
-    if (events.length > 0) {
-      connectedClients.forEach(client => {
-        if (client.readyState === WS_OPEN_STATE) {
-          for (const event of events) {
-            client.send(event);
-          }
-        }
-      });
+    for (const event of events) {
+      broadcast(event);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

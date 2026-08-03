@@ -2,9 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { broadcast } from '@/modules/events/index.js';
 import { sessionSynchronizerService } from '@/modules/providers/index.js';
-import { WS_OPEN_STATE, connectedClients } from '@/modules/websocket/index.js';
-import type { RealtimeClientConnection } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
 
 type SessionSummary = {
@@ -162,15 +161,9 @@ function readProjectSessionsPageByPath(
 // Broadcast progress to all connected WebSocket clients.
 // Uses the unified `kind` envelope like every other websocket frame.
 function broadcastProgress(progress: ProgressUpdate) {
-  const message = JSON.stringify({
+  broadcast({
     kind: 'loading_progress',
     ...progress,
-  });
-
-  connectedClients.forEach((client: RealtimeClientConnection) => {
-    if (client.readyState === WS_OPEN_STATE) {
-      client.send(message);
-    }
   });
 }
 
