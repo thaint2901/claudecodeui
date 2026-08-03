@@ -158,7 +158,6 @@ export default tseslint.config(
         {
           type: "backend-shared-utils", // shared backend runtime helpers that modules may import directly
           pattern: [
-            "server/shared/utils.{js,ts}", // temporary re-export shim during the phase-6 split; removed when the file dies
             "server/shared/http.{js,ts}",
             "server/shared/workspace-paths.{js,ts}",
             "server/shared/messages.{js,ts}",
