@@ -30,6 +30,16 @@ assert.equal(created.outcome, 'created');
 assert.ok(created.project);
 const projectId = created.project.project_id;
 
+// files.service.js's uploadFilesHandler resolves each relativePaths entry as
+// `path.join(resolvedTargetDir, fileName)`, and `resolvedTargetDir` is
+// `path.resolve(projectDir)` when no targetPath is supplied (test 18/19
+// below never send one). Mirror that exact join so the row-19 traversal test
+// asserts the real on-disk location the malicious vector would land at if
+// validatePathInProject's guard were ever removed, not just "some path under
+// fixturesRoot" (which `../../` does not actually resolve into).
+const maliciousUploadRelativePath = '../../evil-traversal.txt';
+const escapedUploadDestination = path.join(path.resolve(projectDir), maliciousUploadRelativePath);
+
 const app = express();
 // Mirrors server/index.js's express.json config exactly: the `type` guard skips
 // multipart/form-data bodies (so multer, not express.json, parses uploads) and
@@ -52,6 +62,10 @@ const api = (p: string) => `http://127.0.0.1:${port}/api${p}`;
 test.after(async () => {
     server.close();
     await rm(fixturesRoot, { recursive: true, force: true });
+    // Safety net: if the row-19 traversal guard ever regressed, the escaped
+    // file would land outside fixturesRoot (in the repo checkout root) and
+    // the rm() above would never reach it.
+    await rm(escapedUploadDestination, { force: true });
 });
 
 async function getJson(p: string): Promise<{ status: number; body: any }> {
@@ -156,6 +170,10 @@ test('GET /projects/:id/files/content streams raw bytes with a mime-derived Cont
 });
 
 // 9. create file
+// NOTE: tests 9, 12, 13, and 14 intentionally share one file across the
+// default test-runner's sequential execution order (create -> rename ->
+// reject a bad rename -> delete); reordering or parallelizing them would
+// break the chain.
 test('POST /projects/:id/files/create creates a new file on disk', async () => {
     const { status, body } = await sendJson('POST', `/projects/${projectId}/files/create`, {
         path: '',
@@ -292,7 +310,7 @@ test('POST /projects/:id/files/upload drops a file whose relativePaths target es
     // `continue`s) and still responds 200 with an accurate uploadedCount of 0.
     const form = new FormData();
     form.append('files', new Blob(['malicious content'], { type: 'text/plain' }), 'ignored-name.txt');
-    form.append('relativePaths', JSON.stringify(['../../evil-traversal.txt']));
+    form.append('relativePaths', JSON.stringify([maliciousUploadRelativePath]));
 
     const res = await fetch(api(`/projects/${projectId}/files/upload`), { method: 'POST', body: form });
     const body: any = await res.json();
@@ -302,5 +320,9 @@ test('POST /projects/:id/files/upload drops a file whose relativePaths target es
     assert.equal(body.uploadedCount, 0);
     assert.deepEqual(body.files, []);
     assert.equal(body.requestedFileCount, 1);
-    await assert.rejects(() => access(path.join(fixturesRoot, 'evil-traversal.txt')));
+    // Real destination `../../evil-traversal.txt` would land at if the guard
+    // were absent -- see escapedUploadDestination's derivation above. (Asserting
+    // non-existence at `fixturesRoot/evil-traversal.txt` would be a false
+    // guard: that `../../` escape never resolves under fixturesRoot at all.)
+    await assert.rejects(() => access(escapedUploadDestination));
 });
