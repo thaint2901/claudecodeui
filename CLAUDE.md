@@ -59,6 +59,7 @@ server/                # Express + ws backend (mostly ESM JS, migrating to TS)
   modules/              # NEW module-per-feature layout (replacing top-level routes):
     browser-use/          # service + REST + MCP routes
     database/             # better-sqlite3 connection, init-db, migrations, schema, repositories
+    files/                # file-tree browse/CRUD + upload REST routes — createFilesRouter(authenticateToken) DI factory
     projects/             # project CRUD REST routes
     providers/            # CLI provider registry (claude/cursor/codex/opencode) — see provider.registry.ts
                           # runtimes (execution) live per-provider in modules/providers/list/<provider>/
