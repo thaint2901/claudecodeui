@@ -16,7 +16,11 @@ setBroadcastHandler((message) => {
   const payload = JSON.stringify(message);
   for (const client of connectedClients) {
     if (client.readyState === WS_OPEN_STATE) {
-      client.send(payload);
+      try {
+        client.send(payload);
+      } catch (error) {
+        console.warn('[Broadcast] Failed to deliver event:', (error as Error).message);
+      }
     }
   }
 });
