@@ -8,7 +8,7 @@ import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { broadcast } from '@/modules/events/index.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
 import type { LLMProvider } from '@/shared/types.js';
-import { generateDisplayName } from '@/modules/projects/index.js';
+import { generateDisplayName } from '@/shared/workspace-paths.js';
 
 type WatcherEventType = 'add' | 'change';
 

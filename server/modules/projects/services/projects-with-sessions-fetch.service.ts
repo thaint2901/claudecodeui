@@ -1,10 +1,12 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { broadcast } from '@/modules/events/index.js';
 import { sessionSynchronizerService } from '@/modules/providers/index.js';
 import { AppError } from '@/shared/utils.js';
+import { generateDisplayName } from '@/shared/workspace-paths.js';
+
+export { generateDisplayName } from '@/shared/workspace-paths.js';
 
 type SessionSummary = {
   id: string;
@@ -74,37 +76,6 @@ export type ProjectSessionsPageApiView = {
 
 const DEFAULT_PROJECT_SESSIONS_PAGE_SIZE = 20;
 const MAX_PROJECT_SESSIONS_PAGE_SIZE = 200;
-
-/**
- * Generate better display name from path.
- */
-export async function generateDisplayName(projectName: string, actualProjectDir: string | null = null): Promise<string> {
-  // Use actual project directory if provided, otherwise decode from project name.
-  const projectPath = actualProjectDir || projectName.replace(/-/g, '/');
-
-  // Try to read package.json from the project path.
-  try {
-    const packageJsonPath = path.join(projectPath, 'package.json');
-    const packageData = await fs.readFile(packageJsonPath, 'utf8');
-    const packageJson = JSON.parse(packageData) as { name?: string };
-
-    // Return the name from package.json if it exists.
-    if (packageJson.name) {
-      return packageJson.name;
-    }
-  } catch {
-    // Fall back to path-based naming if package.json doesn't exist or can't be read.
-  }
-
-  // If it starts with /, it's an absolute path.
-  if (projectPath.startsWith('/')) {
-    const parts = projectPath.split('/').filter(Boolean);
-    // Return only the last folder name.
-    return parts[parts.length - 1] || projectPath;
-  }
-
-  return projectPath;
-}
 
 function normalizeSessionPagination(options: SessionPaginationOptions = {}): { limit: number; offset: number } {
   const rawLimit = Number.isFinite(options.limit) ? Math.floor(Number(options.limit)) : DEFAULT_PROJECT_SESSIONS_PAGE_SIZE;
