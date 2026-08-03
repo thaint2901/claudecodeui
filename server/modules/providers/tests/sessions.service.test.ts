@@ -31,3 +31,20 @@ test('a later registration replaces the earlier probe', () => {
   setLiveRunProbe({ listRunningRuns: () => [] });
   assert.deepEqual(sessionsService.listRunningSessions(), []);
 });
+
+test('_resetForTest clears an injected probe back to the empty-registry fallback', () => {
+  _resetForTest();
+  setLiveRunProbe({
+    listRunningRuns: () => [
+      { sessionId: 'distinctive-run', provider: 'claude' as LLMProvider, startedAt: 999, lastSeq: 42 },
+    ],
+  });
+  // Sanity check: the probe is actually wired before we reset it.
+  assert.deepEqual(sessionsService.listRunningSessions(), [
+    { sessionId: 'distinctive-run', provider: 'claude' as LLMProvider, startedAt: 999, lastSeq: 42 },
+  ]);
+
+  _resetForTest();
+
+  assert.deepEqual(sessionsService.listRunningSessions(), []);
+});
