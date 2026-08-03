@@ -3,7 +3,6 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
-import { chatRunRegistry } from '@/modules/websocket/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import type {
   FetchHistoryOptions,
@@ -19,6 +18,38 @@ type CreateAppSessionResult = {
   provider: LLMProvider;
   projectPath: string;
 };
+
+/**
+ * Query-only view of `chatRunRegistry.listRunningRuns()` (see
+ * `@/modules/websocket/services/chat-run-registry.service.ts`), injected by
+ * `@/modules/websocket/index.js` at startup so this service never imports
+ * the websocket module directly — that import used to close the last
+ * server-side module dependency cycle.
+ */
+type LiveRunProbe = {
+  listRunningRuns(): Array<{
+    sessionId: string;
+    provider: LLMProvider;
+    startedAt: number;
+    lastSeq: number;
+  }>;
+};
+
+let liveRunProbe: LiveRunProbe | null = null;
+
+/**
+ * Registers the probe backing `listRunningSessions()`. Called once at
+ * startup by `@/modules/websocket/index.js`, right beside its
+ * `setBroadcastHandler` registration.
+ */
+export function setLiveRunProbe(probe: LiveRunProbe): void {
+  liveRunProbe = probe;
+}
+
+/** Test-only: clears the registered probe. */
+export function _resetForTest(): void {
+  liveRunProbe = null;
+}
 
 type ArchivedSessionListItem = {
   sessionId: string;
@@ -98,7 +129,7 @@ export const sessionsService = {
     startedAt: number;
     lastSeq: number;
   }> {
-    return chatRunRegistry.listRunningRuns();
+    return liveRunProbe ? liveRunProbe.listRunningRuns() : [];
   },
 
   /**

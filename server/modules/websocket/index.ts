@@ -1,10 +1,13 @@
 import { setBroadcastHandler } from '@/modules/events/index.js';
+import { setLiveRunProbe } from '@/modules/providers/index.js';
 
 import { WS_OPEN_STATE, connectedClients } from './services/websocket-state.service.js';
+import { chatRunRegistry } from './services/chat-run-registry.service.js';
 
 export { WS_OPEN_STATE, connectedClients } from './services/websocket-state.service.js';
 export { createWebSocketServer } from './services/websocket-server.service.js';
-export { broadcastCanonicalSessionUpsert, chatRunRegistry } from './services/chat-run-registry.service.js';
+export { broadcastCanonicalSessionUpsert } from './services/chat-run-registry.service.js';
+export { chatRunRegistry };
 
 // Registers the one real broadcast handler at module load time. Services
 // publish through `@/modules/events/index.js#broadcast` instead of importing
@@ -23,4 +26,12 @@ setBroadcastHandler((message) => {
       }
     }
   }
+});
+
+// Registers the one real "who is currently running" probe at module load
+// time. sessions.service publishes through this seam instead of importing
+// this module directly, so it never depends on the websocket module (which
+// is what closed the last server-side module dependency cycle).
+setLiveRunProbe({
+  listRunningRuns: () => chatRunRegistry.listRunningRuns(),
 });
