@@ -90,6 +90,11 @@ mock.module('@/modules/providers/index.js', {
     // Omitting it makes the whole module fail to load, not just this call —
     // exactly the trap the comment above warns about.
     findForkResumePoint: async () => ({ resumeSessionAt: null }),
+    // Added when broadcastCanonicalSessionUpsert moved from the websocket
+    // module into the providers barrel (chat-run-registry.service.ts now
+    // imports it from here) — same "whole module fails to load" trap noted
+    // above for findForkResumePoint.
+    broadcastCanonicalSessionUpsert: async () => {},
     sessionsService: {
       createAppSession: () => ({ sessionId: FORKED_APP_SESSION_ID }),
       renameSessionById: async (sessionId: string, summary: string) => {

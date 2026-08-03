@@ -10,7 +10,7 @@ import { providerModelsService } from '@/modules/providers/services/provider-mod
 import { providerSkillsService } from '@/modules/providers/services/skills.service.js';
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
-import { broadcastCanonicalSessionUpsert } from '@/modules/websocket/index.js';
+import { broadcastCanonicalSessionUpsert } from '@/modules/providers/shared/session-broadcast.js';
 import type {
   LLMProvider,
   McpScope,

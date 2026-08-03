@@ -20,6 +20,8 @@ export { providerRegistry } from './provider.registry.js';
 
 export { getOpenCodeDatabasePath } from './list/opencode/opencode-paths.js';
 
+export { broadcastCanonicalSessionUpsert } from './shared/session-broadcast.js';
+
 export { providerModelsService } from './services/provider-models.service.js';
 export { getClaudeBuiltinCommandEntries } from './list/claude/claude-builtin-commands.js';
 export { CURSOR_FALLBACK_MODELS } from './list/cursor/cursor-models.provider.js';
