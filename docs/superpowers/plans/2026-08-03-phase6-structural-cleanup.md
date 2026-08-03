@@ -210,7 +210,7 @@ In the same commit, apply **eslint touch #1** (quote this diff in your report; t
 },
 ```
 (Adjust to the file's ACTUAL current content — read it first; keep existing elements' order, append `cross-tier-shared` after the shared-utils entry. `boundaries/include` stays `server/**` — the root-shared element classifies these files as import TARGETS only.)
-Run madge (server) → **0 cycles** (stays 0 — cycle 9 already died in Task 1; Relocation C remains as ownership cleanup, not a cycle fix). Gates green. Commit: `refactor(shared): split utils.ts leaf domains into http/workspace-paths/messages/json`
+Run madge (server) → **exactly 1 cycle** (amended post-Task-2: Relocation C kills the sessions-watcher→projects survivor here; the one remaining cycle — `providers > sessions.service > websocket > websocket-server > chat-websocket` — dies in Task 7). Gates green. Commit: `refactor(shared): split utils.ts leaf domains into http/workspace-paths/messages/json`
 
 - [ ] **Step 2: Relocate the provider-domain slices, commit 2**
 
@@ -329,6 +329,29 @@ In `routes/agent.js`, temporarily re-add `import { providerModelsService } from 
 - [ ] **Step 5: Full gates + commit**
 
 `npm test`, typecheck, lint, madge (server 0, src 0). Commit: `refactor(lint): extend boundaries enforcement to the legacy tier via barrel-only imports`
+
+### Task 7: Dissolve the sessions.service↔websocket survivor cycle (probe injection)
+
+> Added post-Task-2 (controller amendment): `sessions.service.ts`'s websocket import is a `chatRunRegistry` QUERY (correctly not forced through the events broadcast seam). Executes AFTER Task 3 (so it inherits madge=1) and BEFORE Task 4.
+
+**Files:**
+- Modify: `server/modules/providers/services/sessions.service.ts` (remove the websocket barrel import)
+- Modify: `server/modules/websocket/index.ts` (inject the probe at startup, next to the Task-2 `setBroadcastHandler` registration)
+- Test: extend an existing sessions.service test file (or add a sibling test) proving fallback + injected behavior
+
+**Interfaces:**
+- Consumes: Task 2's precedent (setter-injection seam registered by `websocket/index.ts` at startup).
+- Produces: `setLiveRunProbe(probe)` (exact name may follow what the call site actually queries — e.g. `setChatRunProbe`) exported from the sessions service module; server madge → **0 cycles**.
+
+- [ ] **Step 1: Read the call site** — find every use of the websocket import in `sessions.service.ts` (expected: one or more `chatRunRegistry.<method>(...)` calls). Record what methods and what the semantics are when no run exists (the registry starts empty).
+
+- [ ] **Step 2: Write the failing test** — module-scope probe holder: before injection, the service's behavior must equal the "registry has no live runs" answer for the queried method(s); after `setLiveRunProbe(fake)`, the fake's answer is used. Model the test on the events service tests (reset helper allowed, `_resetForTest` pattern).
+
+- [ ] **Step 3: Implement** — module-level `let liveRunProbe: <QueryShape> | null = null; export function setLiveRunProbe(p){...}`; the former `chatRunRegistry.X(...)` call sites become `liveRunProbe ? liveRunProbe.X(...) : <empty-registry answer>` (the empty-registry answer must be read from `chat-run-registry.service.ts`'s actual no-entry return, quoted in your report). Remove the websocket import. In `websocket/index.ts`, register `setLiveRunProbe(...)` delegating to the real `chatRunRegistry` right beside the Task-2 broadcast registration.
+
+- [ ] **Step 4: Verify** — server madge → **0 cycles**. Suites, typecheck, lint (0/≤247). Registration order: confirm `websocket/index.ts` module init runs at bootstrap before any HTTP/WS handler can invoke sessions.service (same argument as Task 2's handler).
+
+- [ ] **Step 5: Commit** — `refactor(providers): inject the chat-run probe so sessions.service drops its websocket import`
 
 ### Task 6: ADR-0005 + CLAUDE.md true-up
 
