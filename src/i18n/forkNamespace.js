@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Fork-owned i18n namespace registration (CLAUDE.md Fork Maintenance Rule 2;
  * recorded as Decision item 3 in docs/adr/ADR-0001-fork-customization-strategy.md).
