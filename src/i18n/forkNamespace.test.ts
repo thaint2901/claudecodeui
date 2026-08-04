@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const localesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'locales');
 
-const ALL_LOCALES = ['de', 'en', 'fr', 'it', 'ja', 'ko', 'ru', 'tr', 'zh-CN', 'zh-TW'];
+// Derived from disk, not hardcoded: a locale directory arriving from an upstream sync must
+// be covered by the guards below, not silently skipped.
+const ALL_LOCALES = readdirSync(localesDir, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => entry.name)
+  .sort();
 const BRANCH_KEYS = [
   'editTitle', 'editAria', 'previous', 'next', 'editLabel', 'groupAria',
   'announced', 'forkFailed', 'forkFailedRestored', 'switchFailed', 'editBlockedWhileRunning',
@@ -28,6 +33,12 @@ function assertNonEmptyStrings(obj: unknown, trail: string): void {
     assertNonEmptyStrings(v, `${trail}.${k}`);
   }
 }
+
+// Without this, a wrong localesDir would make every loop below iterate nothing and pass.
+test('the discovered locale list is non-trivial', () => {
+  assert.ok(ALL_LOCALES.length >= 10, `expected >=10 locale dirs, found ${ALL_LOCALES.length}`);
+  assert.ok(ALL_LOCALES.includes('en'), 'en is missing from the discovered locales');
+});
 
 test('every locale ships fork.json with the branch and editSentPrompt groups', () => {
   for (const locale of ALL_LOCALES) {
