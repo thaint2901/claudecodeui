@@ -69,3 +69,30 @@ Rejected: the fork's history shows real value from continuing to absorb upstream
 | `MessageKind` definitions | 2 | 1 |
 | `useChatComposerState` Code Health | 4.15 | ≥7 |
 | Legacy-tier line coverage (refactor-touched paths) | 0% | ≥50% |
+
+**Measurement commands (scorecard).** Added 2026-08-04: the table originally shipped with only "Upstream-overlap files" traceable to a command (B above), which left six numbers unverifiable. Each command below is followed by the value it produced when re-run at `d790e77` — the merge commit that recorded this baseline.
+
+```bash
+# Backend dependency cycles → 5
+npx madge --circular --extensions ts,js --ts-config server/tsconfig.json server/
+
+# MessageKind definitions → 2 (src/stores/useSessionStore.ts, server/shared/types.ts)
+grep -rn "type MessageKind =" --include="*.ts" --include="*.tsx" src server shared
+
+# Legacy deep-imports bypassing barrels → 25 (see caveat below)
+grep -rhoE "from '[^']*modules/[a-z-]+/[^']+'" \
+  server/routes server/middleware server/services server/utils server/constants server/*.js server/*.ts \
+  | grep -vE "modules/[a-z-]+/index(\.[jt]s)?'" | wc -l
+
+# Legacy-tier line coverage → read the rows for the refactor-touched paths
+npm run test:coverage
+```
+
+Two metrics resist a one-liner and are measured by enumeration instead:
+
+- **Provider registration points (4):** the sites CLAUDE.md's Editing Checklist requires a new provider to touch — the WS spawn map in `server/index.js`, `server/modules/providers/provider.registry.ts`, the UI logo list under `src/components/llm-logo-provider/`, and the `GET /api/providers/:provider/models` endpoint.
+- **`useChatComposerState` Code Health (4.15):** CodeScene's `code_health_score` on `src/components/chat/hooks/useChatComposerState.ts`. There is no repo-local CLI for this, so the number is reproducible only through CodeScene.
+
+**Caveat — one number no longer reproduces exactly.** The deep-import grep above yields **25**, not the 24 originally recorded. The original formulation was not preserved, so the one-unit gap cannot be attributed to either a code change or a different query. That is precisely the failure this block exists to end: from here on, a scorecard number without its command is not a measurement.
+
+**Why `--ts-config` is load-bearing in the madge command.** `madge` silently skips files whose imports it cannot resolve, and this repo's `@/*` alias makes that 122 server files. Run without the flag, the identical command reports `No circular dependency found!` against a graph that contains the five cycles listed above — verified side by side at `d790e77`. A later refactor phase published a "0 cycles" claim measured that way and had to retract it after re-measuring (recorded in ADR-0005, which lands with the phase-6 branch). Every cycle claim in this repo must use the full invocation.
